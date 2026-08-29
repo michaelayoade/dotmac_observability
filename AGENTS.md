@@ -199,6 +199,28 @@ review discipline, not a guard, and it is a defect to describe it as enforced.
     carries immutable coordinates (Governance ADR 0013).
     — `tests/architecture/test_authorization_is_not_owned_here.py`
 
+21. **A private inventory version is SUPERSEDED, never overwritten.** Writing a
+    new version names the digest of the version it replaces, and the write is
+    refused when that digest is not what the store currently holds. The
+    succession is checked as a whole: same document, same environment, version
+    exactly one higher, and something actually changed.
+
+    Compare-and-set rather than a blind write, because the failure it prevents
+    leaves no trace. Two operators read version 1, each edits it, each writes
+    version 2; the second write wins and the first one's change — a
+    decommissioned product's target removed, say — is back in the environment
+    with nothing anywhere recording that it ever left. The next promotion
+    resolves it and scrapes a host that no longer exists.
+
+    A digest printed after a write does not catch this: it proves the writer
+    can hash what it is holding. Reading the stored bytes back and comparing
+    them against the digest that was meant to be stored is the half that can
+    fail on a partial write, so `inventory-digest --expect` exists and a
+    supersession is not complete without it. The superseded version is
+    RETAINED: it is the evidence for every receipt that names it.
+    — `tests/unit/test_private_inventory_supersede.py`,
+      `dotmac-observability inventory-supersede`
+
 ---
 
 ## The line this repository must not cross

@@ -397,12 +397,21 @@ class PrivateInventory:
     UTF-8, sorted keys, two-space indent, no trailing newline — because a
     reader that adds a trailing newline before hashing reports false drift on a
     correct inventory.
+
+    ``content_digest`` is the same hash over the document with ``version``
+    removed: the identity of the ENVIRONMENT, as against the identity of the
+    record. Two versions sharing a content digest describe the same estate and
+    differ only in their numbering, which is a thing worth being able to say —
+    and worth refusing, when somebody bumps a version having changed nothing.
+    A comparison of full digests cannot detect that at all, because
+    incrementing the version is itself a change to the bytes.
     """
 
     document: str
     version: int
     environment: str
     digest: str
+    content_digest: str
     host: HostBinding
     targets: tuple[TargetBinding, ...]
     federations: tuple[FederationBinding, ...]

@@ -33,6 +33,8 @@ from .validate import (
     scan_for_private_material,
     scan_for_secret_material,
     semantic_findings,
+    supersede_findings,
+    supersede_summary,
 )
 
 __all__ = ["main"]
@@ -92,12 +94,18 @@ def _cmd_validate(root: Path, contracts: Path, private: Path | None) -> int:
     return _report(findings, heading="inventory is inconsistent")
 
 
-def _cmd_inventory_digest(contracts: Path, private: Path) -> int:
+def _cmd_inventory_digest(contracts: Path, private: Path, expect: str | None) -> int:
     """Print a private document's identity, never its contents.
 
-    The whole point of the command: a receipt and an authorization both record
+    The whole point of the command: a receipt and a deployment plan both record
     document, version and digest, and an operator who has to open the file to
     read them off has opened a private document to fill in a public form.
+
+    ``--expect`` turns it from a reporter into a gate, which is what makes a
+    write worth trusting. Writing a document and then printing its digest
+    proves the writer can hash what it just held in memory; reading the stored
+    bytes BACK and comparing them against the digest you meant to store is the
+    only version of that check which can fail on a truncated or partial write.
     """
     try:
         inventory = load_private_inventory(private, contracts=contracts)
@@ -106,6 +114,32 @@ def _cmd_inventory_digest(contracts: Path, private: Path) -> int:
     print(f"document {inventory.document}")
     print(f"version  {inventory.version}")
     print(f"sha256   {inventory.digest}")
+    if expect is not None and inventory.digest != expect:
+        print(
+            f"  digest does not match the expected {expect}; the stored bytes are not "
+            "the document that was meant to be written",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+def _cmd_inventory_supersede(
+    contracts: Path, previous: Path, following: Path, expect_previous: str
+) -> int:
+    """Prove one private document legitimately replaces a NAMED earlier version."""
+    try:
+        before = load_private_inventory(previous, contracts=contracts)
+        after = load_private_inventory(following, contracts=contracts)
+    except InventoryError as error:
+        return _report(error.findings, heading="a private inventory is not loadable")
+
+    findings = supersede_findings(before, after, expect_previous_digest=expect_previous)
+    if findings:
+        return _report(findings, heading="refusing an unsafe supersession")
+    # Logical names and counts only. A reviewer needs to see WHAT moved; the
+    # values it moved to are the material this whole split exists to withhold.
+    print(supersede_summary(before, after).render())
     return 0
 
 
@@ -204,6 +238,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         "inventory-digest", help="print a private document's identity, never its contents"
     )
     digest.add_argument("private_inventory", type=Path)
+    digest.add_argument(
+        "--expect",
+        default=None,
+        help="fail unless the document hashes to this digest; use it to verify a read-back",
+    )
+
+    supersede = commands.add_parser(
+        "inventory-supersede",
+        help="prove one private document legitimately replaces a named earlier version",
+    )
+    supersede.add_argument("--previous", type=Path, required=True)
+    supersede.add_argument("--next", dest="following", type=Path, required=True)
+    supersede.add_argument(
+        "--expect-previous-sha256",
+        required=True,
+        help=(
+            "the digest of the version being replaced. Required, not optional: overwriting "
+            "whatever is stored is a lost update, and naming the version you believe you are "
+            "replacing turns that into a refusal instead of a surprise."
+        ),
+    )
 
     commands.add_parser("secret-scan", help="refuse secret material in tracked files")
     commands.add_parser(
@@ -224,7 +279,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             root, contracts, output, arguments.private_inventory, check=bool(arguments.check)
         )
     if arguments.command == "inventory-digest":
-        return _cmd_inventory_digest(contracts, arguments.private_inventory)
+        return _cmd_inventory_digest(contracts, arguments.private_inventory, arguments.expect)
+    if arguments.command == "inventory-supersede":
+        return _cmd_inventory_supersede(
+            contracts,
+            arguments.previous,
+            arguments.following,
+            arguments.expect_previous_sha256,
+        )
     if arguments.command == "secret-scan":
         return _cmd_secret_scan(root)
     if arguments.command == "private-material-scan":
