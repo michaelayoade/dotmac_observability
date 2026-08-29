@@ -216,7 +216,7 @@ connect anywhere.
 
 The same rule governs the delivery train. PR 2's census is blocked, not
 delayed, because it needs Michael to name the Observer SSH target explicitly.
-PR 5 rehearses on a disposable host, 85.190.246.211, and PR 7's production
+PR 5 rehearses on the dedicated test server, and PR 7's production
 bootstrap is authorized separately from the PR that writes it.
 
 Every promotion also targets an exact protected-`main` SHA reasserted as
