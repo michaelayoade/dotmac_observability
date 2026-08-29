@@ -24,20 +24,21 @@ enforced, and when the count below disagrees with the table. The downward
 direction is the one that matters: a ledger that only ever grows is a backlog,
 while one that must shrink deliberately is a plan.
 
-declared-unmonitored: 10
+declared-unmonitored: 11
 
 | rule | subject | why there is no detector yet | monitored by |
 | --- | --- | --- | --- |
 | 2 | No direct production file editing | Detecting a hand edit means reading the live host and comparing it with the last receipt, and neither the live reader nor the receipt exists yet. | PR 6 |
 | 3 | Promotion targets an exact protected-main SHA | There is no promotion lane to constrain. Asserting the rule against a lane that does not exist would be a check that passes vacuously. | PR 6 |
-| 4 | Bundles are immutable and digest-pinned | The lock contract exists and is schema-enforced; nothing yet FETCHES an artifact, so the digest comparison has no input to run against. | PR 3 |
-| 5 | Product rules stay product-owned | Enforcing this means byte-comparing a fetched bundle against its recorded digest. Same missing input as rule 4. | PR 3 |
-| 6 | No duplicate alert or recording rule names, no incompatible label vocabularies | The check operates over the union of loaded bundles. No bundle is loaded yet. | PR 3 |
-| 8 | Every rule carries owner, severity, summary, runbook and producer proof | Producer proof compares an alert expression against the product's metrics manifest. Neither the manifest fetch nor the expression parser exists yet. | PR 3 |
+| 4 | Bundles are immutable and digest-pinned | The lock contract exists and is schema-enforced; nothing yet FETCHES an artifact, so the digest comparison has no input to run against. | PR 3C |
+| 5 | Product rules stay product-owned | Enforcing this means byte-comparing a fetched bundle against its recorded digest. Same missing input as rule 4. | PR 3C |
+| 6 | No duplicate alert or recording rule names, no incompatible label vocabularies | The check operates over the union of loaded bundles. No bundle is loaded yet. | PR 3C |
+| 8 | Every rule carries owner, severity, summary, runbook and producer proof | Producer proof compares an alert expression against the product's metrics manifest. Neither the manifest fetch nor the expression parser exists yet. | PR 3C |
 | 10 | "Rule inactive" is not recovery evidence | This is a property of the live verifier, which is written against a running evaluator on the disposable host. | PR 5 |
 | 11 | Promotion failure restores the exact preceding release | Requires the staging and activation machinery. | PR 6 |
 | 12 | Desired, live and receipt states are independently comparable | Desired state exists. Live state and receipts do not. | PR 6 |
-| 18 | Public Git carries the logical description; resolved endpoints, ports, host identities and credential bindings stay private | ADR 0004 settles the split, but the contracts that would carry it do not exist yet: there is no `target_id` field to require, no private-inventory schema to digest and no per-target exception block to demand. The inverted `openbao_path` check lands with them. | PR 3 |
+| 18 | Public Git carries the logical description; resolved endpoints, ports, host identities and credential bindings stay private | ADR 0004 settles the split, but the contracts that would carry it do not exist yet: there is no `target_id` field to require, no private-inventory schema to digest and no per-target exception block to demand. The inverted `openbao_path` check lands with them. | PR 3B |
+| 19 | Declared exposure and address family on every published surface | The guard belongs to the reusable contract, which `dotmac-deployment-foundation` owns and has not released yet. Writing a local detector would fork the rule from its owner and produce two answers to the same question. | Foundation adoption |
 
 ## Rules that ARE enforced today
 
