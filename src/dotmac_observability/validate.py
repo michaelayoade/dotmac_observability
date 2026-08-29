@@ -12,6 +12,17 @@ Three layers, deliberately separate:
   are about the relationships BETWEEN documents: does this route's receiver
   exist, is this job name unique across products, does this federation rename
   what it imports.
+* **Resolution** — the questions that need the PRIVATE inventory as well
+  (ADR-0004): does this logical target actually resolve, does a job that claims
+  to authenticate have a credential behind it, can an ``expected`` up-count be
+  met by the endpoints that exist.
+
+The fourth layer is not a fourth kind of check so much as the same semantic
+question asked across the public/private boundary, and it is separate because
+its INPUT is separate: public gates run for any reader of this repository,
+resolution gates need material a public reader does not have. Keeping them
+apart is what lets ``make check`` stay meaningful on a checkout while a
+promotion still refuses an inventory that does not join.
 
 Findings are returned, not raised. A caller that stops at the first problem
 makes an operator re-run the gate once per mistake; the CLI prints all of them
@@ -20,12 +31,15 @@ and exits non-zero once.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import tomllib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
+from types import MappingProxyType
 from typing import TypeAlias, cast
 
 import jsonschema
@@ -35,25 +49,41 @@ from .model import (
     DesiredState,
     Evaluator,
     Federation,
+    FederationBinding,
     FederationSource,
     Host,
+    HostBinding,
     Inhibition,
     Integration,
     Label,
+    PrivateInventory,
+    Publication,
     Receiver,
+    ReceiverBinding,
+    Resolution,
+    ResolvedEndpoint,
+    ResolvedReceiver,
     Route,
     RouteDefaults,
     ScrapeJob,
     SecretFile,
     Smtp,
+    TargetBinding,
     TargetSet,
 )
 
 __all__ = [
+    "PRIVATE_SCAN_EXCLUSIONS",
     "SECRET_SCAN_EXCLUSIONS",
     "Finding",
     "InventoryError",
+    "canonical_bytes",
+    "canonical_digest",
     "load",
+    "load_private_inventory",
+    "resolution_findings",
+    "resolve",
+    "scan_for_private_material",
     "scan_for_secret_material",
     "semantic_findings",
     "validate",
@@ -74,6 +104,17 @@ DEFAULT_RESOLVE_TIMEOUT = "5m"
 # visibly distinct: the host side is configurable and lives under the
 # deployment root, the container side is a renderer constant.
 DEFAULT_SECRETS_DIR = "/opt/observability/secrets"
+# The conventional metrics path. Not a knob: it is the value against which a
+# non-default path is asked to explain itself (ADR-0004's first open
+# classification, settled by METRICS-PATH-UNEXPLAINED). Making it
+# configurable would let a deployment redefine what counts as conventional,
+# which is the one thing the gate needs to be fixed.
+DEFAULT_METRICS_PATH = "/metrics"
+# IPv4 loopback. The evaluators bind an IPv4 address by contract
+# (`listen` matches `^[0-9.]+:[0-9]{1,5}$`), so a v6 form cannot reach here;
+# if that pattern ever widens, this prefix widens with it or the gate stops
+# seeing half the addresses it exists to refuse.
+_LOOPBACK_PREFIX = "127."
 
 
 _INTEGER = re.compile(r"^-?[0-9]+$")
@@ -141,19 +182,6 @@ def _read_toml(path: Path) -> Document:
 # document and they stop being safe.
 
 
-def _require(secret: SecretFile | None) -> SecretFile:
-    """Assert a schema-required credential is present.
-
-    `_secret` is Optional because most callers hold an optional credential. An
-    integration's is required by the contract, and an `assert` here beats a
-    silent `None` reaching the renderer as a missing file path.
-    """
-    assert (
-        secret is not None
-    ), "the routing contract requires every integration to carry a credential"
-    return secret
-
-
 def _mapping(value: object) -> Mapping[str, object]:
     """Narrow a validated sub-document.
 
@@ -213,7 +241,7 @@ def _control_plane(document: Document) -> ControlPlane:
     host = _mapping(document["host"])
     return ControlPlane(
         environment=str(document["environment"]),
-        host=Host(identity=str(host["identity"]), ssh_alias=str(host["ssh_alias"])),
+        host=Host(target_id=str(host["target_id"])),
         prometheus=_evaluator(_mapping(document["prometheus"])),
         alertmanager=_evaluator(_mapping(document["alertmanager"])),
         release_root=str(document["release_root"]),
@@ -227,6 +255,18 @@ def _control_plane(document: Document) -> ControlPlane:
     )
 
 
+def _publication(raw: object) -> Publication | None:
+    if raw is None:
+        return None
+    row = _mapping(raw)
+    return Publication(
+        endpoints=_strings(row["endpoints"]),
+        rationale=str(row["rationale"]),
+        approved_by=str(row["approved_by"]),
+        approved_on=str(row["approved_on"]),
+    )
+
+
 def _target_set(document: Document) -> TargetSet:
     jobs = _rows(document["jobs"])
     return TargetSet(
@@ -235,13 +275,15 @@ def _target_set(document: Document) -> TargetSet:
         jobs=tuple(
             ScrapeJob(
                 job=str(job["job"]),
+                target_id=str(job["target_id"]),
                 scheme=str(job["scheme"]),
                 metrics_path=str(job["metrics_path"]),
-                endpoints=_strings(job["endpoints"]),
+                authenticated=bool(job["authenticated"]),
                 labels=_labels(job.get("labels")),
                 scrape_interval=str(job["scrape_interval"]) if "scrape_interval" in job else None,
                 scrape_timeout=str(job["scrape_timeout"]) if "scrape_timeout" in job else None,
-                credential=_secret(job.get("credential")),
+                publication=_publication(job.get("publication")),
+                path_rationale=(str(job["path_rationale"]) if "path_rationale" in job else None),
                 expected=int(cast(int, job["expected"])) if "expected" in job else None,
             )
             for job in jobs
@@ -253,12 +295,12 @@ def _federation(document: Document) -> Federation:
     source = _mapping(document["source"])
     return Federation(
         name=str(document["name"]),
+        target_id=str(document["target_id"]),
         owner=str(document["owner"]),
         source=FederationSource(
             scheme=str(source["scheme"]),
-            endpoint=str(source["endpoint"]),
             path=str(source["path"]),
-            credential=_secret(source.get("credential")),
+            authenticated=bool(source["authenticated"]),
         ),
         match=_strings(document["match"]),
         rename_prefix=str(document["rename_prefix"]),
@@ -281,8 +323,7 @@ def _receivers(document: Document) -> tuple[Receiver, ...]:
                 integrations=tuple(
                     Integration(
                         kind=str(item["type"]),
-                        credential=_require(_secret(item["credential"])),
-                        destination=str(item["destination"]) if "destination" in item else None,
+                        credential_ref=str(item["credential_ref"]),
                         send_resolved=bool(item.get("send_resolved", True)),
                     )
                     for item in integrations
@@ -446,23 +487,25 @@ def _routing_findings(state: DesiredState) -> list[Finding]:
     findings: list[Finding] = []
     declared = {receiver.name: receiver for receiver in state.receivers}
 
+    seen_refs: dict[str, str] = {}
     for receiver in state.receivers:
         for integration in receiver.integrations:
-            if integration.kind == "telegram":
-                # Alertmanager's telegram chat id is a NUMBER. A quoted value is
-                # rejected at config load, and the visible symptom is a receiver
-                # that simply never delivers — the failure mode hardest to
-                # notice, because nothing fires to tell you notifications broke.
-                if integration.destination is None or not _INTEGER.match(integration.destination):
-                    findings.append(
-                        Finding(
-                            "RECEIVER-CHAT-ID",
-                            f"routing/receivers.toml#{receiver.name}",
-                            "a telegram integration needs an integer chat id in `destination`; "
-                            f"got {integration.destination!r}",
-                        )
+            # A ref used by two integrations means one binding delivers to two
+            # places, so revoking it for one revokes it for the other — the
+            # blast-radius property ADR-0005 spent an ingress on removing.
+            previous = seen_refs.get(integration.credential_ref)
+            if previous is not None:
+                findings.append(
+                    Finding(
+                        "CREDENTIAL-REF-SHARED",
+                        f"routing/receivers.toml#{receiver.name}",
+                        f"credential_ref {integration.credential_ref!r} is already used by "
+                        f"{previous!r}; one binding reached by two integrations cannot be "
+                        "revoked for one of them",
                     )
-            elif integration.kind == "email" and state.control_plane.smtp is None:
+                )
+            seen_refs[integration.credential_ref] = receiver.name
+            if integration.kind == "email" and state.control_plane.smtp is None:
                 findings.append(
                     Finding(
                         "SMTP-UNCONFIGURED",
@@ -470,14 +513,6 @@ def _routing_findings(state: DesiredState) -> list[Finding]:
                         "an email integration needs [smtp] in inventory/control-plane.toml; "
                         "Alertmanager refuses an email receiver with no smarthost and the "
                         "router then fails to start",
-                    )
-                )
-            elif integration.kind != "webhook" and integration.destination is None:
-                findings.append(
-                    Finding(
-                        "RECEIVER-NO-DESTINATION",
-                        f"routing/receivers.toml#{receiver.name}",
-                        f"a {integration.kind} integration needs a `destination`",
                     )
                 )
         if not receiver.integrations and not receiver.null_policy:
@@ -582,13 +617,23 @@ def _target_findings(state: DesiredState) -> list[Finding]:
                     )
                 )
             seen[job.job] = target_set.product
-            if job.expected is not None and job.expected > len(job.endpoints):
+            # ADR-0004 left `metrics_path` classified PUBLIC and asked for the
+            # judgement to be confirmed rather than assumed. It is public
+            # because the conventional path is scrape protocol and discloses
+            # nothing. A NON-default path is the ambiguous case the ADR named:
+            # a path chosen precisely because it is unguessable is topology
+            # wearing a protocol field's name, and publishing it hands over the
+            # thing its author was relying on. Requiring a rationale does not
+            # decide which one it is — it makes the author say so, which is the
+            # only part a gate can honestly do.
+            if job.metrics_path != DEFAULT_METRICS_PATH and not job.path_rationale:
                 findings.append(
                     Finding(
-                        "TARGET-UNREACHABLE-EXPECTATION",
+                        "METRICS-PATH-UNEXPLAINED",
                         f"inventory/targets#{job.job}",
-                        f"expected {job.expected} up targets but only {len(job.endpoints)} "
-                        "endpoints are declared; the expectation can never be met",
+                        f"metrics_path is {job.metrics_path!r}, not {DEFAULT_METRICS_PATH!r}; "
+                        "a non-default path needs `path_rationale` saying why it is protocol "
+                        "rather than concealment (ADR-0004)",
                     )
                 )
 
@@ -617,9 +662,391 @@ def _target_findings(state: DesiredState) -> list[Finding]:
     return findings
 
 
+def _control_plane_findings(state: DesiredState) -> list[Finding]:
+    """ADR-0004's other open classification, settled as a gate.
+
+    A `listen` value carries a host and a port, and by the letter of the rule a
+    port is private. A LOOPBACK bind is different in kind: it describes this
+    control plane's own posture rather than any target's location, it is the
+    documented default of the public software being run, and it is the evidence
+    `docs/SECURITY.md` cites that the rendered stack keeps its ports off every
+    non-loopback interface — evidence that disappears if the value is withheld.
+
+    So the judgement is conditional, and a conditional judgement is exactly the
+    kind that rots as a habit. Anything that is not a loopback address is a
+    resolved bind address and belongs in the private inventory.
+    """
+    findings: list[Finding] = []
+    for name, evaluator in (
+        ("prometheus", state.control_plane.prometheus),
+        ("alertmanager", state.control_plane.alertmanager),
+    ):
+        address = evaluator.listen.rsplit(":", 1)[0]
+        if not address.startswith(_LOOPBACK_PREFIX):
+            findings.append(
+                Finding(
+                    "LISTEN-NOT-LOOPBACK",
+                    f"inventory/control-plane.toml#{name}",
+                    f"listen address {address!r} is not a loopback address; a loopback bind is "
+                    "public because it is a posture, and anything else is a resolved bind "
+                    "address that belongs in the private inventory (ADR-0004)",
+                )
+            )
+    return findings
+
+
 def semantic_findings(state: DesiredState) -> tuple[Finding, ...]:
-    """Every check that needs more than one document to answer."""
-    return tuple(_routing_findings(state) + _target_findings(state))
+    """Every check that needs more than one PUBLIC document to answer.
+
+    Deliberately runs without the private inventory, so a reader who has only
+    this repository still gets every gate that public inputs can support. The
+    checks that need resolution are :func:`resolution_findings`.
+    """
+    return tuple(
+        _control_plane_findings(state) + _routing_findings(state) + _target_findings(state)
+    )
+
+
+# ── Resolution layer (ADR-0004) ─────────────────────────────────────────────
+
+
+def canonical_bytes(document: Mapping[str, object]) -> bytes:
+    """The one canonical form a private document is hashed in.
+
+    UTF-8, sorted keys, two-space indent, and NO trailing newline. Stated in
+    the contract and implemented once here rather than left to each caller: a
+    reader that adds a trailing newline before hashing reports false drift on a
+    correct inventory, and "the digest disagrees" is the least debuggable
+    failure a promotion can produce.
+    """
+    return json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False).encode("utf-8")
+
+
+def canonical_digest(document: Mapping[str, object]) -> str:
+    return hashlib.sha256(canonical_bytes(document)).hexdigest()
+
+
+def _binding_secret(raw: object) -> SecretFile | None:
+    return _secret(raw)
+
+
+def load_private_inventory(path: Path, *, contracts: Path) -> PrivateInventory:
+    """Read, validate and digest one ObserverInventoryV1 document.
+
+    The digest is taken over the document as PARSED and re-serialised into the
+    canonical form, not over the bytes on disk. That is deliberate: a file whose
+    only difference is indentation is the same inventory, and hashing the raw
+    bytes would report drift for a reformat while missing nothing. The contract
+    fixes the canonical form precisely so the two readings cannot diverge.
+    """
+    findings: list[Finding] = []
+    if not path.is_file():
+        raise InventoryError(
+            [Finding("MISSING", str(path), "the private inventory document is absent")]
+        )
+    with path.open("rb") as handle:
+        document: Document = json.load(handle)
+    findings += _validate_document(contracts, "private-inventory", document, str(path))
+    if findings:
+        raise InventoryError(findings)
+
+    host = _mapping(document["host"])
+    return PrivateInventory(
+        document=str(document["document"]),
+        version=int(cast(int, document["version"])),
+        environment=str(document["environment"]),
+        digest=canonical_digest(document),
+        host=HostBinding(
+            target_id=str(host["target_id"]),
+            identity=str(host["identity"]),
+            ssh_alias=str(host["ssh_alias"]),
+        ),
+        targets=tuple(
+            TargetBinding(
+                target_id=str(row["target_id"]),
+                endpoints=_strings(row["endpoints"]),
+                credential=_binding_secret(row.get("credential")),
+            )
+            for row in _rows(document["targets"])
+        ),
+        federations=tuple(
+            FederationBinding(
+                target_id=str(row["target_id"]),
+                endpoint=str(row["endpoint"]),
+                credential=_binding_secret(row.get("credential")),
+            )
+            for row in _rows(document["federations"])
+        ),
+        receivers=tuple(
+            ReceiverBinding(
+                credential_ref=str(row["credential_ref"]),
+                credential=SecretFile(
+                    openbao_path=str(_mapping(row["credential"])["openbao_path"]),
+                    file_name=str(_mapping(row["credential"])["file_name"]),
+                ),
+                destination=str(row["destination"]) if "destination" in row else None,
+            )
+            for row in _rows(document["receivers"])
+        ),
+    )
+
+
+def resolution_findings(state: DesiredState, inventory: PrivateInventory) -> tuple[Finding, ...]:
+    """Every check that needs the private inventory as well as public Git.
+
+    Both directions, always. An unresolved public target is the obvious half;
+    an unused private binding is the half that gets left out, and it is the one
+    that describes a stale endpoint nobody is looking at — the exact shape of
+    the CRM scrape job that stayed on the Observer host for weeks after the
+    product it pointed at was gone.
+    """
+    findings: list[Finding] = []
+
+    if inventory.environment != state.control_plane.environment:
+        findings.append(
+            Finding(
+                "RESOLUTION-ENVIRONMENT",
+                inventory.document,
+                f"private inventory is for environment {inventory.environment!r} but the "
+                f"control plane declares {state.control_plane.environment!r}; a production "
+                "inventory resolved against a staging plane renders cleanly and points a "
+                "staging evaluator at production",
+            )
+        )
+    if inventory.host.target_id != state.control_plane.host.target_id:
+        findings.append(
+            Finding(
+                "RESOLUTION-HOST",
+                inventory.document,
+                f"private inventory binds host {inventory.host.target_id!r} but the control "
+                f"plane declares {state.control_plane.host.target_id!r}",
+            )
+        )
+
+    targets = {binding.target_id: binding for binding in inventory.targets}
+    federations = {binding.target_id: binding for binding in inventory.federations}
+    receivers = {binding.credential_ref: binding for binding in inventory.receivers}
+    used_targets: set[str] = set()
+    used_federations: set[str] = set()
+    used_receivers: set[str] = set()
+
+    for target_set in state.targets:
+        for job in target_set.jobs:
+            location = f"inventory/targets#{job.job}"
+            binding = targets.get(job.target_id)
+            if job.publication is not None:
+                endpoints = job.publication.endpoints
+                credential = binding.credential if binding is not None else None
+                if binding is not None:
+                    used_targets.add(job.target_id)
+                    findings.append(
+                        Finding(
+                            "PUBLICATION-SHADOWED",
+                            location,
+                            f"target_id {job.target_id!r} carries a reviewed publication AND a "
+                            "private binding; the publication wins, so the binding is a second "
+                            "answer to one question and the two can drift apart unnoticed",
+                        )
+                    )
+            elif binding is None:
+                findings.append(
+                    Finding(
+                        "RESOLUTION-MISSING",
+                        location,
+                        f"target_id {job.target_id!r} has no binding in the private inventory "
+                        "and no reviewed publication block",
+                    )
+                )
+                continue
+            else:
+                used_targets.add(job.target_id)
+                endpoints = binding.endpoints
+                credential = binding.credential
+
+            if job.authenticated and credential is None:
+                findings.append(
+                    Finding(
+                        "AUTHENTICATION-MISMATCH",
+                        location,
+                        f"job declares authenticated = true but the binding for "
+                        f"{job.target_id!r} carries no credential; the public claim would be "
+                        "unfalsifiable from Git alone, which is why it is checked here",
+                    )
+                )
+            elif not job.authenticated and credential is not None:
+                findings.append(
+                    Finding(
+                        "AUTHENTICATION-MISMATCH",
+                        location,
+                        f"job declares authenticated = false but the binding for "
+                        f"{job.target_id!r} carries a credential; either the credential is "
+                        "unused and should be revoked, or the public capability is wrong",
+                    )
+                )
+            if job.expected is not None and job.expected > len(endpoints):
+                findings.append(
+                    Finding(
+                        "TARGET-UNREACHABLE-EXPECTATION",
+                        location,
+                        f"expected {job.expected} up targets but the resolution yields "
+                        f"{len(endpoints)}; the expectation can never be met, and a job that "
+                        "resolves to too few targets produces no failures and no series",
+                    )
+                )
+
+    for federation in state.federations:
+        location = f"inventory/federations#{federation.name}"
+        upstream = federations.get(federation.target_id)
+        if upstream is None:
+            findings.append(
+                Finding(
+                    "RESOLUTION-MISSING",
+                    location,
+                    f"target_id {federation.target_id!r} has no federation binding in the "
+                    "private inventory",
+                )
+            )
+            continue
+        used_federations.add(federation.target_id)
+        if federation.source.authenticated and upstream.credential is None:
+            findings.append(
+                Finding(
+                    "AUTHENTICATION-MISMATCH",
+                    location,
+                    "federation declares authenticated = true but its binding carries no "
+                    "credential",
+                )
+            )
+        elif not federation.source.authenticated and upstream.credential is not None:
+            findings.append(
+                Finding(
+                    "AUTHENTICATION-MISMATCH",
+                    location,
+                    "federation declares authenticated = false but its binding carries a "
+                    "credential",
+                )
+            )
+
+    for receiver in state.receivers:
+        for integration in receiver.integrations:
+            location = f"routing/receivers.toml#{receiver.name}"
+            delivery = receivers.get(integration.credential_ref)
+            if delivery is None:
+                findings.append(
+                    Finding(
+                        "RESOLUTION-MISSING",
+                        location,
+                        f"credential_ref {integration.credential_ref!r} has no binding in the "
+                        "private inventory",
+                    )
+                )
+                continue
+            used_receivers.add(integration.credential_ref)
+            if integration.kind == "telegram":
+                # Alertmanager's telegram chat id is a NUMBER. A quoted value is
+                # rejected at config load, and the visible symptom is a receiver
+                # that simply never delivers — the failure mode hardest to
+                # notice, because nothing fires to tell you notifications broke.
+                # The value is private, so this check moved here with it; what
+                # a public reader loses is the check, not the guarantee.
+                if delivery.destination is None or not _INTEGER.match(delivery.destination):
+                    findings.append(
+                        Finding(
+                            "RECEIVER-CHAT-ID",
+                            location,
+                            "a telegram integration needs an integer chat id as its binding's "
+                            "destination",
+                        )
+                    )
+            elif integration.kind != "webhook" and delivery.destination is None:
+                findings.append(
+                    Finding(
+                        "RECEIVER-NO-DESTINATION",
+                        location,
+                        f"a {integration.kind} integration needs a destination in its binding",
+                    )
+                )
+
+    for unused in sorted(set(targets) - used_targets):
+        findings.append(
+            Finding(
+                "RESOLUTION-UNUSED",
+                f"{inventory.document}#targets/{unused}",
+                "binding is not reached by any declared job; a resolved endpoint nothing "
+                "scrapes is a stale entry that no other gate would ever mention",
+            )
+        )
+    for unused in sorted(set(federations) - used_federations):
+        findings.append(
+            Finding(
+                "RESOLUTION-UNUSED",
+                f"{inventory.document}#federations/{unused}",
+                "binding is not reached by any declared federation",
+            )
+        )
+    for unused in sorted(set(receivers) - used_receivers):
+        findings.append(
+            Finding(
+                "RESOLUTION-UNUSED",
+                f"{inventory.document}#receivers/{unused}",
+                "binding is not cited by any integration; an unused delivery credential is one "
+                "nobody will think to revoke",
+            )
+        )
+    return tuple(findings)
+
+
+def resolve(state: DesiredState, inventory: PrivateInventory) -> Resolution:
+    """Join public policy to private resolution, once, after it has been checked.
+
+    Raises :class:`InventoryError` if :func:`resolution_findings` reports
+    anything, so a :class:`Resolution` that exists is one whose every lookup is
+    known to succeed. That is the property the renderer relies on: it indexes
+    without guarding, and a KeyError there would be a bug in this function
+    rather than a malformed input.
+    """
+    findings = resolution_findings(state, inventory)
+    if findings:
+        raise InventoryError(findings)
+
+    targets = {binding.target_id: binding for binding in inventory.targets}
+    federations = {binding.target_id: binding for binding in inventory.federations}
+    receivers = {binding.credential_ref: binding for binding in inventory.receivers}
+
+    jobs: dict[str, ResolvedEndpoint] = {}
+    for target_set in state.targets:
+        for job in target_set.jobs:
+            if job.publication is not None:
+                jobs[job.job] = ResolvedEndpoint(
+                    endpoints=job.publication.endpoints, credential=None
+                )
+            else:
+                binding = targets[job.target_id]
+                jobs[job.job] = ResolvedEndpoint(
+                    endpoints=binding.endpoints, credential=binding.credential
+                )
+
+    resolved_federations = {
+        federation.name: ResolvedEndpoint(
+            endpoints=(federations[federation.target_id].endpoint,),
+            credential=federations[federation.target_id].credential,
+        )
+        for federation in state.federations
+    }
+    integrations = {
+        integration.credential_ref: ResolvedReceiver(
+            credential=receivers[integration.credential_ref].credential,
+            destination=receivers[integration.credential_ref].destination,
+        )
+        for receiver in state.receivers
+        for integration in receiver.integrations
+    }
+    return Resolution(
+        inventory=inventory,
+        jobs=MappingProxyType(jobs),
+        federations=MappingProxyType(resolved_federations),
+        integrations=MappingProxyType(integrations),
+    )
 
 
 # ── Secret material ─────────────────────────────────────────────────────────
@@ -682,10 +1109,131 @@ def scan_for_secret_material(root: Path, files: Iterable[Path]) -> tuple[Finding
     return tuple(findings)
 
 
-def validate(root: Path, *, contracts: Path | None = None) -> tuple[Finding, ...]:
-    """Schema plus semantics for the inventory under ``root``."""
+# ── Private material (ADR-0004) ─────────────────────────────────────────────
+#
+# A different question from the secret scanner above, asked over the same
+# corpus. Rule 1 asks whether a value is a SECRET. This asks whether a
+# non-secret fact is still something to publish, which is the question a public
+# repository forces and rule 1 was never meant to answer.
+#
+# Scope is deliberately every tracked file rather than the inventory documents,
+# because the inventory documents are already covered STRUCTURALLY and better:
+# the contracts close every object, so an `openbao_path` or an `endpoints` key
+# in `inventory/targets/*.toml` is refused by the schema with a precise error
+# and cannot reach this scanner. What the schema cannot see is a value pasted
+# into a document, and that is where both of this repository's real disclosures
+# happened — PR #4 was a rehearsal host address in `ARCHITECTURE.md` and
+# `SECURITY.md`, PR #6 a credential basename in prose. Neither was in an
+# inventory file. This detector is aimed at that.
+
+PRIVATE_SCAN_EXCLUSIONS: tuple[str, ...] = (
+    "src/dotmac_observability/validate.py",
+    "tests/mutations/test_private_material_detector_bites.py",
+)
+
+_PRIVATE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "ADDRESS",
+        # A non-loopback IPv4 literal. 127.x is this control plane's own posture
+        # and is published deliberately (see LISTEN-NOT-LOOPBACK); 0.0.0.0 is a
+        # wildcard bind inside a container and names no host. Everything else
+        # locates something.
+        re.compile(r"(?<![\w.])(?!127\.)(?!0\.0\.0\.0)(?:\d{1,3}\.){3}\d{1,3}(?![\w.])"),
+    ),
+    (
+        "ADDRESS-V6",
+        # Three alternatives, all of them unambiguously IPv6 and none of them a
+        # full IPv6 grammar. The shapes that matter are the ones somebody pastes
+        # out of `ip -6 addr` or a probe, which are abbreviated; a stricter
+        # grammar would refuse exactly those and pass the disclosure.
+        #
+        # What every alternative requires is a DOUBLE colon or eight groups, so
+        # a timestamp cannot trip it: `05:03:57` has single colons only, and
+        # that near-miss is the reason the obvious "three or more colon groups"
+        # pattern is not used here.
+        re.compile(
+            r"(?:[0-9a-fA-F]{1,4}:){2,}:"
+            r"|[0-9a-fA-F]{1,4}::[0-9a-fA-F]"
+            r"|(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}"
+        ),
+    ),
+    (
+        "HOSTNAME",
+        # A SUBDOMAIN of a real Dotmac domain. The bare domain is excluded by
+        # the required leading label, which is what lets the contracts keep
+        # their `https://dotmac.io/schemas/...` identifiers — those name a
+        # schema namespace, not a host anyone can reach.
+        re.compile(r"\b[a-z0-9][a-z0-9-]*\.dotmac\.io\b"),
+    ),
+    (
+        "STORE-PATH",
+        # An OpenBao path with at least two segments. `secret/fixture/` is
+        # exempt by construction rather than by an allowlist: it is a reserved
+        # prefix that names no real store namespace, so a synthetic document can
+        # carry a structurally valid path without the detector having to be told
+        # which file it lives in.
+        re.compile(r"\bsecret/(?!fixture/)[A-Za-z0-9._-]+/[A-Za-z0-9._-]"),
+    ),
+)
+
+
+def scan_for_private_material(root: Path, files: Iterable[Path]) -> tuple[Finding, ...]:
+    """Report any line carrying resolved material ADR-0004 keeps out of Git.
+
+    Not a substitute for the structural half. The contracts refuse a private
+    field in an inventory document outright; this catches the same material
+    written into prose, a workflow, a comment or a rendered artefact, where no
+    schema is looking.
+    """
+    findings: list[Finding] = []
+    excluded = frozenset(PRIVATE_SCAN_EXCLUSIONS)
+    for path in sorted(files):
+        relative = path.relative_to(root).as_posix()
+        if relative in excluded:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for number, line in enumerate(text.splitlines(), start=1):
+            for code, pattern in _PRIVATE_PATTERNS:
+                if pattern.search(line):
+                    findings.append(
+                        Finding(
+                            f"PRIVATE-{code}",
+                            f"{relative}:{number}",
+                            "looks like resolved material; public Git carries the LOGICAL "
+                            "description and the private inventory carries the resolution "
+                            "(AGENTS.md rule 18, ADR-0004)",
+                        )
+                    )
+    return tuple(findings)
+
+
+def validate(
+    root: Path,
+    *,
+    contracts: Path | None = None,
+    private_inventory: Path | None = None,
+) -> tuple[Finding, ...]:
+    """Schema plus semantics for the inventory under ``root``.
+
+    ``private_inventory`` is optional, and its absence is not a pass. Without
+    it the resolution gates simply do not run, which is the correct behaviour
+    for a public reader and the wrong behaviour for a promotion — so the
+    promotion lane supplies one and the CLI says which mode it ran in, rather
+    than letting "no findings" mean two different things silently.
+    """
+    schema_root = contracts if contracts is not None else root / "contracts"
     try:
         state = load(root, contracts=contracts)
     except InventoryError as error:
         return error.findings
-    return semantic_findings(state)
+    findings = semantic_findings(state)
+    if private_inventory is None:
+        return findings
+    try:
+        inventory = load_private_inventory(private_inventory, contracts=schema_root)
+    except InventoryError as error:
+        return findings + error.findings
+    return findings + resolution_findings(state, inventory)

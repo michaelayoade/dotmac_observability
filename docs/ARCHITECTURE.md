@@ -6,9 +6,11 @@ wins on any disagreement; `docs/adr/` holds the decisions and their status;
 does not have is a defect in this file.
 
 Read this alongside `docs/adr/0001-observability-control-plane-has-one-git-owner.md`
-(why the owner exists and where its authority stops) and
+(why the owner exists and where its authority stops),
 `docs/adr/0002-deterministic-rendering-and-immutable-releases.md` (why the
-bytes are committed and why activation swaps a directory).
+bytes are committed and why activation swaps a directory) and
+`docs/adr/0006-the-private-inventory-and-the-deployment-authorization.md` (why
+the inputs are in two places and what binds them back together).
 
 ## Why the repository exists
 
@@ -74,7 +76,20 @@ The typed desired state is assembled from a fixed set of documents, located by
 | `routing/receivers.toml` | `contracts/routing.schema.json`, `kind = "receivers"` | `model.Receiver` |
 | `routing/policies.toml` | `contracts/routing.schema.json`, `kind = "policies"` | `model.RouteDefaults`, `model.Route` |
 | `routing/inhibition.toml` | `contracts/routing.schema.json`, `kind = "inhibition"` | `model.Inhibition` |
-| `bundles/` | `contracts/bundle-lock.schema.json` | nothing yet; loading arrives in PR 3 |
+| `bundles/` | `contracts/bundle-lock.schema.json` | nothing yet; loading arrives in PR 3C |
+
+And one input that is deliberately NOT in this repository:
+
+| Supplied at | Contract | Becomes |
+| --- | --- | --- |
+| promotion time, from a private source | `contracts/private-inventory.schema.json` | `model.PrivateInventory` |
+
+That row is the whole of ADR-0004 and ADR-0006 in one line. Everything above it
+is a logical description; the resolution arrives separately, is validated
+against a public schema, and is recorded in the receipt by digest rather than
+by value. The only instance in Git is the synthetic fixture CI renders against
+(`tests/fixtures/reference/private/`), whose safety is a checked property of
+its content rather than of its location.
 
 The directory globs are `sorted()`, not raw `Path.glob`. Glob yields in
 directory order, which differs between filesystems and changes when a file is
@@ -136,6 +151,9 @@ claimed the same job name, or that an email receiver was declared while
 | `JOB-DUPLICATE` | Two scrape jobs, or a job and a federation, sharing a name |
 | `TARGET-UNREACHABLE-EXPECTATION` | `expected` greater than the number of declared endpoints |
 | `FEDERATION-PREFIX-COLLISION` | Two upstreams renaming into the same prefix |
+| `CREDENTIAL-REF-SHARED` | Two integrations citing one credential, which cannot then be revoked for one of them |
+| `METRICS-PATH-UNEXPLAINED` | A non-default `metrics_path` with no `path_rationale` |
+| `LISTEN-NOT-LOOPBACK` | An evaluator bound to something other than a loopback address |
 
 Findings are returned, never raised one at a time. A gate that stops at the
 first problem makes an operator re-run it once per mistake; `cli._report`
@@ -150,11 +168,48 @@ guards the same class of silence from the other end: a job that resolves to
 zero targets produces no failures and no series, and is indistinguishable, to
 every alert written over it, from a healthy system.
 
+**Resolution** (`resolution_findings`) is the fourth layer, and it exists
+because ADR-0004 put half the inputs somewhere else. It is not a fourth KIND of
+question — it is the same cross-document question asked across the
+public/private boundary — but its input is separate, so it is separate. The
+public gates run for any reader of a checkout; these need material a public
+reader does not have.
+
+| Code | Refuses |
+| --- | --- |
+| `RESOLUTION-ENVIRONMENT` | An inventory for a different environment than the control plane declares |
+| `RESOLUTION-HOST` | An inventory binding a different host |
+| `RESOLUTION-MISSING` | A `target_id` or `credential_ref` with no binding, and no reviewed publication |
+| `RESOLUTION-UNUSED` | A binding nothing reaches |
+| `AUTHENTICATION-MISMATCH` | A declared capability the binding contradicts, in either direction |
+| `PUBLICATION-SHADOWED` | A target carrying both a reviewed publication and a private binding |
+| `TARGET-UNREACHABLE-EXPECTATION` | `expected` greater than the RESOLVED endpoint count |
+| `RECEIVER-CHAT-ID` | A Telegram binding whose destination is not an integer chat id |
+| `RECEIVER-NO-DESTINATION` | A non-webhook binding with no destination |
+
+The last three moved here from the public layer with the values they read. What
+a public reader loses is the check, not the guarantee: a promotion supplies the
+inventory and cannot skip it.
+
+`RESOLUTION-UNUSED` is the one most easily left out and the one that earns its
+place. A binding nothing points at is a resolved endpoint nobody is looking
+at — the exact shape of the CRM scrape job that outlived its product on the
+Observer host by weeks (`docs/inventories/observer-as-built.md` §12). Checking
+only that every public target resolves would have said nothing about it.
+
 ## Rendering
 
 `render.render_control_plane` is the single authority for what the control
 plane's configuration bytes are. Everything else, the CLI included, is an
 adapter that calls it and writes or compares the result.
+
+Since ADR-0006 it takes TWO arguments: the public desired state and a
+`model.Resolution` joining it to one private inventory. The second is required
+rather than optional, because a render without it would be a render of a
+control plane that scrapes nothing, and a signature permitting that invites a
+caller to produce one. Every lookup it performs was proved to succeed by
+`validate.resolve` before the `Resolution` existed, so the renderer indexes
+without guarding.
 
 It returns the whole tree in one fixed-order call:
 
@@ -201,6 +256,20 @@ rendered reference fixture.
 `jsonschema` is the only runtime dependency, and it validates rather than
 renders: its output is a pass or a fail, not bytes anyone commits, so a version
 change cannot move a committed artifact.
+
+### A production render is not committed
+
+The consequence of the split that surprises people. Public inputs plus the
+public contracts render the SYNTHETIC fixture and nothing else; a production
+render needs the private inventory and produces bytes that legitimately contain
+resolved endpoints and credential basenames. It is produced at promotion time,
+hashed, and recorded by digest — never committed.
+
+`deploy/rendered/` is consequently empty in Git and stays that way, and `make
+render-check` compares the reference fixture's committed bytes against a fresh
+render of the same synthetic inputs. That is exactly as strong a determinism
+gate as before: determinism is a property of the renderer and its inputs, not
+of whether those inputs are real.
 
 ### Digest over paths and contents
 
@@ -470,8 +539,8 @@ Comparison is PR 6. Today only the first artifact exists.
 | 1 | Governance (`AGENTS.md`, `docs/CONTROL_EXCEPTIONS.md`), the five contracts, the typed model, three-layer validation, the deterministic renderer and emitter, the CLI, the reference fixture with its committed rendered bytes, and the CI and sensitivity-proof work originally scheduled for PR 4 | **done, this change** |
 | 2 | A read-only as-built census of the Observer host, written to `docs/inventories/observer-as-built.md` | blocked: requires Michael to name the Observer SSH target explicitly |
 | 3A | Adoption of `IngressPolicy.v1`: declared exposure and address family on every published surface, the Loki-ingestion selection, and the removal of short-form publishes from the rendered output. The contract, its rendering and its conformance suite are `dotmac-deployment-foundation`'s, so this lane is blocked on that release (ADR-0005) | planned |
-| 3B | The ADR-0004 split in the contracts: a logical `target_id`, the private-inventory schema and digest, the per-target exception block, and the inverted `openbao_path` check | planned |
-| 3C | Real production inventory under `inventory/`, bundle locks under `bundles/`, `bundle.py` (fetch and digest-verify), and `render-check` plus `schema-check` joining `make check` | planned |
+| 3B | The ADR-0004 split in the contracts (ADR-0006): logical `target_id`, the ObserverInventoryV1 contract and its canonical digest, the per-target publication block, the inverted `openbao_path` check, the resolution layer, the private-material scanner, and the deployment-authorization contract | **done** |
+| 3C | Real production inventory under `inventory/`, bundle locks under `bundles/`, and `bundle.py` (fetch and digest-verify) | planned |
 
 > **Two sequences, one plan.** The lanes above are this repository's own work.
 > They sit inside a wider cross-repository train for the ingress facility,
@@ -508,9 +577,13 @@ committed `rendered/` tree, and five unit tests
 `test_federation_rename.py`, `test_model_loading.py`).
 
 `make check` runs `poetry-lock-check`, `lint`, `format-check`, `type-check`,
-`secret-scan` and `test`. It deliberately does not run `render-check` or
-`schema-check`, because PR 1 ships no production inventory: those two are
-exercised against the fixture by the test suite and join `check` in PR 3C.
+`secret-scan`, `private-scan`, `schema-check`, `render-check` and `test`, and
+the CI matrix names that list exactly.
+
+`render-check` and `schema-check` were scheduled for 3C, blocked on "no
+production inventory to validate". ADR-0006 makes that block permanent — there
+will never be one in the repository — so they point at the reference fixture
+and run today rather than never.
 
 Governance enforcement landed in the same change rather than in PR 4:
 `tests/architecture/test_no_secret_material.py`,
@@ -540,6 +613,8 @@ review discipline.
 | `render.py` | The three rendered files, `tree_digest`, `write_tree`, `differences` | shipped |
 | `cli.py` | `validate`, `render [--check]`, `secret-scan`; thin adapters over the library | shipped |
 | `bundle.py` | Fetch a pinned product bundle, verify its digests, assemble the release `rules/` tree | PR 3C |
+| `validate.load_private_inventory` / `resolve` | Read and digest an ObserverInventoryV1 document, and join it to the public state with every lookup proved | shipped |
+| `validate.scan_for_private_material` | Refuse resolved material anywhere in the tracked tree (rule 18) | shipped |
 | `live_verify.py` | Read live target, rule and route state from the evaluator APIs and compare it with the desired state | PR 5 |
 | `receipt.py` | Write and validate a promotion receipt against `contracts/promotion-receipt.schema.json` | PR 6 |
 | `drift.py` | Three-way comparison of desired state, live state and the last verified receipt | PR 6 |

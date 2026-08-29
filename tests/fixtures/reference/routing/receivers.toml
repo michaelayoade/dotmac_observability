@@ -1,5 +1,10 @@
-schema_version = "observability-routing.v1"
+schema_version = "observability-routing.v2"
 kind = "receivers"
+
+# Logical credential names only (ADR-0004). Which token file each one resolves
+# to, and which chat or mailbox it reaches, are in the private inventory: a
+# store path describes credential custody and a destination names a real
+# audience, and neither is something a public repository should publish.
 
 [[receivers]]
 name = "oncall"
@@ -7,12 +12,8 @@ owner = "platform-oncall"
 
   [[receivers.integrations]]
   type = "telegram"
-  destination = "-1000000000001"
+  credential_ref = "telegram-oncall"
   send_resolved = true
-
-    [receivers.integrations.credential]
-    openbao_path = "secret/dotmac/observability/telegram-oncall"
-    file_name = "telegram-oncall.token"
 
 [[receivers]]
 name = "platform-mail"
@@ -20,12 +21,8 @@ owner = "platform-oncall"
 
   [[receivers.integrations]]
   type = "email"
-  destination = "platform@dotmac.invalid"
+  credential_ref = "platform-smtp"
   send_resolved = false
-
-    [receivers.integrations.credential]
-    openbao_path = "secret/dotmac/observability/smtp"
-    file_name = "smtp.password"
 
 [[receivers]]
 name = "recorded-only"

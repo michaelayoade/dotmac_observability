@@ -51,21 +51,30 @@ def test_the_exclusion_list_is_exactly_the_detector_and_its_proof():
 _ASSIGNMENT = re.compile(r"^\s*openbao_path\s*=\s*(.+)$")
 
 
-def test_every_committed_credential_reference_is_a_pointer_not_a_value():
-    # Inventory only. The contracts mention `openbao_path` as a key NAME, which
-    # is not an assignment and carries no value to check.
-    checked = 0
+def test_no_public_inventory_document_carries_a_store_path():
+    """The ADR-0004 inversion, stated as the assertion it became.
+
+    This check used to REQUIRE every committed `openbao_path` to start with
+    `secret/`, on the premise that a store path is safe to commit and only a
+    pasted value would look different. ADR-0004 reverses the premise: a store
+    path describes credential custody layout, so the key does not belong in a
+    public document at all.
+
+    Two things make this non-vacuous rather than a check over an empty set.
+    The contracts refuse the key STRUCTURALLY, so a reader might reasonably ask
+    what this adds — the answer is that it covers documents no schema reads,
+    which is where both of this repository's real disclosures happened. And the
+    detector's own sensitivity lives in `tests/mutations/`, where a planted
+    path must be found.
+    """
     for path in _tracked():
         if path.suffix != ".toml":
             continue
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        if not relative.startswith(("inventory/", "routing/", "tests/fixtures/")):
+            continue
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-            assigned = _ASSIGNMENT.match(line)
-            if assigned is None:
-                continue
-            checked += 1
-            # A pointer names a location in the store. Anything else here means
-            # someone pasted the material where the path belongs.
-            assert assigned.group(1).startswith(
-                '"secret/'
-            ), f"{path}:{number} openbao_path is not a secret/ store path"
-    assert checked > 0, "no openbao_path assignment was examined; the matcher has drifted"
+            assert _ASSIGNMENT.match(line) is None, (
+                f"{relative}:{number} assigns openbao_path in a PUBLIC document; a store path "
+                "is private material and belongs in the private inventory (ADR-0004)"
+            )

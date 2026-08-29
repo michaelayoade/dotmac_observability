@@ -1,4 +1,4 @@
-schema_version = "observability-control-plane.v1"
+schema_version = "observability-control-plane.v2"
 environment = "reference"
 release_root = "/opt/observability/releases"
 secrets_dir = "/opt/observability/secrets"
@@ -7,9 +7,10 @@ scrape_timeout = "10s"
 evaluation_interval = "30s"
 resolve_timeout = "5m"
 
+# Logical only (ADR-0004). The resolved identity and SSH alias are in the
+# private inventory, under this same target_id.
 [host]
-identity = "reference-evaluator"
-ssh_alias = "reference"
+target_id = "reference-evaluator"
 
 [prometheus]
 image = "docker.io/prom/prometheus"

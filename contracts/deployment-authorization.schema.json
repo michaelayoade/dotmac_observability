@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dotmac.io/schemas/observability/deployment-authorization.v1.json",
+  "title": "observability-deployment-authorization.v1",
+  "description": "The single document that binds everything a promotion is allowed to do, written BEFORE the promotion and named by the receipt afterwards.  It exists because the four things a deployment is made of are produced at different times by different owners: the control-plane release is built from a reviewed commit, the private inventory is resolved separately, the configuration is rendered from the two together, and the images come from upstream. Any three of them agreeing proves nothing about the fourth. Binding all four in one approved document is what makes 'every running byte explained' a checkable claim rather than a slogan.  LIKE THE PRIVATE INVENTORY, THIS SCHEMA IS PUBLIC AND EVERY INSTANCE IS PRIVATE. An instance names the private inventory it consumed and carries an approver; the public promotion receipt records only this document's name, version and digest.  Canonical form for that digest is the private inventory's: UTF-8, `json.dumps(document, indent=2, sort_keys=True)`, no trailing newline.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "document",
+    "version",
+    "environment",
+    "release",
+    "private_inventory",
+    "rendered_digest",
+    "images",
+    "target",
+    "approver"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "observability-deployment-authorization.v1"
+    },
+    "document": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "environment": {
+      "$ref": "#/$defs/slug"
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "bundle_sha256"
+      ],
+      "properties": {
+        "revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$",
+          "description": "An exact protected-main SHA, reasserted as current at promotion time (AGENTS.md rule 3). A branch name, a tag alone or 'latest' is not a promotion target."
+        },
+        "bundle_sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "Digest of the immutable control-plane bundle built from that revision. Deliberately separate from `rendered_digest`: the bundle is what was built once, the render is what that bundle plus one private inventory produced. Recording only one of the two makes it impossible to say afterwards whether a difference came from the software or from the environment."
+        }
+      }
+    },
+    "private_inventory": {
+      "$ref": "#/$defs/document_ref",
+      "description": "The ObserverInventoryV1 document this authorization binds. Its VALUES never appear here or in the receipt (ADR-0004); its identity does."
+    },
+    "rendered_digest": {
+      "$ref": "#/$defs/sha256",
+      "description": "`render.tree_digest` over the deterministic render of the release against the private inventory above. Hashes paths as well as contents, so a file that moved without changing is a different deployment."
+    },
+    "images": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/image"
+      },
+      "description": "Every container image the release runs, by digest. A tag is a mutable pointer, so a restart under a tag can silently change the running binary and leave the receipt naming something that never ran. The Observer host's seven `:latest` images are the measured reason this field is required rather than advisory (docs/inventories/observer-as-built.md OBS-02)."
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host_target_id"
+      ],
+      "properties": {
+        "host_target_id": {
+          "$ref": "#/$defs/slug",
+          "description": "The LOGICAL host, matching the control-plane document and the private inventory's `host.target_id`. The resolved identity and SSH alias stay in the private inventory. This field does not authorize a connection: rule 17 requires a human to name the host in the authorizing request, and this records which host that name was checked against."
+        }
+      }
+    },
+    "approver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "rationale",
+        "authorized_at"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 40,
+          "description": "Why this release reaches this host now. Minimum length is deliberate, for the same reason `null_policy` and an inhibition's `rationale` carry one: 'routine' is not a rationale, and an approval nobody had to explain is an approval nobody reviewed."
+        },
+        "authorized_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "document_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "document",
+        "version",
+        "sha256"
+      ],
+      "properties": {
+        "document": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "service",
+        "repository",
+        "digest"
+      ],
+      "properties": {
+        "service": {
+          "$ref": "#/$defs/slug"
+        },
+        "repository": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The upstream image repository, without a tag. Public: these are public upstream images and naming one discloses nothing about this estate."
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}

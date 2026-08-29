@@ -8,16 +8,29 @@ the first test here and fail every other one.
 
 from __future__ import annotations
 
-from dotmac_observability.validate import load, semantic_findings
-from tests.conftest import CONTRACTS, REFERENCE, edit
+from dotmac_observability.validate import (
+    load,
+    load_private_inventory,
+    resolution_findings,
+    semantic_findings,
+)
+from tests.conftest import CONTRACTS, REFERENCE, edit, private_path
 
 
 def _codes(root) -> set[str]:
     return {finding.code for finding in semantic_findings(load(root, contracts=CONTRACTS))}
 
 
+def _resolution_codes(root) -> set[str]:
+    inventory = load_private_inventory(private_path(root), contracts=CONTRACTS)
+    return {
+        finding.code for finding in resolution_findings(load(root, contracts=CONTRACTS), inventory)
+    }
+
+
 def test_the_reference_routing_is_clean():
     assert _codes(REFERENCE) == set()
+    assert _resolution_codes(REFERENCE) == set()
 
 
 def test_an_unrouted_severity_is_refused(reference_copy):
@@ -82,13 +95,18 @@ def test_a_duplicate_route_id_is_refused(reference_copy):
 
 def test_a_non_numeric_telegram_chat_id_is_refused(reference_copy):
     edit(
-        reference_copy / "routing" / "receivers.toml",
-        'destination = "-1000000000001"',
-        'destination = "@dotmac-oncall"',
+        private_path(reference_copy),
+        '"destination": "-1000000000001"',
+        '"destination": "@dotmac-oncall"',
     )
     # Alertmanager wants a number here. A string is rejected at config load and
     # the visible symptom is a receiver that simply never delivers.
-    assert "RECEIVER-CHAT-ID" in _codes(reference_copy)
+    #
+    # The check moved to the resolution layer with the value it reads:
+    # ADR-0004 makes a destination private, so a public reader can no longer
+    # run this gate. What a public reader loses is the CHECK, not the
+    # guarantee — a promotion supplies the inventory and cannot skip it.
+    assert "RECEIVER-CHAT-ID" in _resolution_codes(reference_copy)
 
 
 def test_an_email_receiver_without_global_smtp_is_refused(reference_copy):

@@ -43,8 +43,8 @@ def test_the_detector_stays_quiet_on_the_shapes_this_repository_commits(tmp_path
     # legitimate inventory looks like, and none of them may trip it.
     target = tmp_path / "clean.toml"
     target.write_text(
-        'openbao_path = "secret/dotmac/observability/telegram-oncall"\n'
-        'file_name = "telegram-oncall.token"\n'
+        'credential_ref = "telegram-oncall"\n'
+        'target_id = "erp-production"\n'
         'bearer_token_file = "/etc/prometheus/secrets/erp-scrape.token"\n'
         'rules_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"\n'
         'image_digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"\n'

@@ -26,6 +26,14 @@ while one that must shrink deliberately is a plan.
 
 declared-unmonitored: 11
 
+> **The count did not move, and the membership did.** Rule 18's row left this
+> table — ADR-0006 gave it two detectors — and rule 20's row arrived with the
+> authorization contract, which exists and is schema-valid while nothing yet
+> writes an instance. Net zero is the honest number and it is worth saying out
+> loud, because a ledger that only reports its total would show this change as
+> no progress at all. One gap closed on evidence; one opened deliberately,
+> named, and carrying the PR that closes it.
+
 | rule | subject | why there is no detector yet | monitored by |
 | --- | --- | --- | --- |
 | 2 | No direct production file editing | Detecting a hand edit means reading the live host and comparing it with the last receipt, and neither the live reader nor the receipt exists yet. | PR 6 |
@@ -37,7 +45,7 @@ declared-unmonitored: 11
 | 10 | "Rule inactive" is not recovery evidence | This is a property of the live verifier, which is written against a running evaluator on the disposable host. | PR 5 |
 | 11 | Promotion failure restores the exact preceding release | Requires the staging and activation machinery. | PR 6 |
 | 12 | Desired, live and receipt states are independently comparable | Desired state exists. Live state and receipts do not. | PR 6 |
-| 18 | Public Git carries the logical description; resolved endpoints, ports, host identities and credential bindings stay private | ADR 0004 settles the split, but the contracts that would carry it do not exist yet: there is no `target_id` field to require, no private-inventory schema to digest and no per-target exception block to demand. The inverted `openbao_path` check lands with them. | PR 3B |
+| 20 | A deployment is authorized as one binding of release, inventory, render, images, host and approver | The contract exists and is schema-valid, and every digest it names can already be produced — but nothing WRITES an authorization, because nothing promotes. A check over a document no code emits would pass on the empty set, which is the vacuous green rule 15 exists to refuse. | PR 6 |
 | 19 | Declared exposure and address family on every published surface | The guard belongs to the reusable contract, which `dotmac-deployment-foundation` owns and has not released yet. Writing a local detector would fork the rule from its owner and produce two answers to the same question. | Foundation adoption |
 
 ## Rules that ARE enforced today
@@ -48,6 +56,7 @@ tell at a glance which half of AGENTS.md currently bites.
 | rule | enforced by |
 | --- | --- |
 | 1 | `tests/architecture/test_no_secret_material.py`, `tests/mutations/test_secret_detector_bites.py`, `make secret-scan` |
+| 18 | `tests/architecture/test_public_inventory_carries_no_private_material.py`, `tests/mutations/test_private_material_detector_bites.py`, `make private-scan`, and structurally by the closed public contracts |
 | 7 | `tests/unit/test_routing_coverage.py` |
 | 9 | `tests/unit/test_federation_rename.py` |
 | 13 | `tests/unit/test_render_determinism.py`, `make render-check` |
