@@ -17,7 +17,7 @@ services:
       - "${PROMETHEUS_LISTEN:-127.0.0.1:9090}:9090"
     volumes:
       - "${OBSERVABILITY_RELEASE:?release directory is required}/prometheus:/etc/prometheus:ro"
-      - "${OBSERVABILITY_SECRETS:-/etc/prometheus/secrets}:/etc/prometheus/secrets:ro"
+      - "${OBSERVABILITY_SECRETS:-/opt/observability/secrets}:/etc/prometheus/secrets:ro"
       - "prometheus_data:/prometheus"
   alertmanager:
     image: "docker.io/prom/alertmanager@sha256:2222222222222222222222222222222222222222222222222222222222222222"
@@ -31,7 +31,7 @@ services:
       - "${ALERTMANAGER_LISTEN:-127.0.0.1:9093}:9093"
     volumes:
       - "${OBSERVABILITY_RELEASE:?release directory is required}/alertmanager:/etc/alertmanager:ro"
-      - "${OBSERVABILITY_SECRETS:-/etc/prometheus/secrets}:/etc/alertmanager/secrets:ro"
+      - "${OBSERVABILITY_SECRETS:-/opt/observability/secrets}:/etc/alertmanager/secrets:ro"
       - "alertmanager_data:/alertmanager"
 volumes:
   prometheus_data: {}

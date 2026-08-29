@@ -1,7 +1,7 @@
 schema_version = "observability-control-plane.v1"
 environment = "reference"
 release_root = "/opt/observability/releases"
-secrets_dir = "/etc/prometheus/secrets"
+secrets_dir = "/opt/observability/secrets"
 scrape_interval = "30s"
 scrape_timeout = "10s"
 evaluation_interval = "30s"

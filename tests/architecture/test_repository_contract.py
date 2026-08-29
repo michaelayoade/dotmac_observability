@@ -157,3 +157,20 @@ def test_governance_is_pinned_by_exact_commit():
     # Rule 16: the workflow must EXECUTE the same accepted revision the profile
     # declares. A profile pin nobody runs is documentation.
     assert model["revision"] in workflow
+
+
+def test_the_host_and_container_secret_directories_stay_distinct():
+    """A comment is not a guard, so the distinction gets one.
+
+    The host directory is a configurable mount SOURCE; the container paths are
+    renderer constants and mount TARGETS. Spelling the default host path as one
+    of the container paths is legal, renders correctly, and invites the next
+    operator to create the directory in the wrong filesystem — which presents
+    as a receiver that never delivers.
+    """
+    from dotmac_observability.render import _ALERTMANAGER_SECRETS, _PROMETHEUS_SECRETS
+    from dotmac_observability.validate import DEFAULT_SECRETS_DIR
+
+    container = {_PROMETHEUS_SECRETS, _ALERTMANAGER_SECRETS}
+    assert len(container) == 2, "the two evaluators must read from distinct container paths"
+    assert DEFAULT_SECRETS_DIR not in container

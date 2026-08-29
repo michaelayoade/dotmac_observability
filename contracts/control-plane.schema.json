@@ -75,7 +75,7 @@
     "secrets_dir": {
       "type": "string",
       "pattern": "^/[^\\s]*[^/\\s]$",
-      "description": "HOST directory holding secret FILES, mounted read-only into both evaluators. A directory mount, not a file mount. The in-container paths are fixed by the renderer (/etc/prometheus/secrets and /etc/alertmanager/secrets) so a config reference and its mount cannot disagree. This repository names files here; it never holds their contents."
+      "description": "HOST directory holding secret FILES, mounted read-only into both evaluators. A directory mount, not a file mount. Distinct from the in-container paths, which the renderer fixes at /etc/prometheus/secrets and /etc/alertmanager/secrets so a config reference and its mount cannot disagree \u2014 do not spell this value as one of those, or the next operator creates the directory in the wrong filesystem. This repository names files here; it never holds their contents."
     },
     "smtp": {
       "type": "object",

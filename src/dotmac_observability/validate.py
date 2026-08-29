@@ -67,7 +67,13 @@ DEFAULT_SCRAPE_INTERVAL = "30s"
 DEFAULT_SCRAPE_TIMEOUT = "10s"
 DEFAULT_EVALUATION_INTERVAL = "30s"
 DEFAULT_RESOLVE_TIMEOUT = "5m"
-DEFAULT_SECRETS_DIR = "/etc/prometheus/secrets"
+# A HOST path. It was briefly spelled "/etc/prometheus/secrets", which is
+# where the directory is mounted INSIDE the Prometheus container — a
+# coincidence that reads as a copy-paste and invites an operator to create
+# the directory in the wrong filesystem. The two namespaces are kept
+# visibly distinct: the host side is configurable and lives under the
+# deployment root, the container side is a renderer constant.
+DEFAULT_SECRETS_DIR = "/opt/observability/secrets"
 
 
 _INTEGER = re.compile(r"^-?[0-9]+$")
