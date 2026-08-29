@@ -24,7 +24,19 @@ enforced, and when the count below disagrees with the table. The downward
 direction is the one that matters: a ledger that only ever grows is a backlog,
 while one that must shrink deliberately is a plan.
 
-declared-unmonitored: 11
+declared-unmonitored: 10
+
+> **Down one, on evidence.** Rule 18's row left this table: ADR-0006 gave it
+> two detectors, one structural and one a scan. Rule 20 arrived already
+> enforced rather than deferred, which is worth a sentence because the first
+> draft of it was not.
+>
+> That draft made this repository the OWNER of a deployment-authorization
+> contract, and the row would have read `none yet (PR 6)` — a gap opened on the
+> way to closing one. The correction moved ownership to
+> `dotmac-deployment-control`, where it already lived, and what is left here is
+> a boundary: this repository authorizes nothing and attests no approval to
+> itself. A boundary is checkable today, so it is checked today.
 
 | rule | subject | why there is no detector yet | monitored by |
 | --- | --- | --- | --- |
@@ -37,7 +49,6 @@ declared-unmonitored: 11
 | 10 | "Rule inactive" is not recovery evidence | This is a property of the live verifier, which is written against a running evaluator on the disposable host. | PR 5 |
 | 11 | Promotion failure restores the exact preceding release | Requires the staging and activation machinery. | PR 6 |
 | 12 | Desired, live and receipt states are independently comparable | Desired state exists. Live state and receipts do not. | PR 6 |
-| 18 | Public Git carries the logical description; resolved endpoints, ports, host identities and credential bindings stay private | ADR 0004 settles the split, but the contracts that would carry it do not exist yet: there is no `target_id` field to require, no private-inventory schema to digest and no per-target exception block to demand. The inverted `openbao_path` check lands with them. | PR 3B |
 | 19 | Declared exposure and address family on every published surface | The guard belongs to the reusable contract, which `dotmac-deployment-foundation` owns and has not released yet. Writing a local detector would fork the rule from its owner and produce two answers to the same question. | Foundation adoption |
 
 ## Rules that ARE enforced today
@@ -48,6 +59,8 @@ tell at a glance which half of AGENTS.md currently bites.
 | rule | enforced by |
 | --- | --- |
 | 1 | `tests/architecture/test_no_secret_material.py`, `tests/mutations/test_secret_detector_bites.py`, `make secret-scan` |
+| 18 | `tests/architecture/test_public_inventory_carries_no_private_material.py`, `tests/mutations/test_private_material_detector_bites.py`, `make private-scan`, and structurally by the closed public contracts |
+| 20 | `tests/architecture/test_authorization_is_not_owned_here.py` |
 | 7 | `tests/unit/test_routing_coverage.py` |
 | 9 | `tests/unit/test_federation_rename.py` |
 | 13 | `tests/unit/test_render_determinism.py`, `make render-check` |

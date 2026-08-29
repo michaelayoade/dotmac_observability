@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://dotmac.io/schemas/observability/routing.v1.json",
-  "title": "observability-routing.v1",
-  "description": "One routing document: declared receivers, the route policy tree, or inhibition. Split into three files because they change for different reasons and have different reviewers.  Branching is if/then on `kind` rather than oneOf: oneOf collapses every branch's errors into one 'not valid under any of the given schemas', which tells an operator nothing about which field is wrong.",
+  "$id": "https://dotmac.io/schemas/observability/routing.v2.json",
+  "title": "observability-routing.v2",
+  "description": "One routing document: declared receivers, the route policy tree, or inhibition. Split into three files because they change for different reasons and have different reviewers.  v2 applies ADR-0004 to delivery: an integration cites a logical `credential_ref` and nothing else. The credential binding and the destination both moved to the private inventory \u2014 the binding because a store path and a basename describe credential custody, and the destination because a chat id or a mailbox names a real channel and a real audience, which the delivery plan lists as authorization-time material.  Branching is if/then on `kind` rather than oneOf: oneOf collapses every branch's errors into one 'not valid under any of the given schemas', which tells an operator nothing about which field is wrong.",
   "type": "object",
   "required": [
     "schema_version",
@@ -10,7 +10,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "observability-routing.v1"
+      "const": "observability-routing.v2"
     },
     "kind": {
       "enum": [
@@ -44,7 +44,7 @@
       ],
       "properties": {
         "schema_version": {
-          "const": "observability-routing.v1"
+          "const": "observability-routing.v2"
         },
         "kind": {
           "const": "receivers"
@@ -94,7 +94,7 @@
       "additionalProperties": false,
       "required": [
         "type",
-        "credential"
+        "credential_ref"
       ],
       "properties": {
         "type": {
@@ -105,29 +105,9 @@
             "slack"
           ]
         },
-        "credential": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "openbao_path",
-            "file_name"
-          ],
-          "properties": {
-            "openbao_path": {
-              "type": "string",
-              "pattern": "^secret/[A-Za-z0-9._/-]+$"
-            },
-            "file_name": {
-              "type": "string",
-              "pattern": "^[A-Za-z0-9._-]+$"
-            }
-          },
-          "description": "Rule 1. The rendered Alertmanager configuration references the file; the value is placed by the deployment from OpenBao and never enters Git."
-        },
-        "destination": {
-          "type": "string",
-          "minLength": 1,
-          "description": "A NON-SECRET address: a chat id, a mailbox, a path on an internal host. A URL carrying an embedded key is a credential and belongs above."
+        "credential_ref": {
+          "$ref": "#/$defs/slug",
+          "description": "A LOGICAL credential name, resolved against the private inventory's `receivers` at promotion time. Public Git says this receiver reaches Telegram using a credential called `oncall`; which token file that is, and which chat it delivers to, are private (ADR-0004). Resolution refuses a ref with no binding and a binding no ref cites, so neither half can rot unnoticed."
         },
         "send_resolved": {
           "type": "boolean"
@@ -145,7 +125,7 @@
       ],
       "properties": {
         "schema_version": {
-          "const": "observability-routing.v1"
+          "const": "observability-routing.v2"
         },
         "kind": {
           "const": "policies"
@@ -249,7 +229,7 @@
       ],
       "properties": {
         "schema_version": {
-          "const": "observability-routing.v1"
+          "const": "observability-routing.v2"
         },
         "kind": {
           "const": "inhibition"

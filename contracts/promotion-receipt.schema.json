@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://dotmac.io/schemas/observability/promotion-receipt.v1.json",
-  "title": "observability-promotion-receipt.v1",
-  "description": "What a completed promotion proved, recorded as facts a later reader can re-check. The receipt is one of the three artifacts drift compares (AGENTS.md rule 12): desired state in Git, live state read from the APIs, and this record of the last verified deployment.",
+  "$id": "https://dotmac.io/schemas/observability/promotion-receipt.v2.json",
+  "title": "observability-promotion-receipt.v2",
+  "description": "What a completed promotion proved, recorded as facts a later reader can re-check. The receipt is one of the three artifacts drift compares (AGENTS.md rule 12): desired state in Git, live state read from the APIs, and this record of the last verified deployment.  v2 adds the ADR-0006 halves a receipt needs to be checkable without disclosing anything: the approved plan the promotion executed (issued by the deployment control plane, referenced here), the private inventory it resolved against, and the exact image digests that ran \u2014 each by identity and digest, never by value. `host.identity` became `host.target_id` for the same reason. This receipt remains the artifact most likely to be pasted into a ticket, so every field it permits is still a count, a boolean, a digest, a revision, a version string, a logical name or a timestamp.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -10,7 +10,10 @@
     "outcome",
     "environment",
     "control_plane_revision",
+    "authorization",
+    "private_inventory",
     "rendered_digest",
+    "images",
     "bundles",
     "evaluator",
     "host",
@@ -22,14 +25,38 @@
     "timestamps"
   ],
   "properties": {
-    "schema_version": { "const": "observability-promotion-receipt.v1" },
+    "schema_version": { "const": "observability-promotion-receipt.v2" },
     "outcome": {
       "enum": ["accepted", "rolled-back", "failed"],
       "description": "A receipt is written for a failure too. A promotion that leaves no record is indistinguishable from one that never ran."
     },
     "environment": { "type": "string", "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$" },
     "control_plane_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "authorization": {
+      "$ref": "#/$defs/plan_ref",
+      "description": "The approved deployment plan this promotion executed, as issued by `dotmac-deployment-control`. CONSUMED, NEVER DEFINED HERE: this repository is an adopter of the deployment control plane, not a second one, so it records WHICH approved plan it carried out and owns none of the approval semantics. Re-deriving `plan_digest` is how a reader checks that the promotion executed the plan it claims."
+    },
+    "private_inventory": {
+      "$ref": "#/$defs/document_ref",
+      "description": "The ObserverInventoryV1 document the render resolved against. Its VALUES never appear here (ADR-0004). Version and digest are enough to prove two promotions consumed the same environment, and to report drift without printing an endpoint."
+    },
     "rendered_digest": { "$ref": "#/$defs/sha256" },
+    "images": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["service", "repository", "digest"],
+        "properties": {
+          "service": { "type": "string", "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$" },
+          "repository": { "type": "string", "minLength": 1 },
+          "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+        }
+      },
+      "description": "What actually ran, by digest. Must equal the approved plan's image set: a receipt recording different images from the ones approved is the finding, not a formatting difference. Public \u2014 these are upstream images and naming one discloses nothing about this estate."
+    },
     "bundles": {
       "type": "array",
       "items": {
@@ -56,8 +83,14 @@
     "host": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["identity"],
-      "properties": { "identity": { "type": "string", "minLength": 1 } }
+      "required": ["target_id"],
+      "properties": {
+        "target_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$",
+          "description": "The LOGICAL host. Its resolved identity is in the private inventory, whose digest this receipt already carries, so a reader with access to both can establish which machine was changed and a reader with neither learns nothing."
+        }
+      }
     },
     "release": {
       "type": "object",
@@ -147,6 +180,40 @@
   },
   "$defs": {
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "document_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["document", "version", "sha256"],
+      "properties": {
+        "document": { "type": "string", "minLength": 1 },
+        "version": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      },
+      "description": "A private document named by identity rather than content. All three fields together: a digest alone cannot say which document was supposed to produce it, and a version alone is a label anyone can reuse."
+    },
+    "plan_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plan_digest", "approval_decision_ref"],
+      "properties": {
+        "plan_digest": {
+          "$ref": "#/$defs/sha256",
+          "description": "The frozen plan's digest, as issued by the deployment control plane. A plan is frozen at proposal, so this identifies exactly what was approved rather than whatever the desired state happens to say now."
+        },
+        "approval_decision_ref": {
+          "type": "string",
+          "minLength": 1,
+          "description": "An opaque reference to the approval decision, resolvable in the deployment control plane. NOT a person's name. A name typed into an artifact is self-attested \u2014 nothing verifies it and the person named is never notified \u2014 and a reference resolvable in the system that actually recorded the decision is the only form of this field worth keeping."
+        },
+        "approval_policy_code": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Which approval policy the decision was taken under. Optional here because whether a plan requires approval at all is the control plane's per-plan declaration, never this repository's inference."
+        },
+        "approval_policy_version": { "type": "integer", "minimum": 1 }
+      },
+      "description": "A reference into `dotmac-deployment-control`'s approved-plan record. The field names mirror that owner's deliberately; if the two ever disagree, the owner is right and this is the defect."
+    },
     "check": {
       "type": "object",
       "additionalProperties": false,

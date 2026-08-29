@@ -37,6 +37,14 @@ scrape_configs:
         labels:
           product: dotmac-erp
           tier: worker
+  - job_name: dotmac-status-page
+    scheme: https
+    metrics_path: "/internal/telemetry"
+    static_configs:
+      - targets:
+          - "status.dotmac.invalid:443"
+        labels:
+          product: dotmac-status
   - job_name: dotmac-sub-federation
     honor_labels: true
     scheme: https

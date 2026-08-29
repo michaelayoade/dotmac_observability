@@ -38,12 +38,31 @@ A rule about ERP's behaviour belongs to ERP. This repository decides only
 
 ## Shape
 
-Typed inventory (`inventory/`, `bundles/`, `routing/`) is rendered
-deterministically into `deploy/rendered/`, which is **committed**. `make
-render-check` is a byte comparison: if the inputs and the committed bytes
-disagree, CI fails. A reviewer therefore sees a routing change as a diff of the
-actual Alertmanager configuration, and an air-gapped operator gets working
-configuration from a checkout.
+Typed inventory (`inventory/`, `bundles/`, `routing/`) describes the control
+plane **logically** — what is scraped, by whom, over what protocol, with which
+policy — and says nothing about where anything is. The resolution arrives
+separately, at promotion time, as a private `ObserverInventoryV1` document
+whose version and digest are the only parts that ever appear in public
+(ADR-0004, ADR-0006).
+
+The two together render deterministically. `make render-check` is a byte
+comparison against the committed reference render, so a reviewer sees a routing
+change as a diff of the actual Alertmanager configuration rather than of the
+TOML that implies it. A **production** render is not committed and cannot be:
+its bytes legitimately carry resolved endpoints, so it is produced at promotion
+time and recorded by digest.
+
+A deployment is then authorized as one binding — release, inventory, render and
+images together, in a frozen plan approved before anything runs. Any three of
+those agreeing proves nothing about the fourth, which is why they are bound
+rather than checked one at a time. That binding belongs to
+`dotmac-deployment-control`; this repository is its first adopter, consumes an
+approved plan and defines no approval semantics of its own.
+
+The claim it makes is deliberately narrow: **every controller-owned image and
+deployment-relevant configuration byte explained by an authorized digest**
+(ADR-0007). Tenant data, domain decisions, databases, logs, metrics and
+ordinary product settings are out of scope.
 
 Promotion is a state machine — `FETCHED → VALIDATED → REHEARSED → STAGED →
 RELOADED → VERIFIED → ACCEPTED` — that rolls back to the exact preceding
@@ -54,11 +73,14 @@ release on any failure before acceptance, and publishes a non-secret receipt.
 This repository is being built in a reviewed train. See
 `docs/ARCHITECTURE.md` § "Delivery train" for what exists today and
 `docs/CONTROL_EXCEPTIONS.md` for every region that is declared unmonitored
-rather than silently exempt.
+rather than silently exempt — read that file before describing any rule here
+as enforced.
 
-**PR 1 (this change) ships governance, contracts and the deterministic
-rendering mechanics. It contains no production configuration and promotes
-nothing.**
+**Nothing is promoted, and no production configuration is committed.** The
+governance, the seven contracts, the typed model, four-layer validation, the
+deterministic renderer, the resolution layer and both scanners exist. The
+production inventory, bundle fetching, live verification, promotion, receipts
+and drift comparison do not.
 
 ## Commands
 

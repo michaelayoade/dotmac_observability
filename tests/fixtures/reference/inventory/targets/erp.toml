@@ -1,13 +1,18 @@
-schema_version = "observability-target.v1"
+schema_version = "observability-target.v2"
 kind = "targets"
 product = "dotmac-erp"
 owner = "erp-platform"
 
+# Logical only (ADR-0004). Where `erp-production` and `erp-workers` actually
+# point, and which credential the first of them presents, live in the private
+# inventory this fixture resolves against.
+
 [[jobs]]
 job = "dotmac-erp-app"
+target_id = "erp-production"
 scheme = "https"
 metrics_path = "/metrics"
-endpoints = ["erp.invalid:443"]
+authenticated = true
 expected = 1
 scrape_interval = "15s"
 
@@ -19,15 +24,12 @@ scrape_interval = "15s"
   name = "tier"
   value = "app"
 
-  [jobs.credential]
-  openbao_path = "secret/dotmac/observability/erp-scrape"
-  file_name = "erp-scrape.token"
-
 [[jobs]]
 job = "dotmac-erp-worker"
+target_id = "erp-workers"
 scheme = "https"
 metrics_path = "/metrics"
-endpoints = ["erp-worker-1.invalid:443", "erp-worker-2.invalid:443"]
+authenticated = false
 expected = 2
 
   [[jobs.labels]]

@@ -38,6 +38,9 @@ jobs:
           - format-check
           - type-check
           - secret-scan
+          - private-scan
+          - schema-check
+          - render-check
           - test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -123,38 +126,25 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf "${RUNNER_TEMP}/rendered"
-          # The CLI cannot do this, and contorting it would be the wrong fix.
-          # `dotmac-observability --root X render` resolves schemas at
-          # `<root>/contracts`, but the fixture deliberately does NOT carry a
-          # copy of the contracts — a fixture that carries its own copy proves
-          # the copy, and the two drift the first time a schema changes. So the
-          # fixture must be loaded with root=tests/fixtures/reference and
-          # contracts=contracts, a combination the CLI has no flag for. Adding
-          # one would put a shape in the production adapter that exists only
-          # for CI. The library call below is the same `load` + `write_tree`
-          # pair the CLI itself uses, with the semantic gate the CLI applies
-          # before rendering kept in place.
-          poetry run python - <<'PY'
-          import os
-          import sys
-          from pathlib import Path
-
-          from dotmac_observability.render import render_control_plane, write_tree
-          from dotmac_observability.validate import load, semantic_findings
-
-          state = load(Path("tests/fixtures/reference"), contracts=Path("contracts"))
-          findings = semantic_findings(state)
-          if findings:
-              for finding in findings:
-                  print(f"  {finding.render()}", file=sys.stderr)
-              sys.exit("refusing to render an inconsistent inventory")
-
-          output = Path(os.environ["RUNNER_TEMP"]) / "rendered"
-          tree = render_control_plane(state)
-          write_tree(tree, output)
-          for path, _ in tree:
-              print(f"rendered {path}")
-          PY
+          # This step used to inline a Python script, on the argument that a
+          # root/contracts split was a CI-only shape and adding a flag for it
+          # would contort the production adapter. ADR-0006 reversed that: the
+          # split is not CI-only. A promotion loads public inventory from one
+          # place and a PRIVATE inventory from another, so a caller whose root
+          # and contracts differ is the normal case rather than the exception,
+          # and `--contracts` earns its place in the adapter.
+          #
+          # Using the CLI here also closes a real gap. The inline script was a
+          # SECOND caller of the library, and it drifted — it kept applying the
+          # semantic gate while the CLI grew a resolution gate the script did
+          # not have. A job that renders by a different path than production
+          # proves the wrong thing.
+          poetry run dotmac-observability \
+            --root tests/fixtures/reference \
+            --contracts contracts \
+            render \
+            --private-inventory tests/fixtures/reference/private/inventory.json \
+            --output "${RUNNER_TEMP}/rendered"
 
       - name: promtool accepts the rendered Prometheus configuration
         run: |

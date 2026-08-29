@@ -12,3 +12,15 @@ secrets/
 *.token
 *.key
 *.pem
+
+# A production render resolves the private inventory, so its bytes legitimately
+# carry endpoints and credential basenames (ADR-0006). `deploy/rendered/` is the
+# CLI's default output directory, so an operator who runs `render` without
+# `--output` writes exactly that material here. The committed render lives at
+# `tests/fixtures/reference/rendered/` and is synthetic; nothing under this path
+# is ever committed.
+deploy/rendered/
+
+# Any private inventory an operator fetches into the working tree. The one
+# tracked instance is the synthetic fixture, which is not under this path.
+private-inventory*.json
