@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dotmac.io/schemas/observability/control-plane.v1.json",
+  "title": "observability-control-plane.v1",
+  "description": "The evaluator and router this repository owns for one environment. Identity and topology only: no product decisions, no secret values.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "environment",
+    "host",
+    "prometheus",
+    "alertmanager",
+    "release_root",
+    "external_labels"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "observability-control-plane.v1"
+    },
+    "environment": {
+      "$ref": "#/$defs/slug"
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity",
+        "ssh_alias"
+      ],
+      "properties": {
+        "identity": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable human name of the host, recorded in every promotion receipt."
+        },
+        "ssh_alias": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The alias an operator names when authorizing a promotion. Present so a receipt can record WHICH host was changed; never used to infer a target automatically."
+        }
+      }
+    },
+    "prometheus": {
+      "$ref": "#/$defs/evaluator"
+    },
+    "alertmanager": {
+      "$ref": "#/$defs/evaluator"
+    },
+    "release_root": {
+      "type": "string",
+      "pattern": "^/[^\\s]*[^/\\s]$",
+      "description": "Absolute directory holding immutable release directories. Bind mounts point at a symlink under this root, never at a single file: a single-file bind mount detaches its inode on rename and is why in-place host editing became the only workable path."
+    },
+    "external_labels": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/label"
+      },
+      "description": "Labels stamped on every series this evaluator owns. An ordered array, not an object, so rendering is deterministic without sorting a mapping."
+    },
+    "scrape_interval": {
+      "$ref": "#/$defs/duration"
+    },
+    "scrape_timeout": {
+      "$ref": "#/$defs/duration"
+    },
+    "evaluation_interval": {
+      "$ref": "#/$defs/duration"
+    },
+    "resolve_timeout": {
+      "$ref": "#/$defs/duration"
+    },
+    "secrets_dir": {
+      "type": "string",
+      "pattern": "^/[^\\s]*[^/\\s]$",
+      "description": "HOST directory holding secret FILES, mounted read-only into both evaluators. A directory mount, not a file mount. The in-container paths are fixed by the renderer (/etc/prometheus/secrets and /etc/alertmanager/secrets) so a config reference and its mount cannot disagree. This repository names files here; it never holds their contents."
+    },
+    "smtp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "smarthost",
+        "from"
+      ],
+      "description": "Global SMTP settings. Required whenever any receiver declares an email integration: Alertmanager refuses a config whose email receiver has no smarthost, and the refusal surfaces as a control plane that will not start.",
+      "properties": {
+        "smarthost": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+:[0-9]{1,5}$"
+        },
+        "from": {
+          "type": "string",
+          "minLength": 3
+        },
+        "auth_username": {
+          "type": "string",
+          "minLength": 1
+        },
+        "require_tls": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$"
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$"
+    },
+    "label": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "value"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "evaluator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "image",
+        "digest",
+        "listen"
+      ],
+      "properties": {
+        "image": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Image reference WITHOUT a tag-only identity; the digest below is the identity."
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable version recorded in receipts. Evidence, never the pin."
+        },
+        "listen": {
+          "type": "string",
+          "pattern": "^[0-9.]+:[0-9]{1,5}$",
+          "description": "host:port the service binds. Loopback-bound unless a reviewed exception says otherwise."
+        }
+      }
+    }
+  }
+}

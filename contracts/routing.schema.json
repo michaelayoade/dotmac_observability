@@ -1,0 +1,361 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dotmac.io/schemas/observability/routing.v1.json",
+  "title": "observability-routing.v1",
+  "description": "One routing document: declared receivers, the route policy tree, or inhibition. Split into three files because they change for different reasons and have different reviewers.  Branching is if/then on `kind` rather than oneOf: oneOf collapses every branch's errors into one 'not valid under any of the given schemas', which tells an operator nothing about which field is wrong.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "kind"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "observability-routing.v1"
+    },
+    "kind": {
+      "enum": [
+        "receivers",
+        "policies",
+        "inhibition"
+      ]
+    }
+  },
+  "$defs": {
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$"
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$"
+    },
+    "matcher": {
+      "type": "string",
+      "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*\\s*(=~|!~|!=|=)\\s*\".*\"$",
+      "description": "An Alertmanager matcher in its modern quoted form, e.g. severity=\"critical\". Quoted so a value containing a comma cannot silently split the matcher."
+    },
+    "receivers_document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind",
+        "receivers"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "observability-routing.v1"
+        },
+        "kind": {
+          "const": "receivers"
+        },
+        "receivers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/receiver"
+          }
+        }
+      }
+    },
+    "receiver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "owner",
+        "integrations"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/slug"
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1
+        },
+        "integrations": {
+          "type": "array",
+          "minItems": 0,
+          "items": {
+            "$ref": "#/$defs/integration"
+          },
+          "description": "Empty ONLY for a reviewed null receiver, which must also carry `null_policy`."
+        },
+        "null_policy": {
+          "type": "string",
+          "minLength": 40,
+          "description": "AGENTS.md rule 7. Required in words when a receiver delivers nowhere: WHY this class of alert is deliberately not delivered, and what does observe it instead. Minimum length is deliberate \u2014 'n/a' is not a policy."
+        }
+      }
+    },
+    "integration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "credential"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "telegram",
+            "email",
+            "webhook",
+            "slack"
+          ]
+        },
+        "credential": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "openbao_path",
+            "file_name"
+          ],
+          "properties": {
+            "openbao_path": {
+              "type": "string",
+              "pattern": "^secret/[A-Za-z0-9._/-]+$"
+            },
+            "file_name": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]+$"
+            }
+          },
+          "description": "Rule 1. The rendered Alertmanager configuration references the file; the value is placed by the deployment from OpenBao and never enters Git."
+        },
+        "destination": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A NON-SECRET address: a chat id, a mailbox, a path on an internal host. A URL carrying an embedded key is a credential and belongs above."
+        },
+        "send_resolved": {
+          "type": "boolean"
+        }
+      }
+    },
+    "policies_document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind",
+        "defaults",
+        "routes"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "observability-routing.v1"
+        },
+        "kind": {
+          "const": "policies"
+        },
+        "defaults": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "receiver",
+            "group_by",
+            "group_wait",
+            "group_interval",
+            "repeat_interval"
+          ],
+          "properties": {
+            "receiver": {
+              "$ref": "#/$defs/slug"
+            },
+            "group_by": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+              }
+            },
+            "group_wait": {
+              "$ref": "#/$defs/duration"
+            },
+            "group_interval": {
+              "$ref": "#/$defs/duration"
+            },
+            "repeat_interval": {
+              "$ref": "#/$defs/duration"
+            }
+          }
+        },
+        "routes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/route"
+          }
+        }
+      }
+    },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "matchers",
+        "receiver"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/slug"
+        },
+        "matchers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/matcher"
+          }
+        },
+        "receiver": {
+          "$ref": "#/$defs/slug"
+        },
+        "continue": {
+          "type": "boolean"
+        },
+        "group_by": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+          }
+        },
+        "group_wait": {
+          "$ref": "#/$defs/duration"
+        },
+        "group_interval": {
+          "$ref": "#/$defs/duration"
+        },
+        "repeat_interval": {
+          "$ref": "#/$defs/duration"
+        }
+      }
+    },
+    "inhibition_document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind",
+        "rules"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "observability-routing.v1"
+        },
+        "kind": {
+          "const": "inhibition"
+        },
+        "rules": {
+          "type": "array",
+          "minItems": 0,
+          "items": {
+            "$ref": "#/$defs/inhibition"
+          }
+        }
+      }
+    },
+    "inhibition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "source_matchers",
+        "target_matchers",
+        "equal",
+        "rationale"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/slug"
+        },
+        "source_matchers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/matcher"
+          }
+        },
+        "target_matchers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/matcher"
+          }
+        },
+        "equal": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+          },
+          "description": "Required, never empty. An inhibition with no `equal` suppresses the target everywhere, not just where the cause applies \u2014 the single most common way an inhibition silences an unrelated outage."
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 40,
+          "description": "Why suppressing the target is correct when the source fires. An inhibition is a decision to NOT page someone; it needs a stated reason."
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "receivers"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "$ref": "#/$defs/receivers_document"
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "policies"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "$ref": "#/$defs/policies_document"
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "inhibition"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "$ref": "#/$defs/inhibition_document"
+      }
+    }
+  ]
+}

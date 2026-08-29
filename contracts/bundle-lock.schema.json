@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dotmac.io/schemas/observability/bundle-lock.v1.json",
+  "title": "observability-bundle-lock.v1",
+  "description": "The set of product alert bundles accepted for one environment. A lock is an identity, not a version string: promotion fetches the artifact and refuses it unless every digest matches.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "environment", "bundles"],
+  "properties": {
+    "schema_version": { "const": "observability-bundle-lock.v1" },
+    "environment": { "type": "string", "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$" },
+    "bundles": {
+      "type": "array",
+      "minItems": 0,
+      "items": { "$ref": "#/$defs/bundle" }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "product",
+        "environment",
+        "source_revision",
+        "image_digest",
+        "product_manifest_digest",
+        "rules_artifact",
+        "rules_sha256",
+        "metrics_manifest_sha256",
+        "rule_count",
+        "owner",
+        "runbook_base"
+      ],
+      "properties": {
+        "product": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+        "environment": { "type": "string", "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$" },
+        "source_revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$",
+          "description": "Full 40-character SHA on the product's PROTECTED main, reasserted as current at promotion time. Not a tag, not a branch, not an abbreviation."
+        },
+        "image_digest": { "$ref": "#/$defs/digest" },
+        "product_manifest_digest": { "$ref": "#/$defs/digest" },
+        "rules_artifact": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Immutable pointer to the rules artifact — a registry reference or release-asset URL that cannot be rewritten in place."
+        },
+        "rules_sha256": { "$ref": "#/$defs/sha256" },
+        "metrics_manifest_sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "The manifest declaring metric names, types, units and bounded label vocabularies. Rule 8's producer proof is checked against this: an alert over an undeclared metric is permanently silent and reads as 'all clear'."
+        },
+        "rule_count": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Exact number of rules the artifact must contain. Zero is never valid here — an empty bundle that loads cleanly is the failure this field exists to catch, and an unbacked rule is OMITTED from the bundle rather than shipped inert."
+        },
+        "owner": { "type": "string", "minLength": 1 },
+        "runbook_base": { "type": "string", "pattern": "^https://[^\\s]+$" },
+        "accepted_by": { "type": "string", "minLength": 1 },
+        "accepted_at": { "type": "string", "format": "date-time" },
+        "notes": { "type": "string" }
+      }
+    }
+  }
+}
