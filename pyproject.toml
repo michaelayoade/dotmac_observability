@@ -1,0 +1,76 @@
+[tool.poetry]
+name = "dotmac-observability"
+version = "0.1.0a1"
+description = "Git owner of the Dotmac observability control plane: bundle pins, scrape inventory, evaluator configuration, routing and promotion"
+authors = ["Dotmac"]
+readme = "README.md"
+packages = [{ include = "dotmac_observability", from = "src" }]
+# One exact build tool produces the lock, the CI environment and the promotion
+# runner. Every installer derives from this value.
+requires-poetry = "2.4.1"
+
+# NOT published. This is a control plane, not a distribution: nothing pins it,
+# so the version above is a deployment label rather than a contract. It is
+# absent from every release workflow deliberately.
+classifiers = ["Private :: Do Not Upload"]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.14"
+# The ONLY runtime dependency, and it is a validator rather than a renderer.
+# Rendering is deliberately dependency-free (see `yaml_emit`): a YAML library's
+# quoting and ordering are implementation details, and AGENTS.md rule 13
+# promises byte-stability across machines and versions. Schema validation has
+# no such constraint — its output is a pass/fail, not bytes we commit.
+jsonschema = "^4.23"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3"
+ruff = "^0.8"
+mypy = "^1.13"
+
+[tool.poetry.scripts]
+dotmac-observability = "dotmac_observability.cli:main"
+
+[build-system]
+requires = ["poetry-core>=1.9"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "ANN", "TID"]
+[tool.ruff.lint.per-file-ignores]
+# Tests name their intent in the function name and return nothing; annotating
+# every `-> None` adds noise to the one place a reader should be reading prose.
+"tests/**" = ["ANN201", "ANN202", "ANN001"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src", "tests"]
+strict = true
+warn_unreachable = true
+# The contract this repository makes about its own types is meant to be read,
+# so an unused ignore is a defect rather than a convenience.
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = "jsonschema.*"
+ignore_missing_imports = true
+
+# Tests ARE type-checked — a genuine type error in a test still fails the
+# build. What is relaxed is the requirement that every test function annotate
+# `-> None` and that every helper be annotated before it can be called. That
+# requirement catches nothing here and costs a line of noise on top of each
+# test name, which is the one place a reader should be reading prose.
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_untyped_calls = false
+disallow_incomplete_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"

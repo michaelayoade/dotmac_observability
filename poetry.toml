@@ -1,0 +1,11 @@
+# The virtualenv lives OUTSIDE the repository, overriding a machine-global
+# `virtualenvs.in-project = true`.
+#
+# This is not a preference. The Dotmac standards engine measures every Python
+# source on disk and refuses a file that an ignore rule hides from the tracked
+# inventory: "an ignore rule is product-authored and decides nothing about what
+# is measured". An in-project `.venv/` puts several thousand third-party
+# modules in that population, so conformance fails on dependencies rather than
+# on this repository's own code.
+[virtualenvs]
+in-project = false
