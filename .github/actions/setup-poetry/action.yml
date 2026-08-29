@@ -1,0 +1,103 @@
+name: Install pinned Poetry
+description: >-
+  Install the exact Poetry build declared by pyproject.toml's `requires-poetry`
+  and put it on PATH. Requires a Python interpreter already on PATH — run
+  actions/setup-python before this action.
+
+runs:
+  using: composite
+  steps:
+    # ONE pin, and it is the one the lockfile was produced with. Writing
+    # "2.4.1" here as well would create a second place to change, and the day
+    # the two disagree CI installs a resolver that did not write poetry.lock —
+    # which is exactly the class of drift `poetry check --lock` cannot see,
+    # because a different Poetry can consider the same lock valid and still
+    # resolve extras differently. Derived, never restated.
+    - name: Read the required Poetry version from pyproject.toml
+      id: pin
+      shell: bash
+      run: |
+        set -euo pipefail
+        version="$(python - <<'PY'
+        import sys, tomllib, pathlib
+        data = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
+        pin = data.get("tool", {}).get("poetry", {}).get("requires-poetry")
+        if not pin:
+            sys.exit("pyproject.toml declares no [tool.poetry] requires-poetry")
+        # An exact pin only. A range here would mean CI silently tracks a new
+        # Poetry minor the moment upstream publishes one.
+        if not pin.replace(".", "").isdigit():
+            sys.exit(f"requires-poetry must be an exact version, got {pin!r}")
+        print(pin)
+        PY
+        )"
+        echo "version=${version}" >> "$GITHUB_OUTPUT"
+        echo "Poetry pin from pyproject.toml: ${version}"
+
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/pip
+        key: poetry-${{ runner.os }}-${{ steps.pin.outputs.version }}-${{ hashFiles('pyproject.toml') }}
+
+    # A job-local venv rather than `pipx`/`pip install --user`: the runner image
+    # ships its own Poetry on some generations, and installing over it leaves
+    # two `poetry` binaries whose PATH order decides which one runs. A fresh
+    # prefix plus the PATH assertion below makes that unambiguous.
+    - name: Install Poetry into a fresh job-local environment
+      shell: bash
+      run: |
+        set -euo pipefail
+        venv="${RUNNER_TEMP}/poetry-bootstrap"
+        rm -rf "$venv"
+        python -m venv "$venv"
+        for attempt in 1 2 3; do
+          if "$venv/bin/python" -m pip install --disable-pip-version-check \
+               --only-binary=:all: "poetry==${{ steps.pin.outputs.version }}"; then
+            echo "${venv}/bin" >> "$GITHUB_PATH"
+            exit 0
+          fi
+          echo "::warning::Poetry install attempt ${attempt} failed"
+          sleep $((attempt * 5))
+        done
+        echo "::error::Poetry install failed after three attempts"
+        exit 1
+
+    - name: Assert PATH resolves to the pinned Poetry
+      shell: bash
+      run: |
+        set -euo pipefail
+        want="${RUNNER_TEMP}/poetry-bootstrap/bin/poetry"
+        got="$(command -v poetry)"
+        if [ "$got" != "$want" ]; then
+          echo "::error::poetry resolves to ${got}, not ${want}"
+          exit 1
+        fi
+        # `pip install poetry==X` guarantees the wheel, not that the binary on
+        # PATH is it. Assert the running build, which is the property every
+        # later step depends on.
+        reported="$(poetry --version)"
+        case "$reported" in
+          *"${{ steps.pin.outputs.version }}"*) ;;
+          *)
+            echo "::error::poetry reports '${reported}', expected ${{ steps.pin.outputs.version }}"
+            exit 1
+            ;;
+        esac
+        echo "$reported"
+
+    # The environment layout is NOT configured here. This repository commits
+    # `poetry.toml` with `virtualenvs.in-project = false`, and that file is the
+    # authority: the Dotmac standards engine measures every Python source on
+    # disk and refuses one that an ignore rule hides from the tracked
+    # inventory, so an in-workspace `.venv/` puts several thousand third-party
+    # modules into the measured population and conformance fails on
+    # dependencies instead of on this repository's code. Setting the option
+    # here would contradict the committed file for every reader who compares
+    # the two, while changing nothing — a project-local poetry.toml wins over
+    # the global config this step would write.
+    - name: Confirm Poetry will create an environment
+      shell: bash
+      run: |
+        set -euo pipefail
+        poetry config virtualenvs.create true
+        echo "in-project: $(poetry config virtualenvs.in-project)"

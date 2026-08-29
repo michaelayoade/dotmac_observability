@@ -1,0 +1,89 @@
+{
+  "schema_version": 9,
+  "profile_id": "dotmac-observability-engineering-standards",
+  "repository": {
+    "canonical_url": "https://github.com/michaelayoade/dotmac_observability",
+    "default_branch": "main"
+  },
+  "governance_model": {
+    "kind": "pinned",
+    "canonical_url": "https://github.com/michaelayoade/dotmac_governance",
+    "revision": "e0f636c3f5adea77da136f75f49c2349fbf9eeaa",
+    "source": "docs/adr/0006-cross-repository-engineering-conformance.md",
+    "status": "accepted"
+  },
+  "enforcement_mode": "required",
+  "authorities": [
+    {
+      "authority_id": "control-plane-rendering",
+      "subject": "Deterministic production of the evaluator and router configuration BYTES from the typed inventory. One owner, because a second producer of these bytes is a second answer to what the control plane is.",
+      "protected_resources": [
+        "rendered-control-plane-configuration"
+      ],
+      "owner_component": "control-plane-renderer",
+      "owner_implementation": "src/dotmac_observability/render.py",
+      "decision_interface": "dotmac_observability.render.render_control_plane",
+      "canonical_writer_paths": [
+        "src/dotmac_observability/render.py"
+      ],
+      "adapter_paths": [
+        "src/dotmac_observability/cli.py"
+      ],
+      "drift_test_paths": [
+        "tests/unit/test_render_determinism.py",
+        "tests/architecture/test_repository_contract.py"
+      ]
+    },
+    {
+      "authority_id": "inventory-admission",
+      "subject": "Whether a declared inventory may become configuration at all: schema conformance, typed construction, and the cross-document gates no single file can answer.",
+      "protected_resources": [
+        "inventory-admission-decision"
+      ],
+      "owner_component": "inventory-validator",
+      "owner_implementation": "src/dotmac_observability/validate.py",
+      "decision_interface": "dotmac_observability.validate.validate",
+      "canonical_writer_paths": [
+        "src/dotmac_observability/validate.py"
+      ],
+      "adapter_paths": [
+        "src/dotmac_observability/cli.py"
+      ],
+      "drift_test_paths": [
+        "tests/unit/test_routing_coverage.py",
+        "tests/unit/test_federation_rename.py",
+        "tests/unit/test_model_loading.py"
+      ]
+    }
+  ],
+  "typed_contract_surfaces": [
+    {
+      "surface_id": "control-plane-desired-state",
+      "paths": [
+        "src/dotmac_observability/model.py"
+      ],
+      "require_public_annotations": true,
+      "forbid_any": true,
+      "require_immutable_records": true
+    }
+  ],
+  "module_declared_vocabularies": [],
+  "testing_kit_boundary": {
+    "test_roots": [
+      "tests"
+    ],
+    "kit_source_roots": [],
+    "conformance_probes": []
+  },
+  "external_connector_surface": {
+    "baselines": {
+      "outbound_transport": 0,
+      "webhook_surface": 0,
+      "provider_credential": 0,
+      "connector_task": 0,
+      "sync_checkpoint": 0,
+      "delivery_retry": 0
+    },
+    "conserved_exclusions": []
+  }
+}
