@@ -184,6 +184,29 @@ def test_the_runner_is_not_indirected_through_a_variable(path):
 
 
 @pytest.mark.parametrize("path", BOTH, ids=lambda p: p.name)
+def test_no_workflow_hardcodes_an_address(path):
+    """Neither the store's address nor the runner's may be written down here.
+
+    Both are resolved material under ADR-0004 and both arrive from
+    configuration: the store's from a secret, the runner's from nowhere at all
+    — a self-hosted runner is selected by LABEL, and its egress address is a
+    property of the network rather than an input to a job.
+
+    The repository-wide private-material scanner already refuses an address in
+    any tracked file. This is narrower and worth having anyway, because the
+    plausible mistake is specific: pinning a workflow to the host it is
+    "supposed" to run on by writing the address into a comment or a check, at
+    which point the address is published and the pin is decorative.
+    """
+    text = _text(path)
+    v4 = re.findall(r"(?<![\w.])(?!127\.)(?!0\.0\.0\.0)(?:\d{1,3}\.){3}\d{1,3}(?![\w.])", text)
+    # A prefix LENGTH is policy rather than an address — the runbook has to be
+    # able to say "an exact /32, never the /22" — so only a full address is
+    # refused here.
+    assert not v4, f"{path.name} hardcodes address(es) {sorted(set(v4))}"
+
+
+@pytest.mark.parametrize("path", BOTH, ids=lambda p: p.name)
 def test_each_workflow_also_refuses_a_hosted_runner_at_run_time(path):
     # Belt and braces with `runs-on`: a repository variable can be repointed
     # without touching the file, and the containment argument depends on where
@@ -296,6 +319,25 @@ def test_planting_an_artifact_upload_is_caught():
     )
     assert any(token in planted for token in _PUBLISHERS)
     assert not any(token in _text(SUPERSEDE) for token in _PUBLISHERS)
+
+
+def test_planting_the_runner_address_is_caught():
+    # The specific plausible mistake: pinning the workflow to "the right host"
+    # by writing its address into a check, which publishes the address and
+    # leaves the pin decorative.
+    # Built at run time rather than written as a literal. The repository-wide
+    # scanner reads THIS file too, and it is not in PRIVATE_SCAN_EXCLUSIONS —
+    # correctly, because that list's premise is "the detector and its proof",
+    # and this is the proof for a different detector. Assembling the address
+    # keeps the exclusion list at exactly two entries instead of widening it
+    # past its stated premise for a test's convenience.
+    address = ".".join(("198", "51", "100", "7"))
+    planted = _text(SUPERSEDE).replace(
+        "RUNNER_ENVIRONMENT:-", f'RUNNER_IP:-}}" = "{address}" ] || exit 1; [ "${{X:-'
+    )
+    pattern = r"(?<![\w.])(?!127\.)(?!0\.0\.0\.0)(?:\d{1,3}\.){3}\d{1,3}(?![\w.])"
+    assert re.findall(pattern, planted)
+    assert not re.findall(pattern, _text(SUPERSEDE))
 
 
 def test_planting_a_hosted_runner_is_caught():

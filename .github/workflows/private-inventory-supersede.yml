@@ -67,6 +67,10 @@ jobs:
     # QUEUED — it is never silently rerouted to a hosted one, which is the
     # failure mode that would quietly undo the containment.
     runs-on: [self-hosted, dotmac-control-runner]
+    # Bounds EXECUTION, not queueing. A dispatch with no matching runner
+    # registered waits in the queue; it is not failed by this budget, so
+    # "runner absent" never presents as a job that went wrong. What this
+    # does bound is a hung request against the store.
     timeout-minutes: 15
 
     # Protected main only. `workflow_dispatch` lets a caller choose any ref that

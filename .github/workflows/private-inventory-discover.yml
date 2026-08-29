@@ -37,6 +37,10 @@ jobs:
     # ranges, and reopening that allowlist to reach one would undo the
     # containment to serve a convenience. An absent runner leaves this QUEUED.
     runs-on: [self-hosted, dotmac-control-runner]
+    # Bounds EXECUTION, not queueing. A dispatch with no matching runner
+    # registered waits in the queue; it is not failed by this budget, so
+    # "runner absent" never presents as a job that went wrong. What this
+    # does bound is a hung request against the store.
     timeout-minutes: 10
     if: github.ref == 'refs/heads/main'
 

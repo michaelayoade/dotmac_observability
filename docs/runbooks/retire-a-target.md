@@ -160,19 +160,40 @@ The superseded version is retained by KV and nothing in the workflow deletes
 it. Do not delete it by hand: every receipt naming version *n* is unresolvable
 evidence without version *n* to resolve against.
 
-### What is outstanding, at a glance
+### The sequence, and why it is a sequence
 
-| Prerequisite | State |
-| --- | --- |
-| Public inventory populated and reviewed (lane 3C) | **outstanding** — blocks everything below |
-| `dotmac-control-runner` provisioned and registered | **outstanding** — named, not yet built |
-| Reader and writer identities in OpenBao | **outstanding** — provisioned after the above |
-| Four/five secrets configured | **outstanding** — deliberately last |
-| `private-inventory` environment configured | **outstanding** |
-| Discovery run once, shape confirmed | **outstanding** |
+Every row is outstanding, and each is genuinely gated on the one above it
+rather than merely listed after it. Neither workflow can run until all of them
+are done, and each refuses rather than improvises when its own prerequisite is
+missing.
 
-Neither workflow can run until every row is done, and each refuses rather than
-improvises when its own prerequisite is missing.
+| # | Prerequisite | Gated on |
+| --- | --- | --- |
+| 1 | Public inventory populated and reviewed (lane 3C) | — blocks everything |
+| 2 | TLS or WireGuard in front of the secret store | Michael's ruling: no credential crosses a plaintext listener |
+| 3 | `dotmac-control-runner` provisioned, registered and reachable | 2 — the transport decision must land before another host is put in front of the listener |
+| 4 | The runner's egress carried in the private client inventory as an **exact `/32`** | 3 — an allowlist entry for an unprovisioned address is a rule nobody can verify |
+| 5 | Reader and writer identities, then their secrets | 4 — a credential the runner cannot use is a credential issued early |
+| 6 | `private-inventory` environment configured | 5 |
+| 7 | Discovery run once, shape confirmed into a committed request | 6 |
+| 8 | Supersession dispatched | 7 |
+
+Row 4 is the one with a rule attached. It is an **exact `/32` for the named
+logical role, never the surrounding `/22`** — a `/22` grants a whole office
+network reach to a root credential store, and it is precisely why two readers
+independently mis-called the store's port publicly reachable on the day it was
+contained. If anyone ever proposes restoring the wider range *because the
+runner sits inside it*, that is the argument to refuse: the runner's membership
+of a range is a reason to name the host, not a reason to admit the range. The
+entry goes through the inventory, with an enforcement flag and a stated reason,
+never by hand on the host.
+
+Rows 3 and 4 also explain why the workflows behave the way they do while the
+runner does not exist. `runs-on` is a literal label pair, so with no matching
+runner registered a dispatch stays **queued** — it is not an error, and it is
+certainly not rerouted to a hosted runner. Nothing here probes the runner for
+liveness, and nothing converts "runner absent" into a failure that would read
+like a job problem.
 
 ### Before the first run — in this order
 
@@ -187,8 +208,32 @@ first, not last.
 **2. Provision `dotmac-control-runner`** — a dedicated fixed-egress runner,
 registered with the labels `self-hosted` and `dotmac-control-runner`. It is
 **not Observer**, **not any product host**, and **not the Foundation test
-host**. Its address is named when it is provisioned; nothing here is designed
-around a guessed one.
+host**.
+
+Its binding is decided and held privately: logical role and runner label
+`dotmac-control-runner`, one fixed egress address carried as an exact `/32`, no
+public inbound service, and SSH only from approved management sources. **The
+address is not written here** — a resolved host address is private material
+under ADR-0004, and this repository's own private-material scanner refuses it
+in any tracked file. That is not a formality: the refusal was demonstrated
+against this very line before it was written.
+
+"No public inbound service" has a design consequence worth stating rather than
+leaving implicit. The runner **reaches out** to the secret store and is never
+reached; it exposes nothing. That rules out any later convenience along the
+lines of "let CI call a webhook on the runner", which would need an inbound
+listener on a host chosen precisely for having none.
+
+> **The control runner and the external probe vantage are opposites, and are
+> not interchangeable.** A reader who finds two named VMs in the fleet notes
+> might reasonably assume either would serve. They are selected for
+> contradictory properties: the control runner is **trusted and inside** Dotmac
+> address space, which is what makes an exact `/32` allowlist entry meaningful;
+> the probe vantage is **untrusted and outside** every Dotmac allowlist, which
+> is the only thing that makes a negative reachability result mean anything. An
+> inside host cannot prove a port is closed to the world, and an outside host
+> must never hold a credential. Swapping them silently destroys the property
+> each was chosen for.
 
 Both workflows pin `runs-on: [self-hosted, dotmac-control-runner]` as a
 literal, deliberately not a repository variable. A variable could be repointed
