@@ -80,6 +80,11 @@ no-checkout special case.
 | Rules with `runbook_url` | 3 (all three point at an error-tracker issue query, not a procedure) |
 | Rules without `runbook_url` | 53 |
 
+> **These are the pre-change counts.** The CRM deletion list this ledger
+> prepared was executed on the host later on 2026-08-29, taking the rule set to
+> 52 and `UNATTRIBUTED` to 29. See "Executed 2026-08-29" below, and
+> `observer-as-built.md` §12, before citing any number in this document.
+
 ## Rule ledger (all 56)
 
 `Source status` is one of:
@@ -402,6 +407,65 @@ producers do exist in `dotmac_crm` `app/metrics.py` (lines 4, 9, 39, 63 at
 `a922decf1356f296f1816aba06cf2bcf966fc212`), so this is a reachability failure,
 not a missing-producer one — but the operational effect is identical to the two
 permanently-silent billing rules: a green dashboard that means nothing.
+
+### Executed 2026-08-29 — the deletion list was applied to the host
+
+The eleven-item list above was carried out the same day, by hand, on the live
+host. The full change record — what was removed, from which file, how much,
+where the preserved copies are, and what the host's counts became — is
+`observer-as-built.md` §12. It is not repeated here; this ledger records only
+what the execution does to its own attribution numbers.
+
+**Reported, not measured.** As with §12, this repository did not independently
+verify the result. The counts below are the reported ones.
+
+| Ledger measure | Above | After execution |
+|---|---|---|
+| Live alerting rules | 56 | 52 |
+| Rule groups | 9 | 8 (`dotmac_omni` gone) |
+| **`UNATTRIBUTED`** | **33** | **29** |
+| Rules with a `PRODUCER-NOT-FOUND` metric | 9 | 9 — unchanged |
+| Rules silent because their target is decommissioned | 4 | 0 |
+| Rules with `runbook_url` | 3 | 2 |
+| Live scrape jobs | 16 | 15 |
+
+The 29 remaining unattributed rules, by group: `dotmac_identity_plane` 10,
+`dotmac_academy` 6, `host_alerts` 5, `dotmac_sub` (the group) 5, `dotmac_erp` 3.
+
+Three properties of that delta are worth stating, because each is easy to read
+the wrong way round.
+
+**The unattributed count fell without anything being attributed.** All four CRM
+rules were `UNATTRIBUTED`, so deleting them moved the headline from 33 to 29
+while the attribution work itself stood still. The delivery plan blocks
+promotion until unattributed reaches zero; that gate must count *attributions
+made*, not the size of the remaining set, or deleting rules will keep reading
+as progress. Twenty-nine is the size of the work, and none of it is done.
+
+**`PRODUCER-NOT-FOUND` did not move at all.** All nine sit in
+`dotmac_identity_plane` and are untouched by a CRM removal. Nine rules, seven
+of them `critical`, still depend on an exporter whose source is in no
+repository and nowhere on the indexed filesystem. That number is the one this
+ledger would most like to see fall, and it has not.
+
+**Deleting the rules did not settle who owned them.** The four CRM rules were
+removed because their *product* is provably gone, which is a different
+argument from attribution — it says nobody needs the rule, not that somebody
+wrote it. The `dotmac_omni` group's authorship remains unknown and now
+unknowable from the host, since the group no longer exists there. This is why
+the preserved copies under `/root/crm-observability-removal-20260829/` matter:
+they are the only remaining artefact of four rules whose author was never
+identified, and the same will be true of every rule retired before it is
+attributed. Attribute first where the option still exists.
+
+### Line numbers above are pre-execution
+
+Every line range in this ledger — the deletion list's `prometheus.yml` 131-142
+and `alerts.yml` 264-314, and the nine-row group-boundary table — was captured
+against the pre-change files and no longer resolves against the host. They are
+kept because they are the evidence for what was removed. A later reader wanting
+current offsets must re-capture; nothing here should be used to locate anything
+on the host today.
 
 ## ERP: the three legacy rules, and the Foundation bundle
 

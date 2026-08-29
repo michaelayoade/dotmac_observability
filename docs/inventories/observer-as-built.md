@@ -17,6 +17,12 @@ URLs, credential-file bindings and federation endpoints are private promotion
 material and appear only in the private inventory handed over separately. What
 is below is structure, counts, versions, digests and health.
 
+> **The host changed after this census ran.** A hand edit later on 2026-08-29
+> removed the retired CRM product's configuration. §§1-11 are left exactly as
+> measured, so every count in them is the pre-change count; **§12 records the
+> delta and the post-change state**, and is what a cutover must reproduce.
+> Read §12 before citing a number from §4, §5 or §7.
+
 ## 1. Platform and project identity
 
 | Fact | Value |
@@ -217,7 +223,7 @@ Numbered so a later change can cite one. Severity is this census's judgement.
 | OBS-03 | high | Rules live in one 33 KB file loaded by an exact path. There is no per-product bundle, so no product can own its own rules and no bundle can be swapped atomically. |
 | OBS-04 | high | Alertmanager has no child routes. `critical` and `warning` are recorded but not routed differently, so severity is presentational. |
 | OBS-05 | medium | 53 of 56 rules have no runbook. |
-| OBS-06 | medium | A retired product (CRM) still has a scrape job and four alert rules, and its dead target is firing `ServiceDown` — live noise from a decommissioned system. |
+| OBS-06 | medium | A retired product (CRM) still has a scrape job and four alert rules, and its dead target is firing `ServiceDown` — live noise from a decommissioned system. **Closed 2026-08-29 by a host edit — see §12.** |
 | OBS-07 | **critical** | **Corrected — see §9.1.** The original wording of this finding was wrong. IPv4 containment is in place and persisted; the unremediated exposure is IPv6, by a mechanism that makes the existing IPv6 rules inert. Detail withheld here because it is unremediated. |
 | OBS-08 | medium | No rollback mechanism (§7), only 26 unordered backup files. |
 | OBS-09 | medium | `external_labels` is empty, so this evaluator's own series carry no environment or control-plane identity. |
@@ -359,3 +365,128 @@ That last one is the substantive design question this census raises: a
 byte-identical reproduction of the as-built would reproduce OBS-03. Parity and
 correctness point in different directions here, and the resolution belongs in
 PR 3's ADR, not in this file.
+
+## 12. Post-census host change — the CRM decommission, 2026-08-29
+
+Everything above is the host as it stood when the census ran. Later the same
+day the Observer host was **changed by hand**, in the edit path this repository
+exists to remove. Under the target contract that is drift; recorded here it is
+**adoption evidence**, which is a different and more useful thing: it is the
+exact delta the first rendered bundle has to reproduce.
+
+The two are not in tension. A census is a dated statement about a moment, so
+the sections above are left exactly as measured rather than quietly updated —
+the same discipline §9.1 applies to a withdrawn finding. This section states
+what the host became.
+
+### Provenance of this section — read it differently from the rest
+
+| Section | How it was obtained |
+| --- | --- |
+| §§1–11 | Read-only inspection over SSH, authorized by Michael, by the author of that census |
+| §12 (this one) | **Reported by the operator who made the change**, and transcribed here |
+
+Nothing in §12 was independently measured by this repository. That distinction
+matters at exactly one point — the parity gate in "What this obliges" below,
+which is where a transcription error would show up as a byte difference rather
+than as a silent wrong assumption. Until that gate runs, treat every count
+below as reported, not verified.
+
+### What changed
+
+The change executed the prepared deletion list in
+`observer-rule-provenance.md` § "Every remaining CRM reference in the live
+observability configuration" — all eleven items, A1–A5, B1–B5 and C1, across
+the three files that list names. It also touched a fourth surface the census
+never covered (Grafana dashboards; see OBS-20 below).
+
+| # | File | Change | Removed |
+| --- | --- | --- | --- |
+| 1 | `prometheus/prometheus.yml` | scrape job `dotmac-crm-app` deleted (items A1–A5), instance label `dotmac-crm` | 435 bytes |
+| 2 | `prometheus/alerts.yml` | rule group `dotmac_omni` deleted whole (items B1–B5): `CrmHighErrorRate`, `CrmDbPoolNearExhaustion`, `CrmLongRunningTransaction`, `CrmSlowRequests` | 2,464 bytes |
+| 3 | secrets directory | one dead scrape credential shredded (item C1) — *basename withheld, ADR-0004* | 1 file |
+| 4 | Grafana | dashboard `crm.json` deleted (title "Dotmac CRM", uid `dotmac-crm`, 8 panels) and its stray `crm.json.bak-rename2`; the `DotMac Omni` entry removed from `application-logs.json`'s `application` template variable, taking it from 6 query entries and options to 5 | 2 files, 1 variable entry |
+
+Activation: Prometheus reloaded by SIGHUP; Grafana restarted, `/api/health`
+returned 200. Preserved copies of everything removed are on the host under
+`/root/crm-observability-removal-20260829/`, and the two Prometheus files carry
+`.bak-crm-removal-20260829` backups beside them.
+
+### The post-edit state, against the census
+
+| Measure | §§4–5, as censused | After the change |
+| --- | --- | --- |
+| Scrape jobs | 16 | 15 |
+| Active targets | 19 (18 up, 1 down) | 18 (18 up, **0 down**) |
+| Rule groups | 9 | 8 |
+| Alerting rules | 56 | 52 |
+| Severity split | 33 warning / 23 critical | 30 warning / 22 critical |
+| Rules with a `runbook_url` | 3 | 2 |
+| Rules `UNATTRIBUTED` | 33 | **29** |
+| Rules with a `PRODUCER-NOT-FOUND` metric | 9 | 9 (unchanged — all nine are `dotmac_identity_plane`) |
+| Rules silent because their target is decommissioned | 4 | 0 |
+
+Consequential note D1 of the deletion list is confirmed: the firing
+`ServiceDown{job="dotmac-crm-app"}` cleared when the job went, without touching
+`host_alerts`. The host now reports no down target at all.
+
+### Which findings this closes, and which it does not
+
+**OBS-06 is closed.** A retired product no longer has a scrape job, four alert
+rules or a dead target generating live pages. This is the first of the census's
+findings to be resolved, and it is resolved on the host rather than in this
+repository — which is the shape of every remaining one until promotion exists.
+
+**Nothing else is closed.** In particular OBS-01 is not merely still open, it
+is *demonstrated again*: this change is a correct, careful, well-recorded set
+of edits that no gate could have refused, no receipt records, and no drift
+detector will notice. That is the finding, not a criticism of the change.
+
+### Step 7's "prove the owner first" test, applied
+
+The migration plan removes a dead rule, an inert inhibition or a retired
+target only after its owner is proven. CRM passes: the product is fully
+decommissioned — containers, volumes, images, vhost, certificate, units and
+deployment directory destroyed on its named host on 2026-08-29, with only
+off-host database backups retained. The retirement is no longer the
+*incomplete* one the provenance ledger measured; the observability
+configuration was the last live reference.
+
+**`acme` does not pass, and its reference stays.** `application-logs.json`
+still carries a `DotMac ACME : acme` entry. The `acme` platform runtime was
+retired the same day on the ERP host, but retirement of a runtime is not the
+same evidence as CRM's: its public name still resolves, its certificate is
+still live to serve a tombstone, and the rollback archive is deliberately
+intact. Removing the log-source entry would be an inference from a Knowledge
+note rather than a proof, and step 7 asks for the proof. It is listed as
+outstanding, not as done.
+
+### What this obliges of the first rendered bundle
+
+The first bundle this repository promotes must render to **this** state, not to
+the state in §§4–5. Concretely, the parity target is 15 jobs, 8 groups and 52
+rules, with no `dotmac-crm-app`, no `dotmac_omni` and no reference to the
+shredded credential. A render that reproduces the census exactly would
+reintroduce a decommissioned product's configuration, so §11's "byte-for-byte
+reproduction of the as-built" now means the as-built **as of this section**.
+
+That is a general property worth naming rather than a CRM detail: a cutover
+that adopts a host's current configuration is racing that host's operators, and
+the race is only winnable if every hand edit between census and cutover is
+captured the way this one was. Each further edit before promotion widens the
+delta this bundle has to carry.
+
+### Two new findings this change surfaced
+
+| # | Severity | Finding |
+| --- | --- | --- |
+| OBS-20 | medium | **Grafana dashboards and the Loki/promtail configuration are outside both the census and the planned bundle.** The change had to edit dashboard JSON and a template variable that nothing owns, reviews or renders. Until they are in scope, "every running byte explained by a release digest" is achievable for Prometheus and Alertmanager only, and the stack has a second unversioned edit surface with the same properties OBS-01 describes. |
+| OBS-21 | low | **promtail stamps a retired host label on surviving logs.** Logs from the `son_erp` workload still arrive labelled with the decommissioned CRM host's name, because the shipper's label was never updated when the workload was rehomed. It is a promtail configuration fact, so it belongs to this repository's scope, and it is a worked example of OBS-20: no gate reads that file. |
+
+### An inconsistency noticed while amending, and deliberately not repaired
+
+§7 states "26 ad-hoc backup files" and then breaks them down as 20 + 8 + 2 + 4,
+which is 34. One of the two numbers is wrong and this amendment has no evidence
+for which. It is flagged rather than corrected, because guessing at a measured
+figure is how a census stops being evidence. The change above added two further
+backup files, so whichever figure is right is now two low.
