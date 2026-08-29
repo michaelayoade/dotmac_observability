@@ -1,0 +1,38 @@
+schema_version = "observability-routing.v1"
+kind = "receivers"
+
+[[receivers]]
+name = "oncall"
+owner = "platform-oncall"
+
+  [[receivers.integrations]]
+  type = "telegram"
+  destination = "-1000000000001"
+  send_resolved = true
+
+    [receivers.integrations.credential]
+    openbao_path = "secret/dotmac/observability/telegram-oncall"
+    file_name = "telegram-oncall.token"
+
+[[receivers]]
+name = "platform-mail"
+owner = "platform-oncall"
+
+  [[receivers.integrations]]
+  type = "email"
+  destination = "platform@dotmac.invalid"
+  send_resolved = false
+
+    [receivers.integrations.credential]
+    openbao_path = "secret/dotmac/observability/smtp"
+    file_name = "smtp.password"
+
+[[receivers]]
+name = "recorded-only"
+owner = "platform-oncall"
+integrations = []
+null_policy = """
+Informational alerts are recorded in Prometheus and reviewed on the weekly \
+operations pass. They are deliberately not delivered because paging on them \
+trained the on-call rotation to mute the channel that also carries criticals.
+"""

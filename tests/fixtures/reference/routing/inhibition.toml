@@ -1,0 +1,14 @@
+schema_version = "observability-routing.v1"
+kind = "inhibition"
+
+[[rules]]
+id = "target-down-suppresses-its-own-symptoms"
+source_matchers = ['alertname="TargetDown"']
+target_matchers = ['severity="warning"']
+equal = ["product", "job", "instance"]
+rationale = """
+When a target is down every metric-derived warning about that same instance is \
+a restatement of the outage, not independent information. `equal` pins the \
+suppression to the same product, job and instance so an unrelated warning \
+elsewhere is never silenced.
+"""

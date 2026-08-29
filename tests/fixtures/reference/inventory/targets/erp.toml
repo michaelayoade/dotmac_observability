@@ -1,0 +1,39 @@
+schema_version = "observability-target.v1"
+kind = "targets"
+product = "dotmac-erp"
+owner = "erp-platform"
+
+[[jobs]]
+job = "dotmac-erp-app"
+scheme = "https"
+metrics_path = "/metrics"
+endpoints = ["erp.invalid:443"]
+expected = 1
+scrape_interval = "15s"
+
+  [[jobs.labels]]
+  name = "product"
+  value = "dotmac-erp"
+
+  [[jobs.labels]]
+  name = "tier"
+  value = "app"
+
+  [jobs.credential]
+  openbao_path = "secret/dotmac/observability/erp-scrape"
+  file_name = "erp-scrape.token"
+
+[[jobs]]
+job = "dotmac-erp-worker"
+scheme = "https"
+metrics_path = "/metrics"
+endpoints = ["erp-worker-1.invalid:443", "erp-worker-2.invalid:443"]
+expected = 2
+
+  [[jobs.labels]]
+  name = "product"
+  value = "dotmac-erp"
+
+  [[jobs.labels]]
+  name = "tier"
+  value = "worker"

@@ -1,0 +1,38 @@
+schema_version = "observability-control-plane.v1"
+environment = "reference"
+release_root = "/opt/observability/releases"
+secrets_dir = "/etc/prometheus/secrets"
+scrape_interval = "30s"
+scrape_timeout = "10s"
+evaluation_interval = "30s"
+resolve_timeout = "5m"
+
+[host]
+identity = "reference-evaluator"
+ssh_alias = "reference"
+
+[prometheus]
+image = "docker.io/prom/prometheus"
+digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+version = "3.2.1"
+listen = "127.0.0.1:9090"
+
+[alertmanager]
+image = "docker.io/prom/alertmanager"
+digest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+version = "0.28.0"
+listen = "127.0.0.1:9093"
+
+[[external_labels]]
+name = "environment"
+value = "reference"
+
+[[external_labels]]
+name = "control_plane"
+value = "dotmac-observability"
+
+[smtp]
+smarthost = "smtp.invalid:587"
+from = "alerts@dotmac.invalid"
+auth_username = "alerts@dotmac.invalid"
+require_tls = true

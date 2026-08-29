@@ -1,0 +1,20 @@
+schema_version = "observability-target.v1"
+kind = "federation"
+name = "dotmac-sub-federation"
+owner = "sub-platform"
+rename_prefix = "federated_"
+scrape_interval = "60s"
+match = ['{job="dotmac-sub"}', '{__name__=~"observability_state"}']
+
+[source]
+scheme = "https"
+endpoint = "sub.invalid:443"
+path = "/federate"
+
+  [source.credential]
+  openbao_path = "secret/dotmac/observability/sub-federation"
+  file_name = "sub-federation.token"
+
+[[labels]]
+name = "federated_from"
+value = "dotmac-sub"
