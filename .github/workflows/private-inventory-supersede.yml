@@ -58,11 +58,15 @@ concurrency:
 jobs:
   supersede:
     name: Apply a reviewed retirement to the private inventory
-    # Supplied by configuration and deliberately not defaulted here: the host
-    # is Michael's to name, and a placeholder would be a design built around a
-    # value nobody chose. With the variable unset the job cannot schedule,
-    # which is the correct failure.
-    runs-on: ${{ vars.PRIVATE_INVENTORY_RUNNER }}
+    # The named dedicated fixed-egress runner. NOT Observer, not any product
+    # host, and not the Foundation test host.
+    #
+    # A literal label pair rather than a repository variable, and that is the
+    # point: a variable can be repointed at a hosted runner without touching
+    # this file or its guard. With no matching runner registered the job stays
+    # QUEUED — it is never silently rerouted to a hosted one, which is the
+    # failure mode that would quietly undo the containment.
+    runs-on: [self-hosted, dotmac-control-runner]
     timeout-minutes: 15
 
     # Protected main only. `workflow_dispatch` lets a caller choose any ref that

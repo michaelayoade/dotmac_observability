@@ -160,6 +160,20 @@ The superseded version is retained by KV and nothing in the workflow deletes
 it. Do not delete it by hand: every receipt naming version *n* is unresolvable
 evidence without version *n* to resolve against.
 
+### What is outstanding, at a glance
+
+| Prerequisite | State |
+| --- | --- |
+| Public inventory populated and reviewed (lane 3C) | **outstanding** — blocks everything below |
+| `dotmac-control-runner` provisioned and registered | **outstanding** — named, not yet built |
+| Reader and writer identities in OpenBao | **outstanding** — provisioned after the above |
+| Four/five secrets configured | **outstanding** — deliberately last |
+| `private-inventory` environment configured | **outstanding** |
+| Discovery run once, shape confirmed | **outstanding** |
+
+Neither workflow can run until every row is done, and each refuses rather than
+improvises when its own prerequisite is missing.
+
 ### Before the first run — in this order
 
 The first item is a blocker for everything after it, and the last two are
@@ -170,14 +184,25 @@ workflows refuse without it: the two-directional resolution check cannot run,
 and a supersession that cannot be resolved is not one worth writing. This is
 first, not last.
 
-**2. Name the fixed-egress control runner** and set the repository variable
-`PRIVATE_INVENTORY_RUNNER` to its label. It is **not Observer** and **not the
-Foundation test host by assumption** — it has to be named explicitly. Hosted
-runners are refused twice over: `runs-on` reads the variable, and each workflow
-checks `RUNNER_ENVIRONMENT` at run time. OpenBao's listener sits behind an
-inventory-derived allowlist with a terminal DROP on both address families, and
-widening that allowlist to reach a dynamic hosted range would undo the
-containment to serve a convenience.
+**2. Provision `dotmac-control-runner`** — a dedicated fixed-egress runner,
+registered with the labels `self-hosted` and `dotmac-control-runner`. It is
+**not Observer**, **not any product host**, and **not the Foundation test
+host**. Its address is named when it is provisioned; nothing here is designed
+around a guessed one.
+
+Both workflows pin `runs-on: [self-hosted, dotmac-control-runner]` as a
+literal, deliberately not a repository variable. A variable could be repointed
+at a hosted runner in repository settings, touching neither workflow nor its
+guard and appearing in no diff. With a literal and no matching runner
+registered, the job stays **queued** — it is never silently rerouted, which is
+the failure that would quietly undo the containment. Each workflow also checks
+`RUNNER_ENVIRONMENT` at run time, so a runner registered under a label that
+does not describe it is caught too.
+
+OpenBao's listener sits behind an inventory-derived allowlist with a terminal
+DROP on both address families. Hosted runners arrive from dynamic ranges, and
+widening the allowlist to reach one would undo the containment to serve a
+convenience.
 
 **3. Create two identities, path-scoped to this exact document.**
 
@@ -198,12 +223,33 @@ credential-custody layout and therefore private under ADR-0004, which is why
 they are secrets rather than values written down here. Both workflows refuse if
 any required one is empty.
 
-**4. Configure the `private-inventory` environment**: main-only, **no wait
-timer**, and a **named required reviewer** until Deployment Control
-authorization replaces that human gate. The workflow declares the environment;
-protection rules live in repository settings and cannot be asserted from a
-workflow file, so this is a setup step and nothing in the repository is
-evidence that it is done.
+**4. Configure the `private-inventory` environment**: deployment branch
+restricted to `main`, **no wait timer**, required reviewer **`michaelayoade`**,
+and **self-review ALLOWED**.
+
+That last setting is deliberate and is written down here so it does not read as
+an oversight. Michael is currently the repository's only eligible collaborator,
+so enabling *prevent self-review* would **deadlock the workflow**: the only
+person who can approve is the only person who can dispatch. A gate nobody can
+pass is not a stronger control, it is an unusable one, and the honest response
+is to record why it is off rather than to leave a reviewer wondering.
+
+> **Known interim, with a named target state.** A single-approver gate is a
+> real limitation: the approver and the requester are the same person, so the
+> environment gate proves deliberateness rather than independent review. The
+> target is to **add a second trusted operator or team, then require that
+> reviewer AND enable prevent-self-review.** Recording it as an interim is what
+> stops it becoming permanent by being forgotten.
+>
+> This whole gate is itself temporary: it stands in for Deployment Control
+> authorization, which is where an approval belongs (ADR-0006 §7). When that
+> lands, the environment reviewer is replaced by an `approval_decision_ref`
+> resolvable in the system that recorded the decision — a check that does not
+> depend on how many collaborators the repository happens to have.
+
+The workflow declares the environment; protection rules live in repository
+settings and cannot be asserted from a workflow file, so this is a setup step
+and nothing in the repository is evidence that it is done.
 
 **5. Run discovery once** and confirm the shape it reports before writing any
 request.

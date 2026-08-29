@@ -148,15 +148,39 @@ def test_only_the_shred_step_runs_on_failure(path):
 # ── Nowhere to run but the named runner ─────────────────────────────────────
 
 
+# The named dedicated fixed-egress runner. A LITERAL label pair, not a
+# repository variable: a variable can be repointed at a hosted runner without
+# touching either workflow or this guard, and with no matching runner
+# registered a literal leaves the job QUEUED rather than silently rerouted.
+RUNNER = "[self-hosted, dotmac-control-runner]"
+
+_HOSTED = ("ubuntu-latest", "ubuntu-22", "ubuntu-24", "windows-", "macos-", "-latest")
+
+
 @pytest.mark.parametrize("path", BOTH, ids=lambda p: p.name)
 def test_neither_workflow_runs_on_a_hosted_runner(path):
     runs_on = re.findall(r"^\s*runs-on:\s*(.+)$", _code(path), re.MULTILINE)
     assert len(runs_on) == 1, f"{path.name} declares {len(runs_on)} runs-on"
-    assert runs_on[0].strip() == "${{ vars.PRIVATE_INVENTORY_RUNNER }}", (
-        f"{path.name} pins its runner to {runs_on[0]!r}. OpenBao is contained behind an "
-        "allowlist with a terminal DROP; a hosted runner arrives from a dynamic range, and "
-        "widening the allowlist to reach one would undo the containment"
+    declared = runs_on[0].strip()
+    assert declared == RUNNER, (
+        f"{path.name} pins its runner to {declared!r}, not {RUNNER}. OpenBao is contained "
+        "behind an allowlist with a terminal DROP; a hosted runner arrives from a dynamic "
+        "range, and widening the allowlist to reach one would undo the containment"
     )
+    for hosted in _HOSTED:
+        assert hosted not in declared
+
+
+@pytest.mark.parametrize("path", BOTH, ids=lambda p: p.name)
+def test_the_runner_is_not_indirected_through_a_variable(path):
+    """A literal, so there is nothing to repoint.
+
+    `runs-on: ${{ vars.X }}` reads well and is worse here: the variable can be
+    changed to a hosted label in repository settings, which touches neither
+    workflow nor this guard, and the change would not appear in any diff.
+    """
+    runs_on = re.findall(r"^\s*runs-on:\s*(.+)$", _code(path), re.MULTILINE)[0]
+    assert "vars." not in runs_on and "${{" not in runs_on
 
 
 @pytest.mark.parametrize("path", BOTH, ids=lambda p: p.name)
@@ -275,13 +299,18 @@ def test_planting_an_artifact_upload_is_caught():
 
 
 def test_planting_a_hosted_runner_is_caught():
-    planted = _executable(
-        _text(SUPERSEDE).replace(
-            "runs-on: ${{ vars.PRIVATE_INVENTORY_RUNNER }}", "runs-on: ubuntu-latest"
-        )
-    )
+    planted = _executable(_text(SUPERSEDE).replace(RUNNER, "ubuntu-latest"))
     found = re.findall(r"^\s*runs-on:\s*(.+)$", planted, re.MULTILINE)
-    assert found and found[0].strip() != "${{ vars.PRIVATE_INVENTORY_RUNNER }}"
+    assert found and found[0].strip() != RUNNER
+
+
+def test_indirecting_the_runner_through_a_variable_is_caught():
+    # The subtler regression: still not hosted, but now repointable in
+    # repository settings without a diff anyone would review.
+    planted = _executable(_text(SUPERSEDE).replace(RUNNER, "${{ vars.RUNNER }}"))
+    found = re.findall(r"^\s*runs-on:\s*(.+)$", planted, re.MULTILINE)[0]
+    assert "vars." in found
+    assert "vars." not in re.findall(r"^\s*runs-on:\s*(.+)$", _code(SUPERSEDE), re.MULTILINE)[0]
 
 
 def test_planting_a_job_level_env_is_caught():
