@@ -352,7 +352,7 @@ captured live files.
 | A1 | lines 131–132 | two comment lines: the nginx `/metrics` restriction note and the `(dotmac_omni#1)` bearer-gate note |
 | A2 | line 133 | `- job_name: 'dotmac-crm-app'` |
 | A3 | lines 134–135 | `scheme: https`, `metrics_path: /metrics` |
-| A4 | lines 136–138 | `authorization: {type: Bearer, credentials_file: …}` referencing secret basename **`crm_prom_token`** |
+| A4 | lines 136–138 | `authorization: {type: Bearer, credentials_file: …}` referencing secret basename *(credential basename redacted — ADR-0004)* |
 | A5 | lines 139–142 | `static_configs` — one target (redacted) with label `instance: 'dotmac-crm'` |
 
 **B. Alert rules (`alerts.yml`, 738 lines) — delete the whole group, lines 264–314**
@@ -372,7 +372,7 @@ Delete B5 with B1–B4: with the four rules gone the group is empty, and an empt
 
 | Item | Basename | Note |
 |---|---|---|
-| C1 | `crm_prom_token` | one of the ten secret files in the stack's secrets directory, mounted read-only. Referenced only by A4. Contents were never read. |
+| C1 | *(credential basename redacted — ADR-0004)* | one of the ten secret files in the stack's secrets directory, mounted read-only. Referenced only by A4. Contents were never read. |
 
 **D. Consequential, not a deletion**
 
