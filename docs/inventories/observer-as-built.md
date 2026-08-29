@@ -66,8 +66,8 @@ loki as 10001. **promtail and cadvisor run as root**, both with host mounts.
 | `prometheus/prometheus.yml` | `/etc/prometheus/prometheus.yml` | 644 | 524424 | 1 | **no** |
 | `prometheus/alerts.yml` | `/etc/prometheus/alerts.yml` | 644 | 524425 | 1 | **no** |
 | `alertmanager/alertmanager.yml` | `/etc/alertmanager/alertmanager.yml` | 644 | 524428 | 1 | **no** |
-| `secrets/` | `/etc/prometheus/secrets` | dir | — | — | yes |
-| `secrets/telegram_bot_token` | `/etc/alertmanager/telegram_bot_token` | 600 | — | — | yes |
+| secrets directory | *(redacted — ADR-0004)* | dir | — | — | yes |
+| one Alertmanager credential file | *(redacted — ADR-0004)* | 600 | — | — | yes |
 
 Three configuration files are **single-file bind mounts**, each with one link,
 and each mounted **read-write** into its container. This is the mechanism
@@ -76,8 +76,10 @@ an inode, so any editor that writes a replacement file detaches it and the
 container keeps reading the old content while the edit appears to succeed. The
 only safe gesture is appending in place.
 
-Alertmanager's credential is likewise a single-**file** mount, so the same
-hazard applies to rotating it, not merely to editing configuration.
+One Alertmanager credential is likewise a single-**file** mount, so the same
+hazard applies to rotating it, not merely to editing configuration. Its source
+and container paths are a credential-file binding and therefore private
+material under ADR-0004; they are in the private inventory, not here.
 
 ## 4. Prometheus
 
@@ -132,8 +134,14 @@ live pages.
 Severity split: 33 `warning`, 23 `critical`. No duplicate alert names. Every
 rule carries a `severity` label and a `summary` annotation.
 
-**53 of 56 carry no `runbook_url`.** This repository's rule 8 requires one on
-every rule; the as-built satisfies it three times.
+**Operational runbook coverage is 0 of 56.** 53 rules carry no `runbook_url`
+at all. The remaining three carry one, but it links to an error-tracker issue
+query — a place to look, not a procedure to follow — so no rule on this host
+puts a responder in front of instructions. Rule 8 requires a runbook on every
+rule; the as-built satisfies it zero times.
+
+Separately, 14 rules carry a `runbook` annotation that Alertmanager never
+renders, so it reaches nobody.
 
 ### The ERP gap, stated precisely
 
@@ -317,23 +325,26 @@ because the document they appear in is this census.
 
 ## 10. The private inventory this census produced
 
-Everything redacted above was captured into a proposed private inventory,
-handed over separately and destined for an approved OpenBao
-deployment-inventory path. Per ADR-0004 public Git records its identity and
-nothing else:
+Everything redacted above was captured into a private inventory, which is now
+**preserved in the approved private store**. Per ADR-0004 public Git records
+its identity and nothing else — never its location, which lives only in a
+protected secret:
 
 | Field | Value |
 | --- | --- |
-| Document | `observability-private-inventory.v1` (proposed) |
+| Document | `observability-private-inventory.v1` |
+| Status | preserved in the approved private store, read back and verified byte-exact |
 | Environment | production |
 | Version | 1 |
 | sha256 | `1ecd635ba332c1c22883d6add04dceb52329ab36cfd4194da3edae33f9f5b7c5` |
 | Contents | 16 logical targets (7 authenticated), 1 Alertmanager endpoint, 1 receiver binding |
 
-The digest is over the document, so a later census that produces the same
-bytes proves nothing drifted, and one that does not identifies drift without
-either version being published. Promotion receipts will record this pair, never
-its values.
+The digest is over the document under a fixed canonical form — UTF-8, sorted
+keys, two-space indent, **no trailing newline** — so a later census that
+produces the same bytes proves nothing drifted, and one that does not
+identifies drift without either version being published. A reader that adds a
+trailing newline before hashing will report false drift on a correct
+inventory. Promotion receipts record this pair, never its values.
 
 ## 11. What this changes about the plan
 
