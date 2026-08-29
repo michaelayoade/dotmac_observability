@@ -4,6 +4,14 @@ Thin by rule: every command validates its inputs, calls one library function
 and formats the result. No decision is made here that is not also available to
 the promotion lane, because a rule that only the CLI enforces is a rule the
 automation does not have.
+
+One command deliberately reads private material — ``render``, which cannot
+produce a configuration without it — and one deliberately reports on it
+without printing it: ``inventory-digest`` emits an identity a receipt or an
+authorization can record, so an operator never has to open a private document
+to cite it. ``validate`` accepts a private inventory and works without one, and
+says which of the two it did, because "no findings" must not mean two different
+things depending on an argument nobody can see in the output.
 """
 
 from __future__ import annotations
@@ -19,6 +27,10 @@ from .validate import (
     Finding,
     InventoryError,
     load,
+    load_private_inventory,
+    resolution_findings,
+    resolve,
+    scan_for_private_material,
     scan_for_secret_material,
     semantic_findings,
 )
@@ -54,24 +66,64 @@ def _tracked_files(root: Path) -> tuple[Path, ...]:
     return tuple(root / name for name in result.stdout.split("\0") if name)
 
 
-def _cmd_validate(root: Path) -> int:
+def _cmd_validate(root: Path, contracts: Path, private: Path | None) -> int:
     try:
-        state = load(root)
+        state = load(root, contracts=contracts)
     except InventoryError as error:
         return _report(error.findings, heading="inventory is not loadable")
-    return _report(semantic_findings(state), heading="inventory is inconsistent")
+    findings = list(semantic_findings(state))
+    if private is None:
+        # Said out loud. Silence here would let a public-only run read exactly
+        # like a resolved one, and the resolution gates are where a stale
+        # binding or an unfalsifiable authentication claim is caught.
+        print("public gates only — no private inventory supplied, resolution gates did not run")
+    else:
+        try:
+            inventory = load_private_inventory(private, contracts=contracts)
+        except InventoryError as error:
+            return _report(
+                findings + list(error.findings), heading="private inventory is not loadable"
+            )
+        findings += resolution_findings(state, inventory)
+        print(
+            f"resolved against {inventory.document} v{inventory.version} "
+            f"sha256={inventory.digest}"
+        )
+    return _report(findings, heading="inventory is inconsistent")
 
 
-def _cmd_render(root: Path, output: Path, *, check: bool) -> int:
+def _cmd_inventory_digest(contracts: Path, private: Path) -> int:
+    """Print a private document's identity, never its contents.
+
+    The whole point of the command: a receipt and an authorization both record
+    document, version and digest, and an operator who has to open the file to
+    read them off has opened a private document to fill in a public form.
+    """
     try:
-        state = load(root)
+        inventory = load_private_inventory(private, contracts=contracts)
+    except InventoryError as error:
+        return _report(error.findings, heading="private inventory is not loadable")
+    print(f"document {inventory.document}")
+    print(f"version  {inventory.version}")
+    print(f"sha256   {inventory.digest}")
+    return 0
+
+
+def _cmd_render(root: Path, contracts: Path, output: Path, private: Path, *, check: bool) -> int:
+    try:
+        state = load(root, contracts=contracts)
     except InventoryError as error:
         return _report(error.findings, heading="inventory is not loadable")
     findings = semantic_findings(state)
     if findings:
         return _report(findings, heading="refusing to render an inconsistent inventory")
+    try:
+        inventory = load_private_inventory(private, contracts=contracts)
+        resolution = resolve(state, inventory)
+    except InventoryError as error:
+        return _report(error.findings, heading="refusing to render an unresolved inventory")
 
-    tree = render_control_plane(state)
+    tree = render_control_plane(state, resolution)
     if not check:
         write_tree(tree, output)
         print(f"rendered {len(tree)} file(s) into {output}  digest={tree_digest(tree)}")
@@ -96,21 +148,51 @@ def _cmd_secret_scan(root: Path) -> int:
     return _report(findings, heading="secret material in tracked files")
 
 
+def _cmd_private_scan(root: Path) -> int:
+    findings = scan_for_private_material(root, _tracked_files(root))
+    return _report(findings, heading="private material in tracked files")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="dotmac-observability", description=__doc__)
     parser.add_argument(
         "--root",
         type=Path,
         default=Path("."),
-        help="repository root holding contracts/, inventory/ and routing/ (default: .)",
+        help="root holding inventory/ and routing/ (default: .)",
+    )
+    parser.add_argument(
+        "--contracts",
+        type=Path,
+        default=None,
+        help=(
+            "directory holding the *.schema.json contracts (default: <root>/contracts). "
+            "Separable so a fixture tree is validated against the REAL contracts rather "
+            "than a copy \u2014 a fixture carrying its own copy proves the copy, and the two "
+            "drift the first time a schema changes."
+        ),
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
-    commands.add_parser("validate", help="schema and semantic gates over the inventory")
+    validate_command = commands.add_parser(
+        "validate", help="schema and semantic gates over the inventory"
+    )
+    validate_command.add_argument(
+        "--private-inventory",
+        type=Path,
+        default=None,
+        help="an ObserverInventoryV1 document; adds the resolution gates (ADR-0004)",
+    )
 
     render = commands.add_parser("render", help="render the control-plane configuration")
     render.add_argument(
         "--output", type=Path, default=None, help=f"default: <root>/{_DEFAULT_OUTPUT}"
+    )
+    render.add_argument(
+        "--private-inventory",
+        type=Path,
+        required=True,
+        help="an ObserverInventoryV1 document supplying every endpoint and credential binding",
     )
     render.add_argument(
         "--check",
@@ -118,18 +200,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="compare bytes against the committed render instead of writing",
     )
 
+    digest = commands.add_parser(
+        "inventory-digest", help="print a private document's identity, never its contents"
+    )
+    digest.add_argument("private_inventory", type=Path)
+
     commands.add_parser("secret-scan", help="refuse secret material in tracked files")
+    commands.add_parser(
+        "private-material-scan", help="refuse resolved material in tracked files (ADR-0004)"
+    )
 
     arguments = parser.parse_args(argv)
     root: Path = arguments.root.resolve()
+    contracts: Path = (
+        arguments.contracts.resolve() if arguments.contracts is not None else root / "contracts"
+    )
 
     if arguments.command == "validate":
-        return _cmd_validate(root)
+        return _cmd_validate(root, contracts, arguments.private_inventory)
     if arguments.command == "render":
         output: Path = arguments.output if arguments.output is not None else root / _DEFAULT_OUTPUT
-        return _cmd_render(root, output, check=bool(arguments.check))
+        return _cmd_render(
+            root, contracts, output, arguments.private_inventory, check=bool(arguments.check)
+        )
+    if arguments.command == "inventory-digest":
+        return _cmd_inventory_digest(contracts, arguments.private_inventory)
     if arguments.command == "secret-scan":
         return _cmd_secret_scan(root)
+    if arguments.command == "private-material-scan":
+        return _cmd_private_scan(root)
     raise AssertionError(f"unreachable command {arguments.command!r}")  # pragma: no cover
 
 

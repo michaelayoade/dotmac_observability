@@ -1,0 +1,53 @@
+{
+  "schema_version": "observability-private-inventory.v1",
+  "document": "reference-private-inventory",
+  "version": 1,
+  "environment": "reference",
+  "host": {
+    "target_id": "reference-evaluator",
+    "identity": "reference-evaluator",
+    "ssh_alias": "reference"
+  },
+  "targets": [
+    {
+      "target_id": "erp-production",
+      "endpoints": ["erp.invalid:443"],
+      "credential": {
+        "openbao_path": "secret/fixture/erp-scrape",
+        "file_name": "erp-scrape.token"
+      }
+    },
+    {
+      "target_id": "erp-workers",
+      "endpoints": ["erp-worker-1.invalid:443", "erp-worker-2.invalid:443"]
+    }
+  ],
+  "federations": [
+    {
+      "target_id": "sub-federation",
+      "endpoint": "sub.invalid:443",
+      "credential": {
+        "openbao_path": "secret/fixture/sub-federation",
+        "file_name": "sub-federation.token"
+      }
+    }
+  ],
+  "receivers": [
+    {
+      "credential_ref": "telegram-oncall",
+      "credential": {
+        "openbao_path": "secret/fixture/telegram-oncall",
+        "file_name": "telegram-oncall.token"
+      },
+      "destination": "-1000000000001"
+    },
+    {
+      "credential_ref": "platform-smtp",
+      "credential": {
+        "openbao_path": "secret/fixture/smtp",
+        "file_name": "smtp.password"
+      },
+      "destination": "platform@dotmac.invalid"
+    }
+  ]
+}

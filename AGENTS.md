@@ -17,6 +17,11 @@ review discipline, not a guard, and it is a defect to describe it as enforced.
    *logical file name* the evaluator will read; the value is host state placed
    by the deployment. Rendered configuration therefore contains
    `bearer_token_file: /etc/prometheus/secrets/<name>` and never a token.
+
+   Since ADR-0004 that declaration lives in the PRIVATE inventory rather than
+   in a committed document, because a store path and a basename are bindings
+   even though neither is a value (rule 18). Rule 1 is unchanged and still
+   necessary; what changed is where the reference is written down.
    — `tests/architecture/test_no_secret_material.py`
 
 2. **No direct production file editing.** `/opt/observability` is not an
@@ -145,7 +150,20 @@ review discipline, not a guard, and it is a defect to describe it as enforced.
     deliberately requires a per-target exception block carrying a rationale
     and a named approver; cleartext is never the default and never an
     omission.
-    — enforcement: `none yet (PR 3B)`
+
+    Enforced in two independent ways, because either alone has a blind spot.
+    STRUCTURALLY: the public contracts close every object and have no field an
+    endpoint, a port, a credential binding or a destination can be typed into,
+    so the per-target exception is available only through a block that also
+    demands a rationale and a named approver. BY SCAN: a detector over every
+    tracked file refuses a resolved address, a real subdomain or a store path
+    in prose, a comment, a workflow or a rendered artefact — where no schema is
+    looking, and where both of this repository's actual disclosures happened.
+    — `tests/architecture/test_public_inventory_carries_no_private_material.py`,
+      `tests/mutations/test_private_material_detector_bites.py`,
+      `tests/architecture/test_no_secret_material.py`, `make private-scan`;
+      structurally, `contracts/target.schema.json`,
+      `contracts/control-plane.schema.json`, `contracts/routing.schema.json`
 
 19. **Every published surface declares its exposure and its address family.**
     Exposure (`none`, `loopback`, `ingress`, `public`) and address family
@@ -162,6 +180,24 @@ review discipline, not a guard, and it is a defect to describe it as enforced.
     resolved address, port, DNS record, certificate identity or credential
     binding never appears in public Git (rule 18).
     — enforcement: `none yet (Foundation adoption)`
+
+20. **This repository AUTHORIZES nothing, and never attests an approval to
+    itself.** It is the first adopter of the deployment control plane, not a
+    second one. `dotmac-deployment-control` owns deployment intent, plan
+    freezing, approval policy and the approval decision; this repository
+    consumes an approved plan and records WHICH plan it executed — a
+    `plan_digest` and an `approval_decision_ref` resolvable in the system that
+    took the decision.
+
+    No contract here may define approval or signature semantics, and none may
+    carry a self-attested approver: a name typed into a tracked file is
+    verified by nothing, notifies nobody, and manufactures the appearance of an
+    approval record where there is none. Where this repository genuinely needs
+    a human decision on the record — the per-target publication exception — it
+    keeps the RATIONALE, which a reviewer can disagree with, and leaves the
+    approval to the protected-branch merge, which is externally attested and
+    carries immutable coordinates (Governance ADR 0013).
+    — `tests/architecture/test_authorization_is_not_owned_here.py`
 
 ---
 

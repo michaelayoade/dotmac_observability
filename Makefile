@@ -1,12 +1,23 @@
 .DEFAULT_GOAL := help
 .PHONY: help install lint format-check type-check test render render-check secret-scan \
-        schema-check poetry-lock-check check
+        private-scan schema-check poetry-lock-check check
 
 # Every environment-specific value is an overridable knob with a documented
 # default (AGENTS.md rule 14). Nothing below hardcodes a host, port or path.
-ROOT     ?= .
-RENDERED ?= deploy/rendered
-CLI      ?= poetry run dotmac-observability --root $(ROOT)
+ROOT      ?= .
+# Since ADR-0006 the only tree this repository can render from a checkout is
+# the SYNTHETIC reference fixture. A production render needs a private
+# inventory and produces bytes carrying resolved endpoints and credential
+# basenames, so it is neither committable nor reproducible by a public reader:
+# it happens at promotion time and is recorded by digest. The four knobs below
+# point the rendering targets at the fixture for that reason, and overriding
+# them is how a promotion lane points them at real inputs.
+FIXTURE   ?= tests/fixtures/reference
+CONTRACTS ?= contracts
+PRIVATE   ?= $(FIXTURE)/private/inventory.json
+RENDERED  ?= $(FIXTURE)/rendered
+CLI       ?= poetry run dotmac-observability --root $(ROOT)
+RESOLVED  ?= poetry run dotmac-observability --root $(FIXTURE) --contracts $(CONTRACTS)
 
 help: ## List targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-18s\033[0m %s\n",$$1,$$2}'
@@ -29,19 +40,20 @@ type-check: ## mypy strict
 test: ## Architecture, unit and mutation tests
 	poetry run pytest
 
-render: ## Re-render the control-plane configuration and write it
-	$(CLI) render --output $(RENDERED)
+render: ## Re-render the reference configuration and write it
+	$(RESOLVED) render --private-inventory $(PRIVATE) --output $(RENDERED)
 
 render-check: ## AGENTS.md rule 13 — committed bytes must equal a fresh render
-	$(CLI) render --output $(RENDERED) --check
+	$(RESOLVED) render --private-inventory $(PRIVATE) --output $(RENDERED) --check
 
-secret-scan: ## AGENTS.md rule 1 — no secret material in tracked files
+secret-scan: ## AGENTS.md rule 1 — no secret VALUE in tracked files
 	$(CLI) secret-scan
 
-schema-check: ## Schema and cross-document gates over the inventory
-	$(CLI) validate
+private-scan: ## AGENTS.md rule 18 — no resolved material in tracked files
+	$(CLI) private-material-scan
 
-check: poetry-lock-check lint format-check type-check secret-scan test ## Everything CI runs
-	@echo "PR 1 ships no production inventory, so render-check and schema-check are"
-	@echo "exercised against fixtures by the test suite. They join \`check\` in PR 3,"
-	@echo "when inventory/ is populated — see docs/CONTROL_EXCEPTIONS.md."
+schema-check: ## Schema, cross-document and resolution gates over the reference inventory
+	$(RESOLVED) validate --private-inventory $(PRIVATE)
+
+check: poetry-lock-check lint format-check type-check secret-scan private-scan schema-check \
+       render-check test ## Everything CI runs

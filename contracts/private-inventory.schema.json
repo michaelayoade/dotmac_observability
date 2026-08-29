@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dotmac.io/schemas/observability/private-inventory.v1.json",
+  "title": "observability-private-inventory.v1",
+  "description": "The resolved material ADR-0004 keeps out of public Git: what a logical target_id actually points at, which credential a target uses and where that credential is kept, and the identity of the host a promotion reaches. The delivery plan calls a document written against this contract ObserverInventoryV1.  THIS SCHEMA IS PUBLIC AND EVERY DOCUMENT WRITTEN AGAINST IT IS PRIVATE. That is not a contradiction: a schema describes the SHAPE of resolved material, which discloses nothing, while an instance IS the resolved material. Publishing the schema is what lets a reviewer disagree with the split; publishing an instance would be the map ADR-0004 exists to withhold. The only tracked instances are the synthetic .invalid fixtures CI renders against.  Canonical form, for the digest recorded in a promotion receipt and an authorization: UTF-8, `json.dumps(document, indent=2, sort_keys=True)`, NO trailing newline. A reader that adds a trailing newline before hashing reports false drift on a correct inventory, so the form is stated here rather than left to a convention.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "document",
+    "version",
+    "environment",
+    "host",
+    "targets",
+    "federations",
+    "receivers"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "observability-private-inventory.v1"
+    },
+    "document": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable name of this document, recorded in receipts and authorizations beside the digest. A digest identifies bytes; a reader also needs to know which document those bytes were supposed to be."
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Monotonic. Bumped whenever any resolved value changes, so a receipt naming version 4 cannot be satisfied by version 5's bytes even before the digest is compared."
+    },
+    "environment": {
+      "$ref": "#/$defs/slug",
+      "description": "Must equal the control plane's `environment`. A production inventory resolved against a staging control plane renders cleanly and points a staging evaluator at production, which is why the equality is a gate rather than a convention."
+    },
+    "host": {
+      "$ref": "#/$defs/host_binding"
+    },
+    "targets": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/target_binding"
+      },
+      "description": "One entry per logical scrape target_id declared in public inventory. Resolution is checked in BOTH directions: an unresolved public target and an unused private binding are each a finding, because a binding nobody reaches is a stale endpoint that no gate would otherwise mention."
+    },
+    "federations": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/federation_binding"
+      }
+    },
+    "receivers": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/receiver_binding"
+      }
+    }
+  },
+  "$defs": {
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$"
+    },
+    "endpoint": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+(?::[0-9]{1,5})?$",
+      "description": "A resolved host, or host:port. Private under ADR-0004 in both halves: the name locates the estate and the port narrows what is listening on it."
+    },
+    "secret_file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "openbao_path",
+        "file_name"
+      ],
+      "properties": {
+        "openbao_path": {
+          "type": "string",
+          "pattern": "^secret/[A-Za-z0-9._/-]+$",
+          "description": "Where the value lives. Never dereferenced by this repository; recorded so a deployment can place the file. ADR-0004 makes the PATH itself private material, because it describes credential custody layout."
+        },
+        "file_name": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "description": "Basename under the control plane's secrets_dir. Private: a basename names which credential a target uses, which is a binding even though it is not a value. PR 6 in this repository's own history exists because a redaction sweep treated a basename as clean."
+        }
+      }
+    },
+    "host_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_id",
+        "identity",
+        "ssh_alias"
+      ],
+      "properties": {
+        "target_id": {
+          "$ref": "#/$defs/slug",
+          "description": "Must equal the public control-plane document's `host.target_id`."
+        },
+        "identity": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable human name of the host. Present so a receipt can record which host was changed."
+        },
+        "ssh_alias": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The alias an operator names when authorizing a promotion. Recorded so the named target and the declared one can be compared; NEVER used to infer a target automatically (AGENTS.md rule 17)."
+        }
+      }
+    },
+    "target_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_id",
+        "endpoints"
+      ],
+      "properties": {
+        "target_id": {
+          "$ref": "#/$defs/slug"
+        },
+        "endpoints": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/endpoint"
+          }
+        },
+        "credential": {
+          "$ref": "#/$defs/secret_file",
+          "description": "Present exactly when the public job declares `authenticated = true`. The public document states the CAPABILITY and the private one supplies the binding, so a disagreement between the two is detectable at resolution — a public claim that a target is authenticated is otherwise unfalsifiable from Git alone."
+        }
+      }
+    },
+    "federation_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_id",
+        "endpoint"
+      ],
+      "properties": {
+        "target_id": {
+          "$ref": "#/$defs/slug"
+        },
+        "endpoint": {
+          "$ref": "#/$defs/endpoint"
+        },
+        "credential": {
+          "$ref": "#/$defs/secret_file"
+        }
+      }
+    },
+    "receiver_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "credential_ref",
+        "credential"
+      ],
+      "properties": {
+        "credential_ref": {
+          "$ref": "#/$defs/slug",
+          "description": "The logical name a public integration cites. Public Git says a receiver has a Telegram integration whose credential is called `oncall`; this document says which token file that is and which chat it reaches."
+        },
+        "credential": {
+          "$ref": "#/$defs/secret_file"
+        },
+        "destination": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A chat id, mailbox or path. Private: a routing destination identifies a real channel and a real audience, and the delivery plan lists routing destinations as authorization-time material. A URL carrying an embedded key is a credential and belongs in `credential`."
+        }
+      }
+    }
+  }
+}

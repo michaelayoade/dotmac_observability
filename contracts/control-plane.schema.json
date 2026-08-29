@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://dotmac.io/schemas/observability/control-plane.v1.json",
-  "title": "observability-control-plane.v1",
-  "description": "The evaluator and router this repository owns for one environment. Identity and topology only: no product decisions, no secret values.",
+  "$id": "https://dotmac.io/schemas/observability/control-plane.v2.json",
+  "title": "observability-control-plane.v2",
+  "description": "The evaluator and router this repository owns for one environment. Identity and topology only: no product decisions, no secret values.  v2 applies ADR-0004: `host` carries a logical `target_id` and nothing else. The resolved identity and SSH alias moved to the private inventory, where they still serve both purposes they were added for \u2014 a receipt recording which host was changed, and an operator comparing the named target with the declared one.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -16,7 +16,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "observability-control-plane.v1"
+      "const": "observability-control-plane.v2"
     },
     "environment": {
       "$ref": "#/$defs/slug"
@@ -25,19 +25,12 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "identity",
-        "ssh_alias"
+        "target_id"
       ],
       "properties": {
-        "identity": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Stable human name of the host, recorded in every promotion receipt."
-        },
-        "ssh_alias": {
-          "type": "string",
-          "minLength": 1,
-          "description": "The alias an operator names when authorizing a promotion. Present so a receipt can record WHICH host was changed; never used to infer a target automatically."
+        "target_id": {
+          "$ref": "#/$defs/slug",
+          "description": "The LOGICAL host this control plane runs on. Its resolved identity and SSH alias live in the private inventory under the same target_id (ADR-0004). Naming a host logically here is not an instruction to connect anywhere: AGENTS.md rule 17 requires a human to name the target in the authorizing request, and this value is what that name is checked against."
         }
       }
     },
@@ -157,7 +150,7 @@
         "listen": {
           "type": "string",
           "pattern": "^[0-9.]+:[0-9]{1,5}$",
-          "description": "host:port the service binds. Loopback-bound unless a reviewed exception says otherwise."
+          "description": "host:port the service binds. PUBLIC ONLY WHILE THE ADDRESS IS A LOOPBACK ADDRESS, which settles the second classification ADR-0004 left open and is enforced by the LISTEN-NOT-LOOPBACK gate rather than left as a habit. A loopback bind describes this control plane's own posture and is the evidence docs/SECURITY.md cites that the rendered stack keeps its ports off every non-loopback interface; any other address is a resolved bind address, which is private material, and belongs in the private inventory instead."
         }
       }
     }

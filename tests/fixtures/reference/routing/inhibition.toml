@@ -1,4 +1,4 @@
-schema_version = "observability-routing.v1"
+schema_version = "observability-routing.v2"
 kind = "inhibition"
 
 [[rules]]

@@ -15,6 +15,20 @@ Two properties matter more than elegance here:
 * **Wholeness.** One call produces the entire file tree. A renderer that emits
   one file per call invites a caller to update two of three files and stage a
   configuration nobody has ever seen.
+
+Since ADR-0004 the renderer takes TWO inputs: the public desired state and a
+:class:`~.model.Resolution` joining it to one private inventory. It performs no
+lookup that could fail — every endpoint and every credential it reads was
+proved present by :func:`~.validate.resolve` before the ``Resolution`` existed.
+That is the whole reason resolution is a separate value rather than something
+the renderer does as it goes: a renderer that resolved inline would discover a
+missing binding half-way through emitting a file, and would report the first
+failure rather than all of them.
+
+The consequence ADR-0004 accepted is visible here: nobody can reproduce a
+production render from public inputs alone. The determinism gate is unharmed,
+because determinism is a property of the renderer and its inputs rather than of
+whether those inputs are real.
 """
 
 from __future__ import annotations
@@ -29,6 +43,8 @@ from .model import (
     Federation,
     Label,
     Receiver,
+    Resolution,
+    ResolvedEndpoint,
     ScrapeJob,
     SecretFile,
 )
@@ -90,7 +106,7 @@ def _secret_path(directory: str, secret: SecretFile) -> str:
     return f"{directory}/{secret.file_name}"
 
 
-def _scrape_config(job: ScrapeJob) -> dict[str, YamlValue]:
+def _scrape_config(job: ScrapeJob, resolved: ResolvedEndpoint) -> dict[str, YamlValue]:
     config: dict[str, YamlValue] = {
         "job_name": job.job,
         "scheme": job.scheme,
@@ -100,18 +116,20 @@ def _scrape_config(job: ScrapeJob) -> dict[str, YamlValue]:
         config["scrape_interval"] = job.scrape_interval
     if job.scrape_timeout is not None:
         config["scrape_timeout"] = job.scrape_timeout
-    if job.credential is not None:
+    if resolved.credential is not None:
         # A FILE reference. The token itself is placed on the host from
-        # OpenBao by the deployment and never appears in this repository.
-        config["bearer_token_file"] = _secret_path(_PROMETHEUS_SECRETS, job.credential)
-    static: dict[str, YamlValue] = {"targets": list(job.endpoints)}
+        # OpenBao by the deployment and never appears in this repository. Since
+        # ADR-0004 the BASENAME does not either: it arrives from the private
+        # inventory and reaches only the rendered artefact.
+        config["bearer_token_file"] = _secret_path(_PROMETHEUS_SECRETS, resolved.credential)
+    static: dict[str, YamlValue] = {"targets": list(resolved.endpoints)}
     if job.labels:
         static["labels"] = _labels_mapping(job.labels)
     config["static_configs"] = [static]
     return config
 
 
-def _federation_config(federation: Federation) -> dict[str, YamlValue]:
+def _federation_config(federation: Federation, resolved: ResolvedEndpoint) -> dict[str, YamlValue]:
     config: dict[str, YamlValue] = {
         "job_name": federation.name,
         # The upstream's labels win: this plane is importing the upstream's
@@ -123,11 +141,9 @@ def _federation_config(federation: Federation) -> dict[str, YamlValue]:
     }
     if federation.scrape_interval is not None:
         config["scrape_interval"] = federation.scrape_interval
-    if federation.source.credential is not None:
-        config["bearer_token_file"] = _secret_path(
-            _PROMETHEUS_SECRETS, federation.source.credential
-        )
-    static: dict[str, YamlValue] = {"targets": [federation.source.endpoint]}
+    if resolved.credential is not None:
+        config["bearer_token_file"] = _secret_path(_PROMETHEUS_SECRETS, resolved.credential)
+    static: dict[str, YamlValue] = {"targets": list(resolved.endpoints)}
     if federation.labels:
         static["labels"] = _labels_mapping(federation.labels)
     config["static_configs"] = [static]
@@ -147,14 +163,16 @@ def _federation_config(federation: Federation) -> dict[str, YamlValue]:
     return config
 
 
-def _prometheus(state: DesiredState) -> str:
+def _prometheus(state: DesiredState, resolution: Resolution) -> str:
     plane = state.control_plane
     scrape_configs: list[YamlValue] = []
     for target_set in state.targets:
         for job in target_set.jobs:
-            scrape_configs.append(_scrape_config(job))
+            scrape_configs.append(_scrape_config(job, resolution.jobs[job.job]))
     for federation in state.federations:
-        scrape_configs.append(_federation_config(federation))
+        scrape_configs.append(
+            _federation_config(federation, resolution.federations[federation.name])
+        )
 
     document: dict[str, YamlValue] = {
         "global": {
@@ -190,23 +208,24 @@ _INTEGRATION_KEYS: Mapping[str, tuple[str, str, str | None]] = {
 }
 
 
-def _receiver_config(receiver: Receiver) -> dict[str, YamlValue]:
+def _receiver_config(receiver: Receiver, resolution: Resolution) -> dict[str, YamlValue]:
     config: dict[str, YamlValue] = {"name": receiver.name}
     grouped: dict[str, list[YamlValue]] = {}
     for integration in receiver.integrations:
         block, credential_field, destination_field = _INTEGRATION_KEYS[integration.kind]
+        resolved = resolution.integrations[integration.credential_ref]
         entry: dict[str, YamlValue] = {
-            credential_field: _secret_path(_ALERTMANAGER_SECRETS, integration.credential),
+            credential_field: _secret_path(_ALERTMANAGER_SECRETS, resolved.credential),
             "send_resolved": integration.send_resolved,
         }
-        if destination_field is not None and integration.destination is not None:
+        if destination_field is not None and resolved.destination is not None:
             # Telegram's chat id is a NUMBER in Alertmanager's schema; quoted it
             # is silently rejected at config load, which presents as a receiver
             # that simply never delivers.
             if integration.kind == "telegram":
-                entry[destination_field] = int(integration.destination)
+                entry[destination_field] = int(resolved.destination)
             else:
-                entry[destination_field] = integration.destination
+                entry[destination_field] = resolved.destination
         grouped.setdefault(block, []).append(entry)
     for block, entries in grouped.items():
         config[block] = entries
@@ -245,7 +264,7 @@ def _route_config(state: DesiredState) -> dict[str, YamlValue]:
     return root
 
 
-def _alertmanager(state: DesiredState) -> str:
+def _alertmanager(state: DesiredState, resolution: Resolution) -> str:
     plane = state.control_plane
     globals_block: dict[str, YamlValue] = {"resolve_timeout": plane.resolve_timeout}
     if plane.smtp is not None:
@@ -272,7 +291,7 @@ def _alertmanager(state: DesiredState) -> str:
             }
             for rule in state.inhibitions
         ]
-    document["receivers"] = [_receiver_config(receiver) for receiver in state.receivers]
+    document["receivers"] = [_receiver_config(receiver, resolution) for receiver in state.receivers]
     return emit(document, header=_HEADER)
 
 
@@ -332,11 +351,17 @@ def _compose(state: DesiredState) -> str:
     return emit(document, header=_HEADER)
 
 
-def render_control_plane(state: DesiredState) -> RenderedTree:
-    """Render every configuration file for ``state``, in a fixed order."""
+def render_control_plane(state: DesiredState, resolution: Resolution) -> RenderedTree:
+    """Render every configuration file for ``state``, in a fixed order.
+
+    ``resolution`` supplies every endpoint and credential binding. It is a
+    required argument rather than an optional one because a render without it
+    would be a render of a control plane that scrapes nothing, and a signature
+    that permits that invites a caller to produce one.
+    """
     return (
-        (PROMETHEUS_CONFIG, _prometheus(state)),
-        (ALERTMANAGER_CONFIG, _alertmanager(state)),
+        (PROMETHEUS_CONFIG, _prometheus(state, resolution)),
+        (ALERTMANAGER_CONFIG, _alertmanager(state, resolution)),
         (COMPOSE_FILE, _compose(state)),
     )
 

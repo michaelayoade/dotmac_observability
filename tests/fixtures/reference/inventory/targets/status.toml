@@ -1,0 +1,28 @@
+schema_version = "observability-target.v2"
+kind = "targets"
+product = "dotmac-status"
+owner = "platform-operations"
+
+# The two cases ADR-0004 left as judgement calls, exercised so the gates that
+# settle them have a positive control as well as a refusal. The endpoint here is
+# a synthetic `.invalid` name, so nothing is actually disclosed; what is being
+# proved is that a render can carry a reviewed exception, and that the exception
+# resolves WITHOUT any private binding — which is the only property that makes
+# it worth having.
+
+[[jobs]]
+job = "dotmac-status-page"
+target_id = "status-page"
+scheme = "https"
+metrics_path = "/internal/telemetry"
+authenticated = false
+expected = 1
+path_rationale = "The exporter is mounted under the application's own routing prefix, which is published in its API documentation; the path is protocol, not concealment."
+
+  [jobs.publication]
+  endpoints = ["status.dotmac.invalid:443"]
+  rationale = "The status page is deliberately on the public internet and its address is printed on every incident notice, so indirection would conceal nothing from anybody who has already read one."
+
+  [[jobs.labels]]
+  name = "product"
+  value = "dotmac-status"

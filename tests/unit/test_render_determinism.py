@@ -20,11 +20,11 @@ from dotmac_observability.render import (
     write_tree,
 )
 from dotmac_observability.validate import load
-from tests.conftest import CONTRACTS, REFERENCE, REFERENCE_RENDERED
+from tests.conftest import CONTRACTS, REFERENCE, REFERENCE_RENDERED, resolved
 
 
 def _tree():
-    return render_control_plane(load(REFERENCE, contracts=CONTRACTS))
+    return render_control_plane(load(REFERENCE, contracts=CONTRACTS), resolved(REFERENCE))
 
 
 def test_rendering_twice_produces_identical_bytes():
@@ -80,7 +80,9 @@ def test_a_reordered_inventory_changes_the_bytes(reference_copy):
     second = '[[external_labels]]\nname = "control_plane"\nvalue = "dotmac-observability"\n'
     assert first in text and second in text
     path.write_text(text.replace(first + second, second + "\n" + first.rstrip("\n") + "\n"))
-    reordered = render_control_plane(load(reference_copy, contracts=CONTRACTS))
+    reordered = render_control_plane(
+        load(reference_copy, contracts=CONTRACTS), resolved(reference_copy)
+    )
     # Order is the author's, not the renderer's. If this ever passes, some
     # sort() has crept in and the committed diff stopped reflecting the edit.
     assert reordered != _tree()

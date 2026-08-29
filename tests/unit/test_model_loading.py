@@ -20,8 +20,48 @@ def _state() -> DesiredState:
 def test_the_reference_inventory_loads():
     state = _state()
     assert state.control_plane.environment == "reference"
-    assert [target.product for target in state.targets] == ["dotmac-erp"]
+    assert [target.product for target in state.targets] == [
+        "dotmac-erp",
+        "dotmac-status",
+    ]
     assert [federation.name for federation in state.federations] == ["dotmac-sub-federation"]
+
+
+def test_the_public_inventory_says_nothing_about_where_anything_is():
+    """ADR-0004, checked on the TYPE rather than on today's fixture.
+
+    A test that grepped the reference documents would pass the moment
+    somebody wrote a compliant fixture and say nothing about the contract.
+    Reading the field names off the frozen records instead means a field
+    that carries resolved material cannot be re-added to the public half
+    without this failing.
+    """
+    from dotmac_observability.model import (
+        FederationSource,
+        Host,
+        Integration,
+        ScrapeJob,
+    )
+
+    resolved_fields = {
+        "endpoint",
+        "endpoints",
+        "credential",
+        "destination",
+        "identity",
+        "ssh_alias",
+    }
+    for record in (ScrapeJob, FederationSource, Integration, Host):
+        overlap = resolved_fields & set(record.__dataclass_fields__)
+        assert not overlap, (
+            f"{record.__name__} carries {sorted(overlap)}, which is resolved "
+            "material and belongs in the private inventory (ADR-0004)"
+        )
+    # Sensitivity: the same probe over a PRIVATE record must fire, or the
+    # field-name set above has drifted and the loop is checking nothing.
+    from dotmac_observability.model import TargetBinding
+
+    assert resolved_fields & set(TargetBinding.__dataclass_fields__)
 
 
 def test_declaration_order_is_preserved_rather_than_sorted():
@@ -51,7 +91,7 @@ def test_an_omitted_knob_takes_its_documented_default(reference_copy):
 
 def test_a_malformed_document_reports_every_problem_at_once(reference_copy):
     (reference_copy / "inventory" / "targets" / "erp.toml").write_text(
-        'schema_version = "observability-target.v1"\nkind = "targets"\n'
+        'schema_version = "observability-target.v2"\nkind = "targets"\n'
     )
     with pytest.raises(InventoryError) as raised:
         load(reference_copy, contracts=CONTRACTS)
