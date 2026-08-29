@@ -7,10 +7,10 @@
 #
 # Four properties, each of which was a defect in an earlier draft:
 #
-#   * It runs on a NAMED fixed-egress runner. OpenBao's listener sits behind an
-#     inventory-derived allowlist with a terminal DROP on both address families;
-#     hosted runners come from dynamic ranges, and reopening the allowlist to
-#     reach them would undo the containment to serve a convenience.
+#   * It runs on a NAMED runner that reaches the secret store through a proven
+#     WireGuard tunnel. Access is bound to the TUNNEL IDENTITY, not to a source
+#     address on the plaintext listener — a hosted runner cannot hold that
+#     identity, and no `/32` is added to port 8200 to make one work.
 #   * The writer credential exists in ONE step's environment, introduced after
 #     the tool has been verified. A job-level `env` would hand the production
 #     token to checkout, the setup actions and every dependency `poetry install`
@@ -58,14 +58,15 @@ concurrency:
 jobs:
   supersede:
     name: Apply a reviewed retirement to the private inventory
-    # The named dedicated fixed-egress runner. NOT Observer, not any product
-    # host, and not the Foundation test host.
+    # The named dedicated runner. NOT Observer, not any product host, and not
+    # the Foundation test host. It polls OUTBOUND and is never reached; nothing
+    # in this job may need inbound reachability to it.
     #
     # A literal label pair rather than a repository variable, and that is the
     # point: a variable can be repointed at a hosted runner without touching
     # this file or its guard. With no matching runner registered the job stays
-    # QUEUED — it is never silently rerouted to a hosted one, which is the
-    # failure mode that would quietly undo the containment.
+    # QUEUED — never silently rerouted to a host that cannot hold the tunnel
+    # identity the store's access is bound to.
     runs-on: [self-hosted, dotmac-control-runner]
     # Bounds EXECUTION, not queueing. A dispatch with no matching runner
     # registered waits in the queue; it is not failed by this budget, so

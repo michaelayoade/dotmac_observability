@@ -162,38 +162,65 @@ evidence without version *n* to resolve against.
 
 ### The sequence, and why it is a sequence
 
-Every row is outstanding, and each is genuinely gated on the one above it
-rather than merely listed after it. Neither workflow can run until all of them
-are done, and each refuses rather than improvises when its own prerequisite is
+Every row is outstanding, and each is genuinely gated on the one above rather
+than merely listed after it. Neither workflow can run until all of them are
+done, and each refuses rather than improvises when its own prerequisite is
 missing.
+
+**Read the "gated on" column as the thing that unblocks the row.** That is not
+bookkeeping: a row recorded against the wrong reason gets unblocked by the
+wrong event, and somebody proceeds on a prerequisite that was never actually
+met. Rows 3 and 4 were briefly muddled this way — see "One correction to the
+record" below.
 
 | # | Prerequisite | Gated on |
 | --- | --- | --- |
 | 1 | Public inventory populated and reviewed (lane 3C) | — blocks everything |
-| 2 | TLS or WireGuard in front of the secret store | Michael's ruling: no credential crosses a plaintext listener |
-| 3 | `dotmac-control-runner` provisioned, registered and reachable | 2 — the transport decision must land before another host is put in front of the listener |
-| 4 | The runner's egress carried in the private client inventory as an **exact `/32`** | 3 — an allowlist entry for an unprovisioned address is a rule nobody can verify |
-| 5 | Reader and writer identities, then their secrets | 4 — a credential the runner cannot use is a credential issued early |
-| 6 | `private-inventory` environment configured | 5 |
-| 7 | Discovery run once, shape confirmed into a committed request | 6 |
-| 8 | Supersession dispatched | 7 |
+| 2 | **WireGuard tunnel to the secret store proven** | Michael's ruling: no credential crosses the plaintext listener |
+| 3 | Runner access **bound to the proven tunnel identity**, narrowly scoped | 2 |
+| 4 | Reader and writer identities, then the workflow secrets | 3 |
+| 5 | `private-inventory` environment configured | 4 |
+| 6 | Discovery run once, shape confirmed into a committed request | 5 |
+| 7 | Supersession dispatched | 6 |
 
-Row 4 is the one with a rule attached. It is an **exact `/32` for the named
-logical role, never the surrounding `/22`** — a `/22` grants a whole office
-network reach to a root credential store, and it is precisely why two readers
-independently mis-called the store's port publicly reachable on the day it was
-contained. If anyone ever proposes restoring the wider range *because the
-runner sits inside it*, that is the argument to refuse: the runner's membership
-of a range is a reason to name the host, not a reason to admit the range. The
-entry goes through the inventory, with an enforcement flag and a stated reason,
-never by hand on the host.
+### Row 3 is a tunnel identity, not a source allowlist
 
-Rows 3 and 4 also explain why the workflows behave the way they do while the
-runner does not exist. `runs-on` is a literal label pair, so with no matching
-runner registered a dispatch stays **queued** — it is not an error, and it is
-certainly not rerouted to a hosted runner. Nothing here probes the runner for
-liveness, and nothing converts "runner absent" into a failure that would read
-like a job problem.
+The runner's `/32` is **not** added to the plaintext listener's allowlist. Not
+deferred to later, not added narrowly — not added to that path at all. Its
+access is bound to the **tunnel identity** instead.
+
+The distinction is the whole reason this row was rewritten rather than edited.
+A source-address allowlist and a tunnel identity are **different kinds of
+claim**: one asserts where a packet came from, the other asserts who
+established the channel. Recording the wrong one would leave the inventory
+describing an allowlist that no longer governs the runner's path — a control
+that reads as enforced and governs nothing, which is the exact failure class
+`docs/inventories/observer-as-built.md` §9.1 documents for the inert IPv6
+rules.
+
+**WireGuard now; TLS remains the fleet end state.** The tunnel unblocks the
+runner, and it is not a substitute for TLS: the plaintext listener still has to
+be retired, and row 2 is satisfied by a proven tunnel rather than by declaring
+the problem solved.
+
+If a `/32` is ever proposed for port 8200 *because it would be simpler*, that
+proposal is reverting a ruling, not taking a shortcut.
+
+### One correction to the record
+
+An earlier note deferred row 3 for two reasons braided together: the transport
+was unsettled, **and** the runner looked unprovisioned because SSH timed out
+from outside.
+
+Only the first was a real reason. The VM is built, hardened and key-only, and
+its input rule admits the management network alone — that is the designed
+state, not an incomplete one. And for a **source** claim what matters is the
+address a host presents *outbound*, which was confirmed working through its
+source NAT; inbound reachability was never the relevant property.
+
+Deferring was right on the transport merits alone. The correction is kept
+because the two reasons unblock on different events, and a row carrying the
+wrong one is a row somebody will mark done at the wrong moment.
 
 ### Before the first run — in this order
 
@@ -211,18 +238,23 @@ registered with the labels `self-hosted` and `dotmac-control-runner`. It is
 host**.
 
 Its binding is decided and held privately: logical role and runner label
-`dotmac-control-runner`, one fixed egress address carried as an exact `/32`, no
-public inbound service, and SSH only from approved management sources. **The
-address is not written here** — a resolved host address is private material
-under ADR-0004, and this repository's own private-material scanner refuses it
-in any tracked file. That is not a formality: the refusal was demonstrated
-against this very line before it was written.
+`dotmac-control-runner`, one fixed outbound egress, no public inbound service,
+and administrative access through the Proxmox jump only. **No address is
+written here** — a resolved host address is private material under ADR-0004,
+and this repository's own private-material scanner refuses it in any tracked
+file. That is not a formality: the refusal was demonstrated against this very
+line before it was written.
 
-"No public inbound service" has a design consequence worth stating rather than
-leaving implicit. The runner **reaches out** to the secret store and is never
-reached; it exposes nothing. That rules out any later convenience along the
-lines of "let CI call a webhook on the runner", which would need an inbound
-listener on a host chosen precisely for having none.
+> **Ruling, not inference: do not open inbound SSH, and do not add dstnat.**
+> A self-hosted runner **polls outbound**. It never needs to be reached, and
+> the Proxmox jump is the intended administrative path.
+>
+> The consequence is worth stating in the form a future reader will need it:
+> **if anything in a workflow ever appears to need inbound reachability to the
+> runner, that is a design error in the workflow, not a missing firewall
+> rule.** The temptation arrives disguised as plumbing — a callback, a webhook,
+> a health endpoint — and each would put an inbound listener on a host chosen
+> precisely for having none.
 
 > **The control runner and the external probe vantage are opposites, and are
 > not interchangeable.** A reader who finds two named VMs in the fleet notes

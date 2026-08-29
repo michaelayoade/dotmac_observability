@@ -184,6 +184,28 @@ def test_the_runner_is_not_indirected_through_a_variable(path):
 
 
 @pytest.mark.parametrize("path", BOTH, ids=lambda p: p.name)
+def test_no_workflow_needs_the_runner_to_be_reachable(path):
+    """The runner polls OUTBOUND and is never reached. Michael's ruling.
+
+    Inbound SSH stays closed and no dstnat is added, so a workflow that needed
+    to be called back would be a design error rather than a missing firewall
+    rule. The temptation arrives disguised as plumbing — a callback, a webhook,
+    a health endpoint — and each would put a listener on a host chosen
+    precisely for having none.
+
+    `services:` and `ports:` are how a job opens one in practice, so they are
+    the shapes refused here.
+    """
+    code = _code(path)
+    for forbidden in ("services:", "ports:", "--publish", "-p 0.0.0.0"):
+        assert forbidden not in code, (
+            f"{path.name} contains {forbidden!r}, which opens a listener on the runner. It "
+            "polls outbound and is never reached; if a workflow appears to need inbound "
+            "reachability, the workflow is wrong"
+        )
+
+
+@pytest.mark.parametrize("path", BOTH, ids=lambda p: p.name)
 def test_no_workflow_hardcodes_an_address(path):
     """Neither the store's address nor the runner's may be written down here.
 
@@ -319,6 +341,16 @@ def test_planting_an_artifact_upload_is_caught():
     )
     assert any(token in planted for token in _PUBLISHERS)
     assert not any(token in _text(SUPERSEDE) for token in _PUBLISHERS)
+
+
+def test_planting_an_inbound_listener_is_caught():
+    # The plausible version: a "health endpoint" so something can check on the
+    # run. Harmless-looking, and it needs the runner to be reachable.
+    planted = _executable(
+        _text(SUPERSEDE) + "\n      - name: Health\n        ports:\n          - 8080:8080\n"
+    )
+    assert "ports:" in planted
+    assert "ports:" not in _code(SUPERSEDE)
 
 
 def test_planting_the_runner_address_is_caught():

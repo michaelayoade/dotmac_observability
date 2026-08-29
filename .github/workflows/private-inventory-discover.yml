@@ -31,11 +31,11 @@ concurrency:
 jobs:
   discover:
     name: Report shape, version and digest
-    # The same named dedicated fixed-egress runner as the mutation workflow.
-    # OpenBao's listener is contained behind an inventory-derived allowlist with
-    # a terminal DROP on both address families; hosted runners come from dynamic
-    # ranges, and reopening that allowlist to reach one would undo the
-    # containment to serve a convenience. An absent runner leaves this QUEUED.
+    # The same named dedicated runner as the mutation workflow, reaching the
+    # store through the same proven WireGuard tunnel. Access is bound to the
+    # tunnel identity rather than to a source address on the plaintext
+    # listener, so a hosted runner is not merely discouraged here — it could
+    # not authenticate. An absent runner leaves this QUEUED.
     runs-on: [self-hosted, dotmac-control-runner]
     # Bounds EXECUTION, not queueing. A dispatch with no matching runner
     # registered waits in the queue; it is not failed by this budget, so
