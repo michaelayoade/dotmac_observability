@@ -210,7 +210,7 @@ Numbered so a later change can cite one. Severity is this census's judgement.
 | OBS-04 | high | Alertmanager has no child routes. `critical` and `warning` are recorded but not routed differently, so severity is presentational. |
 | OBS-05 | medium | 53 of 56 rules have no runbook. |
 | OBS-06 | medium | A retired product (CRM) still has a scrape job and four alert rules, and its dead target is firing `ServiceDown` — live noise from a decommissioned system. |
-| OBS-07 | **critical** | Several observability services are published on all interfaces with no host firewall restriction and no authenticating reverse proxy in front of them; `ufw` is not installed and the `DOCKER-USER` chain restricts only unrelated database ports. Enumerated in the private inventory rather than here, because the exposure is unremediated. |
+| OBS-07 | **critical** | **Corrected — see §9.1.** The original wording of this finding was wrong. IPv4 containment is in place and persisted; the unremediated exposure is IPv6, by a mechanism that makes the existing IPv6 rules inert. Detail withheld here because it is unremediated. |
 | OBS-08 | medium | No rollback mechanism (§7), only 26 unordered backup files. |
 | OBS-09 | medium | `external_labels` is empty, so this evaluator's own series carry no environment or control-plane identity. |
 | OBS-10 | low | The inhibition uses the deprecated `source_match` spelling. |
@@ -221,6 +221,80 @@ Numbered so a later change can cite one. Severity is this census's judgement.
 
 OBS-07 is the only finding that is not this repository's own business to fix,
 and it should not wait for the promotion train.
+
+## 9.1 OBS-07, corrected
+
+This census first recorded OBS-07 as "several services published on all
+interfaces with no host firewall restriction". **That was wrong, and the error
+was mine.** The check behind it grepped the `DOCKER-USER` chain for
+`--ctorigdstport`, which is the matching strategy used by two of the rule
+blocks; it is not the only one. Counting only those matches returned zero for
+the observability ports and the conclusion followed from the undercount.
+
+A full read of the chain finds **198 IPv4 rules in `DOCKER-USER`** — nine
+blocks covering the observability ports and others — dating from a fleet
+firewall sweep on 2026-08-14, byte-identical to the persisted
+`/etc/iptables/rules.v4`, with packet counters showing roughly fifteen days of
+work. `iptables-persistent` is installed and enabled, so the IPv4 restriction
+survives a reboot. **IPv4 containment exists, works and persists.**
+
+The correct finding is narrower and worse:
+
+**The exposure is IPv6, and the IPv6 rules that were supposed to cover it
+cannot ever fire.** They are installed in the `ip6tables` `DOCKER-USER` chain,
+which is only jumped from `FORWARD`. With no IPv6 DNAT in play, `docker-proxy`
+terminates an IPv6 connection as an ordinary local process, so the traffic
+arrives on `INPUT` and never traverses `FORWARD`. Every IPv6 rule in that
+chain shows a zero packet counter, which is the observable signature of a rule
+that is not merely unused but unreachable.
+
+This was verified rather than inferred: probes from two other fleet hosts
+found the affected ports open over IPv6, with a port known to be closed used
+as a discriminating control. A third probe, from a host with no global IPv6,
+failed even against the control port and was discarded — without the control
+it would have read as a false pass, which is worth recording as the method
+that made the result trustworthy.
+
+Consequences that follow from the mechanism rather than from this host:
+
+- A fix must **not** be written into `ip6tables DOCKER-USER`. It belongs on
+  `INPUT`, or the IPv6 publish should be removed by naming an interface in the
+  Compose port binding. An `INPUT` rule carries SSH, so it needs proven
+  out-of-band recovery first (see below).
+- **The same inert idiom was applied fleet-wide in the 2026-08-14 sweep.**
+  Every host that sweep touched needs re-checking. That is outside this
+  repository and is tracked in Knowledge, not here.
+
+Two further facts from the same preflight, recorded because a later change
+must not break them:
+
+- **Loki cannot be loopback-bound.** It has six live remote log shippers.
+  Every other affected service is reachable only from this host's own
+  Prometheus, over the container bridge and by container name, so unpublishing
+  those breaks nothing.
+- **Source allowlists must be derived from observed addresses, not from DNS.**
+  One shipper's hostname resolves to an address that was never seen
+  connecting; it actually arrives from a different address in the same
+  autonomous system. Narrowing to DNS-derived host addresses would have cut it
+  off.
+
+Out-of-band recovery is **present but unproven**: the provider console and a
+serial getty exist, but no working root password was confirmed. That is a
+blocker for any change touching the `INPUT` chain, and therefore for the IPv6
+fix itself.
+
+The port-level detail, the observed shipper addresses and the draft rules stay
+in the private preflight material. This section says what class of thing is
+wrong and what the fix must respect; it deliberately does not publish a map of
+what is currently reachable.
+
+### Why this correction is in the census rather than replacing it
+
+A census that silently rewrites a finding is not evidence. The original
+wording is left visible in the table above with a pointer here, so a reader
+can see both what was claimed and why it was withdrawn. The undercount is also
+a reusable lesson: a firewall chain has more than one matching strategy, and a
+grep for one of them is not a count of the chain.
 
 ## 10. The private inventory this census produced
 
