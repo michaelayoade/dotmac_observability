@@ -25,6 +25,7 @@ direction is the one that matters: a ledger that only ever grows is a backlog,
 while one that must shrink deliberately is a plan.
 
 declared-unmonitored: 9
+declared-decisions: 1
 
 | rule | subject | why there is no detector yet | monitored by |
 | --- | --- | --- | --- |
@@ -37,6 +38,17 @@ declared-unmonitored: 9
 | 10 | "Rule inactive" is not recovery evidence | This is a property of the live verifier, which is written against a running evaluator on the disposable host. | PR 5 |
 | 11 | Promotion failure restores the exact preceding release | Requires the staging and activation machinery. | PR 6 |
 | 12 | Desired, live and receipt states are independently comparable | Desired state exists. Live state and receipts do not. | PR 6 |
+
+## Blocked on a decision, not on a PR
+
+Some gaps cannot be closed by writing code here. Listing them in the table
+above would be misleading: a PR number promises someone can finish the work,
+and nobody in this repository can. They are tracked separately so the ratchet
+does not quietly absorb them.
+
+| decision | subject | why no detector can close it | decision needed |
+| --- | --- | --- | --- |
+| branch-protection-needs-a-plan-or-visibility-choice | Rule 17, the platform half: `main` accepts a direct push | GitHub refuses branch protection and repository rulesets on a private repository under this account's plan (HTTP 403, "Upgrade to GitHub Pro or make this repository public"). Every other Dotmac repository has protection because it is PUBLIC. This one holds Observer's scrape topology, host identities and OpenBao paths, so making it public to obtain protection trades a real recon surface for a process guard. | Michael chooses: keep it private and accept an unprotected `main`; make it public; or move the account to a paid plan. Until then the branch discipline is a stated working agreement with no platform enforcement. |
 
 ## Rules that ARE enforced today
 
@@ -52,4 +64,3 @@ tell at a glance which half of AGENTS.md currently bites.
 | 14 | `tests/architecture/test_repository_contract.py` |
 | 15 | `tests/architecture/test_control_exceptions.py`, `tests/mutations/` |
 | 16 | `.dotmac/standards-profile.json`, `.github/workflows/engineering-standards.yml` |
-| 17 | branch protection on `main` |

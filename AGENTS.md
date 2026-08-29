@@ -115,6 +115,7 @@ review discipline, not a guard, and it is a defect to describe it as enforced.
     Only an explicitly authorized promotion touches a live host, and the target
     host must be named by a human in the authorizing request — never inferred
     from an inventory row.
+    — enforcement: `none yet (decision: branch-protection-needs-a-plan-or-visibility-choice)`
 
 ---
 
