@@ -213,11 +213,16 @@ Numbered so a later change can cite one. Severity is this census's judgement.
 | OBS-07 | **critical** | **Corrected — see §9.1.** The original wording of this finding was wrong. IPv4 containment is in place and persisted; the unremediated exposure is IPv6, by a mechanism that makes the existing IPv6 rules inert. Detail withheld here because it is unremediated. |
 | OBS-08 | medium | No rollback mechanism (§7), only 26 unordered backup files. |
 | OBS-09 | medium | `external_labels` is empty, so this evaluator's own series carry no environment or control-plane identity. |
-| OBS-10 | low | The inhibition uses the deprecated `source_match` spelling. |
+| OBS-10 | **medium** | **The single inhibition is structurally inert**, not merely deprecated. It requires `alertname` to be equal across a `critical` source and a `warning` target, and no alert name is duplicated in the rule set — so it can never match anything. The `High`/`Critical` pairs it looks designed for are exactly the case an `alertname` equality cannot express. It also uses the deprecated `source_match` spelling. |
 | OBS-11 | low | Root filesystem is 83% full; Prometheus and Loki hold 94 GB. |
 | OBS-12 | low | promtail and cadvisor run as root with host mounts. |
 | OBS-13 | info | CI pins older promtool/amtool than production runs (§2). |
 | OBS-14 | info | The as-built uses `authorization.credentials_file`; the renderer emits `bearer_token_file`. Parity needs the former. |
+| OBS-15 | high | **33 of 56 live rules have no attributable owner.** Only 23 trace to a repository. Six intact groups are unattributed, one of which has no candidate home at all. Detail and method in `observer-rule-provenance.md`. |
+| OBS-16 | high | **Two live rules can never fire.** They select a label value that was renamed in the producing product before the rules were written, so they have matched nothing since the day they were added. |
+| OBS-17 | high | **A rule repaired upstream 18 days ago is still running here in its unfixed form.** The product fixed it, merged it, and wrote up the lesson; the host never received it. This is precisely the drift class this repository exists to make impossible, observed before the control plane exists. |
+| OBS-18 | medium | **Nine rules reference metrics no repository emits.** Their probe job is healthy, so the exporter runs — its source is simply not in any checkout. A supply-chain gap rather than a coverage gap. |
+| OBS-19 | medium | **ERP has no rendered Foundation alert bundle in its repository.** It exists only on unmerged branches elsewhere, and adopting it as-is would *subtract* coverage: all three working ERP application rules map onto Foundation alerts that are in the omitted set, trading them for infrastructure alerts that duplicate `host_alerts`. PR 9's premise needs revisiting before it is scheduled. |
 
 OBS-07 is the only finding that is not this repository's own business to fix,
 and it should not wait for the promotion train.
@@ -295,6 +300,20 @@ wording is left visible in the table above with a pointer here, so a reader
 can see both what was claimed and why it was withdrawn. The undercount is also
 a reusable lesson: a firewall chain has more than one matching strategy, and a
 grep for one of them is not a count of the chain.
+
+## 9.2 Provenance
+
+A companion document, `observer-rule-provenance.md`, attributes every live
+rule and scrape job to an owning repository and revision where one can be
+found, and says plainly where one cannot. Its two load-bearing numbers are
+**33 unattributed rules** and **9 rules whose producer metric no repository
+emits**.
+
+Both are inputs to the migration, not opinions about it: the delivery plan
+blocks production promotion until the unattributed count reaches zero, so 33
+is the size of the work rather than a note. The attribution method carries its
+own sensitivity proof, and two tempting matches were refused as circular
+because the document they appear in is this census.
 
 ## 10. The private inventory this census produced
 
