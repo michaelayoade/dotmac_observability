@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Never commit anything that could hold a value. The repository stores OpenBao
+# paths and logical secret-file names; the files themselves are host state.
+secrets/
+*.token
+*.key
+*.pem
