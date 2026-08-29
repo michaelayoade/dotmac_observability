@@ -288,6 +288,110 @@ renaming into one namespace and reintroducing exactly the confusion the rule
 removes. The federation scrape also sets `honor_labels: true`: this plane is
 importing the upstream's view, not relabelling it into its own.
 
+## The exposure model
+
+Every published surface declares two things, and both are mandatory with no
+default: an **exposure** and an **address family**. ADR-0005 records the
+decision and the measured finding behind it
+(`docs/inventories/observer-as-built.md` §9.1); `AGENTS.md` rule 19 states it
+as a hard rule. None of it is enforced here yet — the guard ships with the
+Foundation release, not with a pull request in this repository.
+
+### Owned elsewhere, adopted here
+
+The vocabulary, its validation, its deterministic Compose and Nginx rendering,
+its conformance suite and its rehearsal belong to
+`dotmac-deployment-foundation`'s `IngressPolicy.v1`, in `dotmac_starter_mt`.
+Nginx is the first provider and is not part of the contract; a second provider
+must be addable without changing it. `dotmac_observability` is the first
+adopter and owns a narrower thing: which surfaces are declared, with what
+exposure and which families, and the promotion, receipt, rollback and drift
+behaviour that carries those declarations to the Observer host. The resolved
+addresses, ports, certificates and credentials live in OpenBao. The kernel and
+the stateful modules own none of this.
+
+The contract is wider than the two fields described below — it also carries
+source policy, connection and body limits, timeouts, rate limiting, health
+checking, telemetry, rollback semantics and the bindings that resolve private
+promotion material into a listener. Those are consumed here, not specified
+here. The values named below are the shape this repository needs; the
+authoritative spellings arrive with the Foundation release.
+
+### The two vocabularies
+
+| Exposure | Means | Renders as |
+| --- | --- | --- |
+| `none` | Not published | No `ports` entry at all. Reachable only on the container network, by container name. |
+| `loopback` | Published on loopback only | One explicit loopback bind per declared family. |
+| `ingress` | Reachable only through the authenticated ingress | No host publish for the service. The ingress declares it as an upstream on the container network. |
+| `public` | Published beyond the host | An explicit bind per declared family, and only alongside a reviewed exception block and a declared authentication requirement. |
+
+| Address family | Renders as |
+| --- | --- |
+| `ipv4` | One IPv4 bind |
+| `ipv6` | One IPv6 bind |
+| `dual_stack` | One bind per family, each written out |
+
+Prometheus, Alertmanager, node-exporter, cAdvisor and raw Loki are
+internal-only. Loki ingestion is `ingress`, `dual_stack`, authenticated per
+shipper. Nothing here is `public`.
+
+### Why the family is declared rather than inferred
+
+A short-form Compose publish, `PORT:PORT`, names no bind address. The daemon
+binds the wildcard on both families and runs one `docker-proxy` per family, so
+a document that mentions one number produces two listeners. On the Observer
+host the IPv6 listener that appeared this way was covered by rules in the
+`ip6tables` `DOCKER-USER` chain, which is jumped only from `FORWARD`; because
+`docker-proxy` terminates the connection locally, the traffic arrives on
+`INPUT` and never passes through that chain. Every one of those rules has a
+zero packet counter.
+
+Inferring the family from a bind address would reproduce the defect one layer
+up: the renderer would guess, and the guess would be right or wrong with
+nothing to compare it against. A declared family is a reviewable statement made
+before anything renders, and — the property that matters most — it is something
+conformance can hold a running stack to. The suite compares the listeners the
+stack actually opens against the families the policy declared, which is the
+check that would have caught the finding when it was made rather than a
+fortnight later.
+
+Rendering is therefore explicit in both directions. Short-form publishes do not
+appear in the output, and a short form present in any input is a hard failure.
+So is an undeclared family, an unauthenticated `public` surface, a backend that
+declares `ingress` while also publishing a host port, and a `if loki` or
+`if nginx` branch in the shared facility.
+
+### Where the ingress sits
+
+Between every remote sender and every service. It terminates TLS on 443, is
+dual-stack capable, and requires per-shipper mTLS or per-shipper credentials
+before a request reaches an upstream. A service behind it publishes no host
+port of its own and is addressed on the container network. This is the only
+mechanism by which a service in this control plane becomes externally
+reachable; there is no second path.
+
+Per-shipper credentials are what an address allowlist cannot provide. Six log
+shippers means six credentials, one revocable without disturbing the other
+five, and every accepted write attributable to the sender that made it.
+
+### Which input supplies what
+
+The split is ADR-0004's, applied to the fields this model adds.
+
+| Public specification | Private resolution |
+| --- | --- |
+| Logical surface name | Resolved bind address |
+| Exposure value | Port |
+| Address family | DNS records, AAAA included |
+| Authentication requirement, and the reviewed exception block for a `public` surface | TLS and server identity, certificate material |
+| Protocol | Per-shipper credential bindings |
+
+A declaration that a surface is `dual_stack` and authenticated is a public
+fact: it describes a posture, and publishing it lets a reviewer disagree with
+it. The addresses that declaration resolves to are not, and they never enter
+this repository in any form.
+
 ## Secrets
 
 Nothing in this repository holds a secret value, and nothing in it dereferences
@@ -365,12 +469,35 @@ Comparison is PR 6. Today only the first artifact exists.
 | --- | --- | --- |
 | 1 | Governance (`AGENTS.md`, `docs/CONTROL_EXCEPTIONS.md`), the five contracts, the typed model, three-layer validation, the deterministic renderer and emitter, the CLI, the reference fixture with its committed rendered bytes, and the CI and sensitivity-proof work originally scheduled for PR 4 | **done, this change** |
 | 2 | A read-only as-built census of the Observer host, written to `docs/inventories/observer-as-built.md` | blocked: requires Michael to name the Observer SSH target explicitly |
-| 3 | Real production inventory under `inventory/`, bundle locks under `bundles/`, `bundle.py` (fetch and digest-verify), and `render-check` plus `schema-check` joining `make check` | planned |
-| 4 | CI workflows, the standards-profile pin, the architecture tests and the mutation-based sensitivity proofs | delivered early, in PR 1; the remaining proofs cover the capabilities PR 3 and PR 5 add |
-| 5 | Disposable-host rehearsal on 85.190.246.211, and `live_verify.py` | planned |
+| 3A | Adoption of `IngressPolicy.v1`: declared exposure and address family on every published surface, the Loki-ingestion selection, and the removal of short-form publishes from the rendered output. The contract, its rendering and its conformance suite are `dotmac-deployment-foundation`'s, so this lane is blocked on that release (ADR-0005) | planned |
+| 3B | The ADR-0004 split in the contracts: a logical `target_id`, the private-inventory schema and digest, the per-target exception block, and the inverted `openbao_path` check | planned |
+| 3C | Real production inventory under `inventory/`, bundle locks under `bundles/`, `bundle.py` (fetch and digest-verify), and `render-check` plus `schema-check` joining `make check` | planned |
+
+> **Two sequences, one plan.** The lanes above are this repository's own work.
+> They sit inside a wider cross-repository train for the ingress facility,
+> which runs: a product-first ingress census and extraction dossier; a
+> Foundation contract/model/validation change; a Foundation Nginx provider and
+> dual-stack rehearsal; an immutable Foundation release; a pin-only adoption
+> here; a policy and configuration change here; a disposable rehearsal of IPv4,
+> IPv6, authentication, rotation and rollback; and finally an explicitly
+> authorized production cutover. Lane 3A is where the last four of those touch
+> this repository, and it decomposes into the pin-only adoption and the policy
+> change rather than landing as one commit. Neither sequence supersedes the
+> other: one describes what changes here, the other what has to exist first.
+| 4 | CI workflows, the standards-profile pin, the architecture tests and the mutation-based sensitivity proofs | delivered early, in PR 1; the remaining proofs cover the capabilities the PR 3 stack and PR 5 add |
+| 5 | Disposable-host rehearsal on the dedicated test server, and `live_verify.py` | planned |
 | 6 | The promotion facility in `dotmac-deployment-foundation` vNext, plus `receipt.py` and `drift.py` here | planned |
 | 7 | Production bootstrap of the Observer host | planned, separately authorized |
 | 8 | ERP bundle onboarding: the first product bundle pinned, promoted and verified | planned |
+
+PR 3 is a stack rather than a single change, and the order is a dependency
+rather than a preference. 3A settles what may be published and to which
+address families, 3B settles which fields of a target document are public at
+all, and only then does 3C write a production inventory — because Git history
+is not retractable and the first production inventory commit is the one that
+cannot be corrected afterwards (ADR-0004). 3A is additionally gated on a
+`dotmac-deployment-foundation` release carrying `IngressPolicy.v1`; nothing in
+this repository defines that contract.
 
 ### What exists today
 
@@ -383,7 +510,7 @@ committed `rendered/` tree, and five unit tests
 `make check` runs `poetry-lock-check`, `lint`, `format-check`, `type-check`,
 `secret-scan` and `test`. It deliberately does not run `render-check` or
 `schema-check`, because PR 1 ships no production inventory: those two are
-exercised against the fixture by the test suite and join `check` in PR 3.
+exercised against the fixture by the test suite and join `check` in PR 3C.
 
 Governance enforcement landed in the same change rather than in PR 4:
 `tests/architecture/test_no_secret_material.py`,
@@ -398,7 +525,7 @@ docstrings already claimed), and the two workflows
 
 The register of regions that are unmonitored rather than exempt is
 `docs/CONTROL_EXCEPTIONS.md`. Nine rules are declared unmonitored there today,
-every one of them waiting on machinery PR 3, PR 5 or PR 6 adds. Read that file
+every one of them waiting on machinery the PR 3 stack, PR 5 or PR 6 adds. Read that file
 before describing any rule as enforced: `AGENTS.md` marks each rule's
 enforcement individually, and a rule carrying `none yet (PR n)` is stated
 review discipline.
@@ -412,7 +539,7 @@ review discipline.
 | `yaml_emit.py` | Deterministic block-YAML emitter for the subset the control plane needs | shipped |
 | `render.py` | The three rendered files, `tree_digest`, `write_tree`, `differences` | shipped |
 | `cli.py` | `validate`, `render [--check]`, `secret-scan`; thin adapters over the library | shipped |
-| `bundle.py` | Fetch a pinned product bundle, verify its digests, assemble the release `rules/` tree | PR 3 |
+| `bundle.py` | Fetch a pinned product bundle, verify its digests, assemble the release `rules/` tree | PR 3C |
 | `live_verify.py` | Read live target, rule and route state from the evaluator APIs and compare it with the desired state | PR 5 |
 | `receipt.py` | Write and validate a promotion receipt against `contracts/promotion-receipt.schema.json` | PR 6 |
 | `drift.py` | Three-way comparison of desired state, live state and the last verified receipt | PR 6 |

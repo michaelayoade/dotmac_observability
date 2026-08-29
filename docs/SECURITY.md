@@ -203,6 +203,119 @@ was reached, never how it was reached.
   because a stack that silently starts against the wrong release is worse than
   one that refuses to start.
 
+## The ingestion boundary: authentication, not address allowlisting
+
+The "loopback-bound listeners" bullet above covers the rendered evaluators,
+which are not the problem precisely because they are loopback-bound. Loki is, because it has six live remote log
+shippers and cannot be loopback-bound. This section is the posture for that
+surface and for any future one like it. ADR-0005 holds the full argument;
+`AGENTS.md` rule 19 states it as a hard rule, and **none of it is enforced
+yet** — the guard ships with the `dotmac-deployment-foundation` release that
+carries `IngressPolicy.v1`, not with a pull request here.
+
+### Why an address allowlist is not the boundary
+
+Until this decision, the only thing between a remote shipper and Loki's
+ingestion API was a set of IPv4 `DOCKER-USER` rules. The API accepted whatever
+reached it. Three properties make that insufficient, and none of them improves
+with maintenance:
+
+- **An address allowlist authenticates a network position, not a shipper.** It
+  admits whoever currently occupies an address. Nothing in the traffic proves
+  which sender produced it, so no accepted write can be attributed.
+- **It cannot revoke one shipper without disturbing the others.** Several
+  shippers can share one NAT egress address, so the blast radius of removing an
+  entry is whoever else sits behind it. A revocation nobody dares perform is
+  not a revocation.
+- **It breaks when a NAT egress address changes, and this fleet has observed
+  exactly that.** The census records a shipper whose hostname resolves to an
+  address that never connects; it arrives from a different address in the same
+  autonomous system (`docs/inventories/observer-as-built.md` §9.1). Each such
+  break is repaired by widening the allowlist.
+
+Beneath all three, ingestion is unauthenticated on the wire: the bytes carry no
+credential and no transport identity.
+
+The proposal to bind Loki to an explicit IPv4 address, so the working IPv4
+allowlist covers it, is **emergency containment only and not the architecture**
+— a reasonable thing to do in an hour, and the three properties above are
+unchanged by doing it.
+
+### What replaces it
+
+A reusable authenticated ingress on 443, owned by
+`dotmac-deployment-foundation` and adopted here. It terminates TLS, is
+dual-stack capable, and requires per-shipper mTLS or per-shipper credentials
+before a request reaches an upstream. Loki declares exposure `ingress` and
+publishes no host port of its own; Prometheus, Alertmanager, node-exporter and
+raw Loki are internal-only. Every published surface declares its exposure and
+its address family, both mandatory and neither defaulted, and a bare
+`PORT:PORT` publish, an unauthenticated `public` surface, and a backend that
+sits behind an ingress while also publishing its own host port are each
+refused. `docs/ARCHITECTURE.md` §"The exposure model" describes the mechanics.
+
+### What an ingress credential is, and where it lives
+
+One credential per shipper, and per-shipper is the whole point. Either a client
+certificate the ingress verifies at the TLS handshake, or a bearer credential
+the ingress checks before proxying — the choice is per shipper and is part of
+the policy, not a property of Loki.
+
+The credential value lives in an approved private store, alongside the
+certificates and the resolved addresses this boundary needs (ADR-0004,
+ADR-0005). **No path to it appears in this repository**, and neither does the
+binding that says which shipper uses which credential: a store path describes
+credential custody layout, which is private material under ADR-0004, and the
+binding names both a sender and its key location in one string. This is
+stricter than the secret-reference model described at the top of this document,
+deliberately and in the same direction ADR-0004 already moved it.
+
+What is public is the posture: that ingestion is authenticated, that
+authentication is per shipper, that the transport is TLS, and which address
+families are declared. Publishing the posture is what lets a reviewer disagree
+with it. Publishing the resolution would be a map.
+
+### What revocation means
+
+Revoking one shipper removes one credential. The other five continue
+uninterrupted, no rule is edited, no address is touched, and no other sender's
+delivery is at risk while the change is made. The revoked shipper is refused at
+the ingress and the refusal is attributable, so a revocation that was a mistake
+is visible as a named sender being turned away rather than as logs quietly
+stopping.
+
+This is the single property that most distinguishes the new boundary from the
+old one, and it is why conformance has to prove refusal and recovery — that a
+revoked credential is rejected, and that a restored legitimate one resumes
+delivery — rather than only proving that ingestion works.
+
+### A firewall is a second line, and never the first
+
+This warning is standing, and it applies after the ingress exists as much as
+before.
+
+The correct firewall fix on the Observer host is an `INPUT` rule, because
+`docker-proxy` terminates a published connection locally and the traffic never
+traverses `FORWARD` — which is why the IPv6 rules in the `ip6tables`
+`DOCKER-USER` chain have never fired and cannot. That fix is blocked: an
+`INPUT` rule carries SSH, and out-of-band recovery on this host is present but
+unproven, with no working root password confirmed. It stays blocked until
+recovery is demonstrated, not asserted.
+
+Two conclusions follow. First, no surface may be published on the premise that
+a firewall will contain it, because that premise has now been measured false on
+this host and the same inert idiom was applied across the fleet in the
+2026-08-14 sweep. Authentication is the boundary; packet filtering narrows the
+population that can reach it. Second, when `INPUT` hardening does become safe,
+it is added behind a boundary that already authenticates — a second line — and
+adding it does not retire the first.
+
+Until phase 6 of the ADR-0005 cutover, raw Loki keeps its publication while
+shippers migrate, so two ingestion paths are live at once and the posture is
+the weaker of the two. That is stated here rather than in the ADR alone because
+anyone reading this document during the migration is reading it about a system
+that has not yet finished getting the property it describes.
+
 ## Promotion authority
 
 A promotion targets a host a human named in the authorizing request
@@ -216,7 +329,7 @@ connect anywhere.
 
 The same rule governs the delivery train. PR 2's census is blocked, not
 delayed, because it needs Michael to name the Observer SSH target explicitly.
-PR 5 rehearses on a disposable host, 85.190.246.211, and PR 7's production
+PR 5 rehearses on the dedicated test server, and PR 7's production
 bootstrap is authorized separately from the PR that writes it.
 
 Every promotion also targets an exact protected-`main` SHA reasserted as
