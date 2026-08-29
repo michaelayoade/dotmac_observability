@@ -59,17 +59,22 @@ It will fail with `RESOLUTION-UNUSED`, naming the now-orphaned binding. **That
 failure is the point** — it is the checklist telling you the private half is
 still outstanding. Do not silence it by putting the job back.
 
-### 2. Read the stored digest
+### 2. Discover — read-only, and it stops there
 
-Whoever holds access runs, or the workflow's first run reports:
+Actions → *Discover the private inventory shape* → Run workflow, on `main`.
 
-```
-dotmac-observability --contracts contracts inventory-digest <stored>
-```
+It reports three things and writes nothing: the storage **shape**, the KV
+**version**, and the **digest**. It uses the reader identity, so "this does not
+write" is a property of the token rather than a promise made by the YAML.
 
-Note the digest. Do not print the document. Nothing in this procedure requires
+Note all three. Do not print the document — nothing in this procedure requires
 you to look at a resolved endpoint, and a terminal scrollback is a place
 resolved material should never reach.
+
+**Discovery reports; it does not act.** The earlier design had the mutation
+workflow detect the shape and then immediately write, which is detection rather
+than confirmation — the same defect as a probe whose result nobody reviews
+before acting on it. You are the missing half.
 
 ### 3. Write the retirement request
 
@@ -84,6 +89,9 @@ rationale = "<why these entries are gone, with the evidence>"
 [previous]
 version = <n>
 sha256 = "<the digest from step 2>"
+
+[storage]
+shape = "<the shape discovery reported>"
 
 [retire]
 targets = ["<logical target id>"]
@@ -114,12 +122,22 @@ any branch carrying the workflow, so without that guard a branch could supply
 both the workflow and the request it applies — the review gate bypassed by
 choosing a dropdown value.
 
-The workflow then, in order: reads the stored version; records its digest;
-applies the request, refusing if the store has moved since the request was
-reviewed; **resolves the next version against the public inventory in both
-directions**; writes with OpenBao's own `cas` set to the version it read; reads
-the stored bytes back and verifies the digest; and shreds its working copies
-whether it succeeded or failed.
+The workflow then, in order: refuses a hosted runner and a request path that
+escapes the repository; refuses if the public inventory is absent; **verifies
+the tool** — lockfile intact, request parsing under its contract — because that
+verification is what earns the writer credential; reads the stored version
+**confirming the shape the request declared and refusing if the store
+disagrees**; applies the request, refusing if the store has moved since the
+request was reviewed; **resolves the next version against the public inventory
+in both directions**; writes with OpenBao's own `cas` set to the version it
+read; reads the stored bytes back and verifies the digest; and shreds its
+working copies whether it succeeded or failed.
+
+**The writer credential exists in three steps and nowhere else.** Everything
+before the mutation boundary — checkout, the setup actions, `poetry install`,
+every dependency it executes — runs with no production credential in the
+environment at all. A job-level `env` would have handed the token to all of
+them.
 
 **Two compare-and-sets, catching different races.** The request's digest proves
 the CONTENT is the version that was reviewed. KV's `cas` proves no version
@@ -142,22 +160,53 @@ The superseded version is retained by KV and nothing in the workflow deletes
 it. Do not delete it by hand: every receipt naming version *n* is unresolvable
 evidence without version *n* to resolve against.
 
-### Before the first run — setup this runbook cannot verify
+### Before the first run — in this order
 
-- The `private-inventory` environment must exist with **required reviewers**.
-  The workflow declares the environment; protection rules are configured in
-  repository settings and cannot be asserted from the workflow file, so this
-  line is a setup step and not evidence that it is in place.
-- Four secrets must be configured: the OpenBao address and token, and the
-  mount and path of the document. All four are credential-custody layout and
-  therefore private under ADR-0004, which is why they are secrets rather than
-  values written down here. The workflow refuses to continue if any is empty.
-- The storage shape is **detected, not assumed**: the workflow reports whether
-  the document is the secret's data object or a single field, and refuses if it
-  can identify neither. Confirm which it found on the first run.
-- `inventory/` must be populated (delivery lane 3C). The workflow refuses
-  otherwise, because the two-directional resolution check cannot run and a
-  supersession that cannot be resolved is not one worth writing.
+The first item is a blocker for everything after it, and the last two are
+waiting on names Michael has not given yet.
+
+**1. Populate and review the public inventory** (delivery lane 3C). Both
+workflows refuse without it: the two-directional resolution check cannot run,
+and a supersession that cannot be resolved is not one worth writing. This is
+first, not last.
+
+**2. Name the fixed-egress control runner** and set the repository variable
+`PRIVATE_INVENTORY_RUNNER` to its label. It is **not Observer** and **not the
+Foundation test host by assumption** — it has to be named explicitly. Hosted
+runners are refused twice over: `runs-on` reads the variable, and each workflow
+checks `RUNNER_ENVIRONMENT` at run time. OpenBao's listener sits behind an
+inventory-derived allowlist with a terminal DROP on both address families, and
+widening that allowlist to reach a dynamic hosted range would undo the
+containment to serve a convenience.
+
+**3. Create two identities, path-scoped to this exact document.**
+
+| Identity | Secret | Capabilities |
+| --- | --- | --- |
+| Reader | `OPENBAO_INVENTORY_READER_TOKEN` | read only |
+| Writer | `OPENBAO_INVENTORY_WRITER_TOKEN` | read, CAS update, read-back |
+
+Neither gets `list`, `delete` or `destroy`, and neither reaches an unrelated
+path. The split is doing real work: discovery needs no write capability at all,
+and the writer needs no list capability. **A single identity that can do both
+is the thing to eliminate, not a convenience to preserve.**
+
+Plus `OPENBAO_ADDR`, `OBSERVABILITY_PRIVATE_INVENTORY_MOUNT` and
+`OBSERVABILITY_PRIVATE_INVENTORY_PATH`, and
+`OBSERVABILITY_PRIVATE_INVENTORY_FIELD` only where the shape is `field`. All are
+credential-custody layout and therefore private under ADR-0004, which is why
+they are secrets rather than values written down here. Both workflows refuse if
+any required one is empty.
+
+**4. Configure the `private-inventory` environment**: main-only, **no wait
+timer**, and a **named required reviewer** until Deployment Control
+authorization replaces that human gate. The workflow declares the environment;
+protection rules live in repository settings and cannot be asserted from a
+workflow file, so this is a setup step and nothing in the repository is
+evidence that it is done.
+
+**5. Run discovery once** and confirm the shape it reports before writing any
+request.
 
 ## What this procedure deliberately does not do
 

@@ -1445,6 +1445,15 @@ class SupersessionRequest:
     document: str
     previous_version: int
     previous_digest: str
+    storage_shape: str
+    """The CONFIRMED storage shape, reviewed rather than discovered.
+
+    An earlier draft had the workflow detect this at run time and then write
+    immediately, which is detection rather than confirmation — the same defect
+    as a probe whose result nobody reads before acting on it. Discovery now
+    reports and stops; a human puts the answer here; the mutation refuses if the
+    store disagrees.
+    """
     rationale: str
     targets: tuple[str, ...]
     federations: tuple[str, ...]
@@ -1459,6 +1468,7 @@ def load_supersession_request(path: Path, *, contracts: Path) -> SupersessionReq
     if findings:
         raise InventoryError(findings)
     previous = _mapping(document["previous"])
+    storage = _mapping(document["storage"])
     retire = _mapping(document["retire"])
 
     def group(name: str) -> tuple[str, ...]:
@@ -1469,6 +1479,7 @@ def load_supersession_request(path: Path, *, contracts: Path) -> SupersessionReq
         document=str(document["document"]),
         previous_version=int(cast(int, previous["version"])),
         previous_digest=str(previous["sha256"]),
+        storage_shape=str(storage["shape"]),
         rationale=str(document["rationale"]),
         targets=group("targets"),
         federations=group("federations"),

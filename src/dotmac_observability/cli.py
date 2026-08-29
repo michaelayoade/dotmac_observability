@@ -127,6 +127,24 @@ def _cmd_inventory_digest(contracts: Path, private: Path, expect: str | None) ->
     return 0
 
 
+def _cmd_request_shape(contracts: Path, request_path: Path) -> int:
+    """Print the storage shape a reviewed request confirms, and nothing else.
+
+    The mutation workflow needs to know how the document is stored BEFORE it
+    reads it, and it must not work that out for itself — a shape discovered at
+    run time and acted on immediately is a decision nobody reviewed. Reading it
+    from the request goes through the contract, so a malformed or absent
+    declaration fails here rather than producing a shell variable that is
+    silently empty.
+    """
+    try:
+        request = load_supersession_request(request_path, contracts=contracts)
+    except InventoryError as error:
+        return _report(error.findings, heading="cannot read the supersession request")
+    print(request.storage_shape)
+    return 0
+
+
 def _cmd_inventory_apply(contracts: Path, request_path: Path, previous: Path, output: Path) -> int:
     """Apply a reviewed retirement request to a stored private inventory.
 
@@ -293,6 +311,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     apply_request.add_argument("--previous", type=Path, required=True)
     apply_request.add_argument("--output", type=Path, required=True)
 
+    shape = commands.add_parser(
+        "request-shape",
+        help="print the storage shape a reviewed supersession request confirms",
+    )
+    shape.add_argument("--request", type=Path, required=True)
+
     supersede = commands.add_parser(
         "inventory-supersede",
         help="prove one private document legitimately replaces a named earlier version",
@@ -329,6 +353,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if arguments.command == "inventory-digest":
         return _cmd_inventory_digest(contracts, arguments.private_inventory, arguments.expect)
+    if arguments.command == "request-shape":
+        return _cmd_request_shape(contracts, arguments.request)
     if arguments.command == "inventory-apply":
         return _cmd_inventory_apply(
             contracts, arguments.request, arguments.previous, arguments.output

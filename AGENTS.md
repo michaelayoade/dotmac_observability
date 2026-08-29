@@ -229,6 +229,22 @@ review discipline, not a guard, and it is a defect to describe it as enforced.
     that publishes the thing. A request can only RETIRE, because retiring needs
     a logical name while provisioning needs a resolved value that must not
     enter public Git or a CI input.
+
+    Three properties of WHERE it runs and WITH WHAT, each of which was a defect
+    in an earlier draft. It runs on a NAMED fixed-egress runner, never a hosted
+    one, because the store's listener is contained behind an allowlist and
+    widening that to reach a dynamic range would undo the containment to serve
+    a convenience. The credential lives in the steps that touch the store and
+    nowhere above them, because a job-level `env` hands a production token to
+    checkout, the setup actions and everything `poetry install` executes. And
+    READING and WRITING are separate path-scoped identities: discovery needs no
+    write capability at all, the writer needs no list capability, and one
+    identity able to do both is the thing to eliminate.
+
+    The storage shape is CONFIRMED against the reviewed request, never
+    discovered and acted on in the same run. Discovery is its own read-only
+    workflow that reports and stops, with a human in between — a shape detected
+    and immediately written is a probe whose result nobody reviewed.
     — `tests/unit/test_private_inventory_supersede.py`,
       `tests/unit/test_supersession_request.py`,
       `tests/architecture/test_supersession_workflow_cannot_leak.py`

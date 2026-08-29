@@ -1,25 +1,34 @@
-"""The supersession workflow must not be able to publish the private inventory.
+"""The private-inventory workflows must not leak, over-reach, or run anywhere.
 
-Content tests prove the CLI does not leak. They say nothing about the workflow
-that runs it, and a workflow is the easier place to get this wrong: one
+Content tests prove the CLI does not leak. They say nothing about the workflows
+that run it, and a workflow is the easier place to get this wrong: one
 `upload-artifact` step added later to help diagnose a failure would publish the
 document while every content test stayed green. The failure path is where this
 normally happens, because the handler that gathers context to explain a failure
 is the handler that ships the thing.
 
-So the guard is structural and it reads the workflow's own text. Two
-independent properties, because either alone can be defeated:
+So the guard is structural and reads the workflows' own text. Four families of
+property, each of which was a real defect in an earlier draft:
 
-* **Nothing that publishes.** No artifact upload, no job summary, no debug
-  tracing, no remote shell.
-* **Nowhere to publish FROM.** The document exists only under `$RUNNER_TEMP`
-  and never in the checkout, so an upload rooted at the workspace could not
-  reach it even if one were added.
+* **Nothing that publishes**, and **nowhere to publish from** — the document
+  lives only under `$RUNNER_TEMP`, so an upload rooted at the checkout could
+  not reach it even if one were added.
+* **Nowhere to run but the named runner.** OpenBao's listener sits behind an
+  inventory-derived allowlist with a terminal DROP on both address families;
+  a hosted runner arrives from a dynamic range, and reopening the allowlist to
+  reach one would undo the containment to serve a convenience.
+* **No credential above the step that needs it.** A job-level `env` hands the
+  production token to checkout, the setup actions and every dependency
+  `poetry install` executes.
+* **A reader that cannot write, and a writer that cannot list.** One identity
+  able to do both is the thing to eliminate.
 
-Comments are stripped before the executable scan. The workflow discusses `set
--x` and destroy endpoints in prose precisely to explain why it does not use
-them, and a guard that could not tell the two apart would force the file to
-stop explaining itself.
+Comments are stripped before the executable scan. The workflows discuss `set
+-x` and destroy endpoints in prose precisely to explain why they avoid them,
+and `.data.metadata.version` is a legitimate KV read while a `/metadata`
+endpoint call would delete the version history rule 21 requires be retained. A
+guard that could not tell those apart would force the files to stop explaining
+themselves.
 """
 
 from __future__ import annotations
@@ -30,229 +39,300 @@ import pytest
 
 from tests.conftest import REPO_ROOT
 
-WORKFLOW = REPO_ROOT / ".github" / "workflows" / "private-inventory-supersede.yml"
-TEXT = WORKFLOW.read_text(encoding="utf-8")
+WORKFLOWS = REPO_ROOT / ".github" / "workflows"
+SUPERSEDE = WORKFLOWS / "private-inventory-supersede.yml"
+DISCOVER = WORKFLOWS / "private-inventory-discover.yml"
+BOTH = (SUPERSEDE, DISCOVER)
+
+READER_SECRET = "OPENBAO_INVENTORY_READER_TOKEN"
+WRITER_SECRET = "OPENBAO_INVENTORY_WRITER_TOKEN"
 
 
 def _executable(text: str) -> str:
     """The workflow with comment lines and trailing comments removed."""
     kept: list[str] = []
     for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("#"):
+        if line.strip().startswith("#"):
             continue
         kept.append(line.split(" #", 1)[0])
     return "\n".join(kept)
 
 
-EXECUTABLE = _executable(TEXT)
+def _text(path):
+    return path.read_text(encoding="utf-8")
 
 
-def test_the_workflow_exists_and_the_stripper_kept_the_code():
-    # Without this, a renamed file or an over-eager stripper would make every
-    # assertion below pass over an empty string.
-    assert WORKFLOW.is_file()
-    assert "inventory-apply" in EXECUTABLE
-    assert "curl" in EXECUTABLE
-    assert len(EXECUTABLE.splitlines()) > 80
+def _code(path):
+    return _executable(_text(path))
+
+
+# ── The corpus is real ──────────────────────────────────────────────────────
+
+
+def test_both_workflows_exist_and_the_stripper_kept_the_code():
+    for path in BOTH:
+        assert path.is_file(), f"{path.name} is missing"
+        code = _code(path)
+        assert "curl" in code and "RUNNER_TEMP" in code
+        assert len(code.splitlines()) > 40
 
 
 def test_the_stripper_removes_prose_but_not_code():
     """Sensitivity proof for the stripper itself.
 
-    The workflow deliberately mentions `set -x` in a comment explaining why it
-    is absent. If the stripper stopped working, that comment would be read as
-    code and the tracing check below would fail for the wrong reason — or, far
-    worse, a real `set -x` would be excused as prose.
+    The workflows deliberately mention `set -x` in comments explaining why it
+    is absent. If the stripper stopped working, that prose would be read as
+    code — or, far worse, a real `set -x` would be excused as prose.
     """
-    assert "set -x" in TEXT, "the workflow no longer explains why it avoids tracing"
-    assert "set -x" not in EXECUTABLE
-    sample = _executable("run: echo hello  # set -x\n# set -x\nrun: set -e\n")
-    assert "set -x" not in sample
-    assert "set -e" in sample
+    assert "set -x" in _text(SUPERSEDE), "the workflow no longer explains why it avoids tracing"
+    assert "set -x" not in _code(SUPERSEDE)
+    sample = _executable("run: echo hi  # set -x\n# set -x\nrun: set -e\n")
+    assert "set -x" not in sample and "set -e" in sample
 
 
-@pytest.mark.parametrize(
-    "forbidden",
-    [
-        "upload-artifact",
-        "download-artifact",
-        "GITHUB_STEP_SUMMARY",
-        "ACTIONS_STEP_DEBUG",
-        "ACTIONS_RUNNER_DEBUG",
-        "tmate",
-        "continue-on-error",
-    ],
+# ── Nothing that publishes ──────────────────────────────────────────────────
+
+_PUBLISHERS = (
+    "upload-artifact",
+    "download-artifact",
+    "GITHUB_STEP_SUMMARY",
+    "ACTIONS_STEP_DEBUG",
+    "ACTIONS_RUNNER_DEBUG",
+    "tmate",
+    "continue-on-error",
 )
-def test_the_workflow_carries_nothing_that_publishes(forbidden: str):
-    # Checked against the WHOLE file, comments included. There is no legitimate
-    # reason for this workflow to name any of them, so a mention is a change
-    # worth failing on rather than a discussion worth allowing.
-    assert forbidden not in TEXT, (
-        f"{forbidden!r} appears in the supersession workflow. The private inventory must "
-        "never leave the runner; if this is genuinely needed, it needs a reviewed change to "
-        "this guard first (AGENTS.md rule 21, ADR-0004)"
+
+
+@pytest.mark.parametrize("path", BOTH, ids=lambda p: p.name)
+@pytest.mark.parametrize("forbidden", _PUBLISHERS)
+def test_no_workflow_carries_anything_that_publishes(path, forbidden: str):
+    # The WHOLE file, comments included: there is no legitimate reason for
+    # either workflow to name any of these, so a mention is a change worth
+    # failing on rather than a discussion worth allowing.
+    assert forbidden not in _text(path), (
+        f"{forbidden!r} appears in {path.name}. The private inventory must never leave the "
+        "runner; if this is genuinely needed it takes a reviewed change to this guard first"
     )
 
 
-@pytest.mark.parametrize("forbidden", ["set -x", "/destroy", "/metadata", "bash -x"])
-def test_the_executable_workflow_neither_traces_nor_destroys(forbidden: str):
-    # Executable lines only. `.data.metadata.version` is a legitimate KV read
-    # and lives in the code; a `/metadata` ENDPOINT call would delete version
-    # history, which is the evidence every receipt depends on.
-    assert forbidden not in EXECUTABLE, (
-        f"{forbidden!r} appears in an executable line. Tracing echoes the document into the "
-        "log, and a destroy or metadata-delete endpoint removes the superseded version that "
-        "AGENTS.md rule 21 requires be retained"
-    )
+@pytest.mark.parametrize("path", BOTH, ids=lambda p: p.name)
+@pytest.mark.parametrize("forbidden", ["set -x", "bash -x", "/destroy", "/metadata"])
+def test_no_workflow_traces_or_destroys(path, forbidden: str):
+    # Executable lines only. `.data.metadata.version` is a legitimate KV read;
+    # a `/metadata` ENDPOINT call would delete the version history that every
+    # receipt naming a superseded version depends on.
+    assert forbidden not in _code(path), f"{forbidden!r} appears in executable {path.name}"
 
 
-def test_the_document_lives_only_under_runner_temp():
-    """Nowhere to publish from, which is the half that survives a careless edit.
-
-    Every path the private document is written to must be under `$RUNNER_TEMP`.
-    An artifact upload is rooted at the workspace by default, so a document that
-    is never in the workspace cannot be collected by one.
-    """
-    assigned = re.findall(r'work="([^"]+)"', EXECUTABLE)
-    assert assigned, "no working directory assignment found; the matcher has drifted"
+@pytest.mark.parametrize("path", BOTH, ids=lambda p: p.name)
+def test_the_document_lives_only_under_runner_temp(path):
+    assigned = re.findall(r'work="([^"]+)"', _code(path))
+    assert assigned, f"{path.name}: no working directory found; the matcher has drifted"
     for value in set(assigned):
         assert value.startswith("${RUNNER_TEMP}"), (
-            f"the working directory {value!r} is not under $RUNNER_TEMP; a document in the "
-            "checkout can be collected by any artifact step added later"
+            f"{path.name}: working directory {value!r} is not under $RUNNER_TEMP; a document "
+            "in the checkout can be collected by any artifact step added later"
         )
-    # And the workspace is never named as a destination for it.
-    assert "GITHUB_WORKSPACE" not in EXECUTABLE
+    assert "GITHUB_WORKSPACE" not in _code(path)
 
 
-def test_only_the_shred_step_runs_on_failure():
-    """A failure handler is how this class of workflow leaks.
-
-    Exactly one `always()` step, and it must be the one that deletes the working
-    copies. Any other always-run step is a candidate context-gatherer.
-    """
-    assert EXECUTABLE.count("if: always()") == 1
-    tail = EXECUTABLE[EXECUTABLE.index("if: always()") :]
-    assert "rm -rf" in tail, "the always() step is not the one that shreds the working copies"
-
-
-def test_it_runs_only_by_dispatch_and_only_from_protected_main():
-    assert "workflow_dispatch:" in EXECUTABLE
-    for trigger in ("  push:", "  pull_request:", "  schedule:"):
-        assert trigger not in EXECUTABLE, (
-            f"{trigger.strip()} would run this without a human choosing to, and its whole "
-            "safety argument rests on a reviewed request applied deliberately"
-        )
-    # `workflow_dispatch` lets a caller pick any ref that carries the workflow,
-    # so without this a branch could supply both the workflow and the request it
-    # applies — the review gate bypassed by choosing a dropdown value.
-    assert "if: github.ref == 'refs/heads/main'" in EXECUTABLE
-
-
-def test_it_asks_for_no_write_permission():
-    assert "permissions:" in EXECUTABLE
-    assert "contents: read" in EXECUTABLE
+@pytest.mark.parametrize("path", BOTH, ids=lambda p: p.name)
+def test_only_the_shred_step_runs_on_failure(path):
+    code = _code(path)
+    assert code.count("if: always()") == 1, f"{path.name} has more than one always() step"
     assert (
-        "write"
-        not in re.sub(
-            r"--data-binary|write\.json|written\.json|Write the next version", "", EXECUTABLE
-        ).split("jobs:")[0]
-    ), "the workflow requests a write permission it does not need"
+        "rm -rf" in code[code.index("if: always()") :]
+    ), f"{path.name}'s always() step is not the one that shreds the working copies"
+
+
+# ── Nowhere to run but the named runner ─────────────────────────────────────
+
+
+@pytest.mark.parametrize("path", BOTH, ids=lambda p: p.name)
+def test_neither_workflow_runs_on_a_hosted_runner(path):
+    runs_on = re.findall(r"^\s*runs-on:\s*(.+)$", _code(path), re.MULTILINE)
+    assert len(runs_on) == 1, f"{path.name} declares {len(runs_on)} runs-on"
+    assert runs_on[0].strip() == "${{ vars.PRIVATE_INVENTORY_RUNNER }}", (
+        f"{path.name} pins its runner to {runs_on[0]!r}. OpenBao is contained behind an "
+        "allowlist with a terminal DROP; a hosted runner arrives from a dynamic range, and "
+        "widening the allowlist to reach one would undo the containment"
+    )
+
+
+@pytest.mark.parametrize("path", BOTH, ids=lambda p: p.name)
+def test_each_workflow_also_refuses_a_hosted_runner_at_run_time(path):
+    # Belt and braces with `runs-on`: a repository variable can be repointed
+    # without touching the file, and the containment argument depends on where
+    # this actually executes.
+    assert "RUNNER_ENVIRONMENT:-" in _code(path)
+
+
+@pytest.mark.parametrize("path", BOTH, ids=lambda p: p.name)
+def test_each_workflow_runs_only_by_dispatch_from_protected_main(path):
+    code = _code(path)
+    assert "workflow_dispatch:" in code
+    for trigger in ("  push:", "  pull_request:", "  schedule:"):
+        assert trigger not in code, f"{path.name}: {trigger.strip()} would run this unbidden"
+    assert "if: github.ref == 'refs/heads/main'" in code
+
+
+# ── No credential above the step that needs it ──────────────────────────────
+
+
+@pytest.mark.parametrize("path", BOTH, ids=lambda p: p.name)
+def test_no_workflow_declares_a_job_level_env(path):
+    """A job-level `env` is inherited by every step, including third-party ones.
+
+    Job properties sit at four spaces and step properties at eight, so the
+    indentation distinguishes them without parsing YAML.
+    """
+    job_level = re.findall(r"^    env:\s*$", _code(path), re.MULTILINE)
+    assert not job_level, (
+        f"{path.name} declares a job-level env. checkout, the setup actions and everything "
+        "`poetry install` executes would inherit whatever it holds"
+    )
+    assert re.search(
+        r"^        env:\s*$", _code(path), re.MULTILINE
+    ), f"{path.name} declares no step-level env at all; the matcher has drifted"
+
+
+def test_the_writer_credential_appears_only_after_the_tool_is_verified():
+    code = _code(SUPERSEDE)
+    assert "poetry check --lock" in code, "the tool verification step is gone"
+    verified_at = code.index("poetry check --lock")
+    first_use = code.index(WRITER_SECRET)
+    assert verified_at < first_use, (
+        "the writer credential is introduced before the tool is verified; verification is "
+        "what earns the token, so it cannot come after it"
+    )
+
+
+def test_every_step_touching_the_store_names_its_credential_explicitly():
+    # Each mutation step carries its own env block rather than inheriting one,
+    # so removing a step cannot silently widen another's reach.
+    code = _code(SUPERSEDE)
+    assert (
+        code.count(WRITER_SECRET) == 3
+    ), "expected the writer credential in exactly the read, write and read-back steps"
+
+
+# ── A reader that cannot write, a writer that cannot list ───────────────────
+
+
+def test_the_two_workflows_use_different_identities():
+    assert READER_SECRET in _code(DISCOVER)
+    assert WRITER_SECRET not in _code(DISCOVER), (
+        "discovery names the writer credential. Discovery needs no write capability at all, "
+        "and an identity that can do both is the thing to eliminate"
+    )
+    assert WRITER_SECRET in _code(SUPERSEDE)
+    assert READER_SECRET not in _code(SUPERSEDE)
+
+
+def test_discovery_cannot_mutate():
+    code = _code(DISCOVER)
+    for forbidden in ("-X POST", "-X PUT", "-X DELETE", '"cas"', "cas:"):
+        assert forbidden not in code, (
+            f"discovery contains {forbidden!r}. It reports and stops; the token it uses "
+            "cannot write, and the file must not pretend otherwise"
+        )
+    assert "inventory-apply" not in code
+
+
+# ── The reviewed request, not a runtime discovery ───────────────────────────
+
+
+def test_the_mutation_confirms_the_shape_rather_than_discovering_it():
+    code = _code(SUPERSEDE)
+    assert "request-shape" in code, "the shape no longer comes from the reviewed request"
+    assert "the store disagrees" in code, "no refusal on a shape mismatch"
+    # The giveaway of the old design: branching on what the store looks like
+    # instead of on what the request declared.
+    assert "if jq -e " not in code.replace("jq -e --arg", ""), (
+        "the mutation is branching on the store's shape again; it must branch on the "
+        "reviewed request and refuse when the store disagrees"
+    )
 
 
 def test_the_request_path_cannot_escape_the_repository():
-    # The one caller-supplied value. A path input that accepts `/etc/...` or
-    # `../` reaches outside the reviewed corpus, which would let a dispatch
-    # apply something nobody merged.
-    assert "*..*" in EXECUTABLE
-    assert "case " in EXECUTABLE
+    assert "*..*" in _code(SUPERSEDE)
 
 
 def test_it_refuses_to_run_before_the_public_inventory_exists():
-    """Both directions or neither.
-
-    Superseding the private half while unable to compare it with the public
-    half is the one-way check this repository refuses everywhere else: it passes
-    while leaving orphans on the side nobody looked at.
-    """
-    assert "inventory/control-plane.toml" in EXECUTABLE
+    assert "inventory/control-plane.toml" in _code(SUPERSEDE)
 
 
-# ── Sensitivity: the guard must fail on the edits it exists to catch ─────────
-#
-# Every assertion above passes on a clean file, and would also pass if the
-# checks were misspelled, if the parametrize list were empty, or if the
-# stripper deleted everything. Each case below plants one realistic regression
-# and requires the corresponding check to refuse it.
-
-
-def _would_publish(text: str) -> bool:
-    return any(
-        token in text
-        for token in (
-            "upload-artifact",
-            "download-artifact",
-            "GITHUB_STEP_SUMMARY",
-            "ACTIONS_STEP_DEBUG",
-            "ACTIONS_RUNNER_DEBUG",
-            "tmate",
-            "continue-on-error",
-        )
-    )
+# ── Sensitivity: the guard must fail on the edits it exists to catch ────────
 
 
 def test_planting_an_artifact_upload_is_caught():
-    # The exact edit the guard exists for: a debug artifact added to diagnose a
-    # failing run, which would publish the private inventory.
-    planted = TEXT + (
-        "\n      - name: Debug\n"
-        "        if: failure()\n"
+    planted = _text(SUPERSEDE) + (
+        "\n      - name: Debug\n        if: failure()\n"
         "        uses: actions/upload-artifact@v4\n"
-        "        with:\n"
-        "          path: ${RUNNER_TEMP}/inventory\n"
     )
-    assert _would_publish(planted)
-    assert not _would_publish(TEXT)
+    assert any(token in planted for token in _PUBLISHERS)
+    assert not any(token in _text(SUPERSEDE) for token in _PUBLISHERS)
+
+
+def test_planting_a_hosted_runner_is_caught():
+    planted = _executable(
+        _text(SUPERSEDE).replace(
+            "runs-on: ${{ vars.PRIVATE_INVENTORY_RUNNER }}", "runs-on: ubuntu-latest"
+        )
+    )
+    found = re.findall(r"^\s*runs-on:\s*(.+)$", planted, re.MULTILINE)
+    assert found and found[0].strip() != "${{ vars.PRIVATE_INVENTORY_RUNNER }}"
+
+
+def test_planting_a_job_level_env_is_caught():
+    planted = _executable(
+        _text(SUPERSEDE).replace(
+            "    environment: private-inventory",
+            "    environment: private-inventory\n    env:\n      BAO_TOKEN: x",
+        )
+    )
+    assert re.findall(r"^    env:\s*$", planted, re.MULTILINE)
+    assert not re.findall(r"^    env:\s*$", _code(SUPERSEDE), re.MULTILINE)
+
+
+def test_giving_discovery_the_writer_credential_is_caught():
+    planted = _executable(_text(DISCOVER).replace(READER_SECRET, WRITER_SECRET))
+    assert WRITER_SECRET in planted
+    assert WRITER_SECRET not in _code(DISCOVER)
 
 
 def test_planting_shell_tracing_is_caught():
-    planted = _executable(TEXT + "\n        run: |\n          set -x\n          curl ...\n")
-    assert "set -x" in planted
-    assert "set -x" not in EXECUTABLE
+    planted = _executable(_text(SUPERSEDE) + "\n        run: |\n          set -x\n")
+    assert "set -x" in planted and "set -x" not in _code(SUPERSEDE)
 
 
 def test_planting_a_destroy_endpoint_is_caught():
-    planted = _executable(
-        TEXT + '\n        run: curl -X POST "${BAO_ADDR}/v1/${BAO_MOUNT}/destroy/x"\n'
-    )
-    assert "/destroy" in planted
-    assert "/destroy" not in EXECUTABLE
+    planted = _executable(_text(SUPERSEDE) + '\n        run: curl "${BAO_ADDR}/v1/x/destroy/y"\n')
+    assert "/destroy" in planted and "/destroy" not in _code(SUPERSEDE)
 
 
 def test_moving_the_document_into_the_workspace_is_caught():
-    planted = _executable(TEXT.replace('work="${RUNNER_TEMP}/inventory"', 'work="./inventory"'))
+    planted = _executable(
+        _text(SUPERSEDE).replace('work="${RUNNER_TEMP}/inventory"', 'work="./inv"')
+    )
     assigned = re.findall(r'work="([^"]+)"', planted)
     assert assigned, "the mutation changed nothing; the search string has drifted"
     assert not all(value.startswith("${RUNNER_TEMP}") for value in assigned)
 
 
 def test_adding_a_second_always_step_is_caught():
-    planted = _executable(
-        TEXT + "\n      - name: Collect context\n        if: always()\n        run: env\n"
-    )
+    planted = _executable(_text(SUPERSEDE) + "\n      - if: always()\n        run: env\n")
     assert planted.count("if: always()") == 2
-    assert EXECUTABLE.count("if: always()") == 1
+    assert _code(SUPERSEDE).count("if: always()") == 1
 
 
 def test_removing_the_protected_main_guard_is_caught():
-    planted = _executable(TEXT.replace("if: github.ref == 'refs/heads/main'", ""))
+    planted = _executable(_text(SUPERSEDE).replace("if: github.ref == 'refs/heads/main'", ""))
     assert "if: github.ref == 'refs/heads/main'" not in planted
-    assert "if: github.ref == 'refs/heads/main'" in EXECUTABLE
 
 
 def test_adding_a_push_trigger_is_caught():
     planted = _executable(
-        TEXT.replace("on:\n  workflow_dispatch:", "on:\n  push:\n  workflow_dispatch:")
+        _text(SUPERSEDE).replace("on:\n  workflow_dispatch:", "on:\n  push:\n  workflow_dispatch:")
     )
-    assert "  push:" in planted
-    assert "  push:" not in EXECUTABLE
+    assert "  push:" in planted and "  push:" not in _code(SUPERSEDE)

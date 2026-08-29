@@ -32,6 +32,9 @@ rationale = "Decommissioned on a named host; its credential file was shredded."
 version = 1
 sha256 = "{digest}"
 
+[storage]
+shape = "data-object"
+
 [retire]
 targets = ["erp-production"]
 """
@@ -177,3 +180,46 @@ def test_unknown_fields_in_the_stored_document_survive_a_retirement(tmp_path, st
     assert "erp-production" not in surviving
     federations = cast(list[dict[str, object]], document["federations"])
     assert federations[0]["endpoint"]
+
+
+def test_the_confirmed_storage_shape_is_reviewed_input(tmp_path, stored):
+    """The shape is declared, not discovered.
+
+    An earlier draft had the mutation workflow detect the shape at run time and
+    then write immediately. That is detection, not confirmation — the same
+    defect as a probe whose result nobody reads before acting on it. Discovery
+    is now a separate read-only workflow that reports and stops; the answer
+    comes back through review, in this field.
+    """
+    _, inventory, _ = stored
+    request = load_supersession_request(_request(tmp_path, inventory.digest), contracts=CONTRACTS)
+    assert request.storage_shape == "data-object"
+
+
+def test_a_request_with_no_confirmed_shape_is_refused(tmp_path, stored):
+    _, inventory, _ = stored
+    body = REQUEST.format(digest=inventory.digest).replace('[storage]\nshape = "data-object"\n', "")
+    with pytest.raises(InventoryError) as raised:
+        load_supersession_request(_request(tmp_path, "", body), contracts=CONTRACTS)
+    assert {finding.code for finding in raised.value.findings} == {"SCHEMA"}
+
+
+def test_an_unrecognised_shape_is_refused_by_the_contract(tmp_path, stored):
+    _, inventory, _ = stored
+    body = REQUEST.format(digest=inventory.digest).replace(
+        'shape = "data-object"', 'shape = "whatever-the-store-says"'
+    )
+    with pytest.raises(InventoryError) as raised:
+        load_supersession_request(_request(tmp_path, "", body), contracts=CONTRACTS)
+    assert {finding.code for finding in raised.value.findings} == {"SCHEMA"}
+
+
+def test_the_request_carries_no_field_name(tmp_path, stored):
+    """The shape is reviewed; the field NAME is not.
+
+    Which of two code paths applies is a choice a reviewer should see. What the
+    field is called is storage layout at a private path, so it stays a secret —
+    the same line ADR-0004 draws between a capability and a binding.
+    """
+    schema = json.loads((CONTRACTS / "supersession-request.schema.json").read_text())
+    assert set(schema["properties"]["storage"]["properties"]) == {"shape"}

@@ -9,6 +9,7 @@
     "schema_version",
     "document",
     "previous",
+    "storage",
     "rationale",
     "retire"
   ],
@@ -37,6 +38,23 @@
           "type": "string",
           "pattern": "^[0-9a-f]{64}$",
           "description": "The compare-and-set half, and the reason this request cannot be applied twice or applied to a document somebody else has since changed. Read it with `inventory-digest`; it discloses nothing."
+        }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "shape"
+      ],
+      "description": "The CONFIRMED storage shape, carried here so the mutation workflow verifies rather than discovers. An earlier draft detected the shape at run time and then wrote immediately, which is detection rather than confirmation — the same defect as a probe whose result nobody reviews before acting on it. The discovery workflow reports the shape and stops; a human puts it here; the mutation refuses if the store disagrees.  The shape is a choice between two code paths and is not sensitive. Where the shape is `field`, the field NAME is storage layout at a private path and stays a secret rather than appearing here.",
+      "properties": {
+        "shape": {
+          "enum": [
+            "data-object",
+            "field"
+          ],
+          "description": "`data-object`: the document IS the secret's data object. `field`: the document is a JSON string in a single named field."
         }
       }
     },
