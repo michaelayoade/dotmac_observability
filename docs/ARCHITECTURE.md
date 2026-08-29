@@ -80,6 +80,7 @@ The typed desired state is assembled from a fixed set of documents, located by
 | `routing/policies.toml` | `contracts/routing.schema.json`, `kind = "policies"` | `model.RouteDefaults`, `model.Route` |
 | `routing/inhibition.toml` | `contracts/routing.schema.json`, `kind = "inhibition"` | `model.Inhibition` |
 | `bundles/` | `contracts/bundle-lock.schema.json` | nothing yet; loading arrives in PR 3C |
+| `inventory/supersessions/*.toml` | `contracts/supersession-request.schema.json` | `model`-free: a reviewed instruction consumed by the supersession workflow, never by a render |
 
 And one input that is deliberately NOT in this repository:
 
@@ -638,6 +639,7 @@ review discipline.
 | `bundle.py` | Fetch a pinned product bundle, verify its digests, assemble the release `rules/` tree | PR 3C |
 | `validate.load_private_inventory` / `resolve` | Read and digest an ObserverInventoryV1 document, and join it to the public state with every lookup proved | shipped |
 | `validate.supersede_findings` / `supersede_summary` | Prove one private document legitimately replaces a NAMED earlier version, and describe the change in logical names only | shipped |
+| `validate.load_supersession_request` / `apply_supersession` | Apply a reviewed, public retirement request to a stored private document, preserving fields this package does not read | shipped |
 | `validate.scan_for_private_material` | Refuse resolved material anywhere in the tracked tree (rule 18) | shipped |
 | `live_verify.py` | Read live target, rule and route state from the evaluator APIs and compare it with the desired state | PR 5 |
 | `receipt.py` | Write and validate a promotion receipt against `contracts/promotion-receipt.schema.json` | PR 6 |

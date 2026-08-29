@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dotmac.io/schemas/observability/supersession-request.v1.json",
+  "title": "observability-supersession-request.v1",
+  "description": "A reviewed request to retire logical entries from a private inventory, producing its next version.  This document is PUBLIC and is the reason the supersession workflow can be trusted: the change is expressed entirely in logical vocabulary that ADR-0004 already publishes — target ids and credential-ref names — so it is diffable, reviewable and merged onto protected main before anything reads the private store. The alternative, typing target names into a workflow_dispatch box at run time, is an unversioned unreviewed change, which is the gesture this whole programme exists to remove.  RETIREMENT ONLY, and that is a boundary rather than a first cut. Removing an entry needs only its logical name. ADDING one needs a resolved endpoint or credential binding, which must never pass through public Git or a CI input, so provisioning stays a human operation against the private store and this contract has no field for it.  Single-use by construction: `previous.sha256` names the version being replaced, so re-running an applied request refuses — the stored document no longer hashes to it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "document",
+    "previous",
+    "rationale",
+    "retire"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "observability-supersession-request.v1"
+    },
+    "document": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The private document this request supersedes. Checked against the stored document's own name, so a request aimed at the wrong environment's inventory is refused rather than applied."
+    },
+    "previous": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "sha256"
+      ],
+      "properties": {
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "The compare-and-set half, and the reason this request cannot be applied twice or applied to a document somebody else has since changed. Read it with `inventory-digest`; it discloses nothing."
+        }
+      }
+    },
+    "rationale": {
+      "type": "string",
+      "minLength": 40,
+      "description": "Why these entries are being retired. Minimum length is deliberate, as everywhere else in these contracts: 'cleanup' is not a reason a reviewer can disagree with. The evidence that a product is provably gone belongs here or in a document this cites."
+    },
+    "retire": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "description": "At least one group must be named. An empty request would produce a version bump that changed nothing, which the supersession gate refuses anyway — refusing it here says so at the point a reviewer is reading.",
+      "properties": {
+        "targets": {
+          "$ref": "#/$defs/slug_list",
+          "description": "Logical target ids. Retiring a target retires its credential binding with it: the two are one entry in the private inventory, and a binding whose credential file has been shredded renders a configuration the evaluator cannot load."
+        },
+        "federations": {
+          "$ref": "#/$defs/slug_list"
+        },
+        "receivers": {
+          "$ref": "#/$defs/slug_list",
+          "description": "Logical credential-ref names."
+        }
+      }
+    }
+  },
+  "$defs": {
+    "slug_list": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$"
+      }
+    }
+  }
+}

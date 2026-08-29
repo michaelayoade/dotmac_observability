@@ -78,10 +78,13 @@ __all__ = [
     "Finding",
     "InventoryError",
     "SupersedeSummary",
+    "SupersessionRequest",
+    "apply_supersession",
     "canonical_bytes",
     "canonical_digest",
     "load",
     "load_private_inventory",
+    "load_supersession_request",
     "resolution_findings",
     "resolve",
     "scan_for_private_material",
@@ -1423,3 +1426,125 @@ def supersede_summary(previous: PrivateInventory, following: PrivateInventory) -
         credentials_before=_credential_count(previous),
         credentials_after=_credential_count(following),
     )
+
+
+# ── Applying a reviewed supersession request ────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class SupersessionRequest:
+    """A reviewed, PUBLIC instruction to retire logical entries.
+
+    Retirement only. Removing an entry needs its logical name, which ADR-0004
+    already publishes; adding one needs a resolved endpoint or credential
+    binding, which must never pass through public Git or a CI input. So the
+    request contract has no field for provisioning, and that is a boundary
+    rather than an unfinished first cut.
+    """
+
+    document: str
+    previous_version: int
+    previous_digest: str
+    rationale: str
+    targets: tuple[str, ...]
+    federations: tuple[str, ...]
+    receivers: tuple[str, ...]
+
+
+def load_supersession_request(path: Path, *, contracts: Path) -> SupersessionRequest:
+    if not path.is_file():
+        raise InventoryError([Finding("MISSING", str(path), "the supersession request is absent")])
+    document = _read_toml(path)
+    findings = _validate_document(contracts, "supersession-request", document, str(path))
+    if findings:
+        raise InventoryError(findings)
+    previous = _mapping(document["previous"])
+    retire = _mapping(document["retire"])
+
+    def group(name: str) -> tuple[str, ...]:
+        raw = retire.get(name)
+        return () if raw is None else _strings(raw)
+
+    return SupersessionRequest(
+        document=str(document["document"]),
+        previous_version=int(cast(int, previous["version"])),
+        previous_digest=str(previous["sha256"]),
+        rationale=str(document["rationale"]),
+        targets=group("targets"),
+        federations=group("federations"),
+        receivers=group("receivers"),
+    )
+
+
+def apply_supersession(
+    request: SupersessionRequest, previous: PrivateInventory, stored: Mapping[str, object]
+) -> tuple[Mapping[str, object], tuple[Finding, ...]]:
+    """Produce the next version's document, or say why the request cannot apply.
+
+    ``stored`` is the raw parsed document rather than the loaded record,
+    because what is written back must be the stored bytes minus the retired
+    entries — not a re-serialisation of this package's model. A model-shaped
+    rewrite would silently drop any field a future schema version adds and this
+    loader does not yet read, turning an unrelated deployment's data into
+    collateral of a retirement.
+    """
+    findings: list[Finding] = []
+    if request.document != previous.document:
+        findings.append(
+            Finding(
+                "REQUEST-DOCUMENT",
+                request.document,
+                f"the request names document {request.document!r} but the stored document is "
+                f"{previous.document!r}; a request aimed at another environment's inventory "
+                "is refused rather than applied",
+            )
+        )
+    if request.previous_version != previous.version:
+        findings.append(
+            Finding(
+                "REQUEST-VERSION",
+                request.document,
+                f"the request supersedes version {request.previous_version} but the stored "
+                f"document is version {previous.version}",
+            )
+        )
+    if request.previous_digest != previous.digest:
+        findings.append(
+            Finding(
+                "REQUEST-PREVIOUS-DIGEST",
+                request.document,
+                "the stored document does not hash to the digest this request names, so it is "
+                "not the version the request was reviewed against; re-read it, rebase the "
+                "request and have the change reviewed again",
+            )
+        )
+    if findings:
+        return {}, tuple(findings)
+
+    following = {key: value for key, value in stored.items() if key != "version"}
+    following["version"] = previous.version + 1
+
+    def retire(group: str, key: str, names: tuple[str, ...]) -> None:
+        rows = cast(Sequence[Mapping[str, object]], following.get(group, []))
+        present = {str(row[key]) for row in rows}
+        for name in names:
+            if name not in present:
+                # A no-op removal means the request is stale or names the wrong
+                # entry. Applying it quietly would produce a version whose diff
+                # does not match the change that was reviewed.
+                findings.append(
+                    Finding(
+                        "REQUEST-ABSENT",
+                        f"{request.document}#{group}/{name}",
+                        f"the request retires {name!r} from {group}, which the stored document "
+                        "does not contain",
+                    )
+                )
+        following[group] = [row for row in rows if str(row[key]) not in set(names)]
+
+    retire("targets", "target_id", request.targets)
+    retire("federations", "target_id", request.federations)
+    retire("receivers", "credential_ref", request.receivers)
+    if findings:
+        return {}, tuple(findings)
+    return following, ()

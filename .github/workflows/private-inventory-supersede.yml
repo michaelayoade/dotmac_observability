@@ -1,0 +1,256 @@
+# Supersede the private inventory by applying a REVIEWED retirement request.
+#
+# This workflow is the only writer of the private inventory. A hand-run
+# supersession is exactly the unversioned, unreproducible edit this programme
+# exists to replace, so the sequence lives here where it is reviewed, pinned and
+# repeatable rather than in somebody's terminal history.
+#
+# What it does NOT do, and cannot be made to do without a reviewed change:
+#
+#   * It never emits the document. Not to a log, not to a job summary, not as an
+#     artifact, and not on the failure path — which is where this normally leaks,
+#     because a handler added to help diagnose a failure is the one that
+#     publishes the thing. `tests/architecture/test_supersession_workflow_cannot_leak.py`
+#     enforces that structurally, over this file's text, so a later edit that
+#     adds an upload step fails the build rather than the review.
+#   * It never provisions. A retirement needs a logical name; an addition needs a
+#     resolved endpoint or credential binding, which must not pass through public
+#     Git or a CI input. Adding an entry stays a human operation.
+#   * It never destroys a prior version. KV v2 retains them and nothing here
+#     calls a destroy or metadata-delete endpoint: the superseded version is the
+#     evidence for every receipt that names it (AGENTS.md rule 21).
+#
+# The private document exists only under $RUNNER_TEMP, never in the workspace,
+# so an artifact upload rooted at the checkout could not reach it even if one
+# were added.
+
+name: Supersede the private inventory
+
+on:
+  workflow_dispatch:
+    inputs:
+      request:
+        description: >-
+          Path to the reviewed retirement request, relative to the repository
+          root. Its CONTENT is the change; this input only says which reviewed
+          file to apply, so nothing typed here can retire anything that was not
+          merged to main first.
+        required: true
+        type: string
+
+# Read-only. This workflow writes to the private store and to nothing else; a
+# token that could push, tag or comment is a token a compromised dependency
+# could use.
+permissions:
+  contents: read
+
+concurrency:
+  # One supersession at a time. Two concurrent runs would both read the same
+  # version and the second write would fail its compare-and-set, which is safe
+  # but wastes a review cycle; serialising makes the second run read the first
+  # one's result instead.
+  group: private-inventory-supersede
+  cancel-in-progress: false
+
+jobs:
+  supersede:
+    name: Apply a reviewed retirement to the private inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # Protected main only. `workflow_dispatch` lets a caller choose any ref that
+    # carries the workflow, so without this a branch could supply both the
+    # workflow and the request it applies — which is the whole review gate,
+    # bypassed by choosing a dropdown value.
+    if: github.ref == 'refs/heads/main'
+
+    # The approval gate for the write itself. Required reviewers are configured
+    # on the environment in repository settings and CANNOT be asserted from
+    # here; `docs/runbooks/retire-a-target.md` records that as a setup step, and
+    # this comment is not evidence that it is in place.
+    environment: private-inventory
+
+    env:
+      # Everything by config (AGENTS.md rule 14). The path, mount and field are
+      # credential-custody layout and therefore private (ADR-0004), so they
+      # arrive as secrets rather than being written down here.
+      BAO_ADDR: ${{ secrets.OPENBAO_ADDR }}
+      BAO_TOKEN: ${{ secrets.OPENBAO_TOKEN }}
+      BAO_MOUNT: ${{ secrets.OBSERVABILITY_PRIVATE_INVENTORY_MOUNT }}
+      BAO_PATH: ${{ secrets.OBSERVABILITY_PRIVATE_INVENTORY_PATH }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: ./.github/actions/setup-poetry
+      - run: poetry install
+
+      - name: Refuse a request path that escapes the repository
+        run: |
+          set -euo pipefail
+          request="${{ inputs.request }}"
+          case "$request" in
+            /*|*..*) echo "the request must be a path inside the repository"; exit 1 ;;
+          esac
+          test -f "$request" || { echo "no such request: $request"; exit 1; }
+          echo "request: $request"
+
+      - name: Refuse to run without the public inventory
+        run: |
+          set -euo pipefail
+          # Resolution is checked in BOTH directions or not at all. Superseding
+          # the private half while unable to compare it with the public half is
+          # precisely the one-way check this repository refuses everywhere else:
+          # it would pass while leaving orphans on the side nobody looked at.
+          if [ ! -f inventory/control-plane.toml ]; then
+            echo "inventory/ is not populated yet (delivery lane 3C)."
+            echo "Refusing: the two-directional resolution check cannot run, and a"
+            echo "supersession that cannot be resolved is not one worth writing."
+            exit 1
+          fi
+
+      - name: Preflight the private store
+        run: |
+          set -euo pipefail
+          for name in BAO_ADDR BAO_TOKEN BAO_MOUNT BAO_PATH; do
+            if [ -z "${!name:-}" ]; then
+              echo "$name is not configured; refusing to continue"
+              exit 1
+            fi
+          done
+          echo "private store configuration present"
+
+      - name: Read the stored version
+        run: |
+          set -euo pipefail
+          # NOT `set -x`. Tracing would echo the document into the log, which is
+          # the failure this workflow is built to make impossible.
+          work="${RUNNER_TEMP}/inventory"
+          mkdir -p "$work"
+          chmod 700 "$work"
+
+          # --fail-with-body so an OpenBao error surfaces as a non-zero exit
+          # rather than as a body that later steps try to parse as a document.
+          curl --fail-with-body -sS \
+            -H "X-Vault-Token: ${BAO_TOKEN}" \
+            "${BAO_ADDR}/v1/${BAO_MOUNT}/data/${BAO_PATH}" \
+            -o "$work/response.json"
+
+          version=$(jq -r '.data.metadata.version' "$work/response.json")
+          echo "stored KV version: ${version}"
+          echo "BAO_KV_VERSION=${version}" >> "$GITHUB_ENV"
+
+          # Two storage shapes are possible and guessing wrong would corrupt the
+          # write, so the shape is DETECTED and reported. A shape name discloses
+          # nothing; a document does.
+          if jq -e '.data.data.schema_version' "$work/response.json" >/dev/null 2>&1; then
+            echo "storage shape: document is the secret's data object"
+            echo "BAO_FIELD=" >> "$GITHUB_ENV"
+            jq -c '.data.data' "$work/response.json" > "$work/v1.json"
+          else
+            field=$(jq -r '.data.data | keys | if length == 1 then .[0] else "" end' \
+              "$work/response.json")
+            if [ -z "$field" ]; then
+              echo "cannot identify the document field; the secret holds no single field"
+              echo "and no schema_version at its top level"
+              exit 1
+            fi
+            echo "storage shape: document is a single field"
+            echo "BAO_FIELD=${field}" >> "$GITHUB_ENV"
+            jq -r --arg f "$field" '.data.data[$f]' "$work/response.json" > "$work/v1.json"
+          fi
+          rm -f "$work/response.json"
+
+      - name: Record the stored digest
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/inventory"
+          poetry run dotmac-observability --contracts contracts \
+            inventory-digest "$work/v1.json"
+
+      - name: Apply the reviewed request
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/inventory"
+          # Compare-and-set lives in the request: it names the digest it was
+          # reviewed against, and this refuses if the store has moved since.
+          poetry run dotmac-observability --contracts contracts \
+            inventory-apply \
+            --request "${{ inputs.request }}" \
+            --previous "$work/v1.json" \
+            --output "$work/v2.json"
+
+      - name: Resolve the next version against the public inventory
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/inventory"
+          # Both directions: no unresolved public target, and no unused private
+          # binding. Findings name logical ids only.
+          poetry run dotmac-observability --contracts contracts \
+            validate --private-inventory "$work/v2.json"
+
+      - name: Write the next version, compare-and-set at the store
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/inventory"
+          expected=$(poetry run dotmac-observability --contracts contracts \
+            inventory-digest "$work/v2.json" | awk '/^sha256/{print $2}')
+          echo "EXPECTED_DIGEST=${expected}" >> "$GITHUB_ENV"
+
+          # A SECOND compare-and-set, and not a duplicate of the first. The
+          # request's digest proves the CONTENT is the version that was
+          # reviewed; KV's `cas` proves no version landed between this run's
+          # read and its write. They catch different races, and a supersession
+          # wants both.
+          if [ -n "${BAO_FIELD}" ]; then
+            jq -n --arg v "$(cat "$work/v2.json")" --argjson cas "${BAO_KV_VERSION}" \
+              --arg f "${BAO_FIELD}" \
+              '{options: {cas: $cas}, data: {($f): $v}}' > "$work/write.json"
+          else
+            jq -n --slurpfile d "$work/v2.json" --argjson cas "${BAO_KV_VERSION}" \
+              '{options: {cas: $cas}, data: $d[0]}' > "$work/write.json"
+          fi
+
+          curl --fail-with-body -sS -X POST \
+            -H "X-Vault-Token: ${BAO_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data-binary @"$work/write.json" \
+            "${BAO_ADDR}/v1/${BAO_MOUNT}/data/${BAO_PATH}" \
+            -o "$work/written.json"
+          rm -f "$work/write.json"
+          echo "stored KV version is now: $(jq -r '.data.version' "$work/written.json")"
+
+      - name: Read the stored bytes back and verify the digest
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/inventory"
+          # The step that can fail on a truncated write. The digest printed
+          # above proves this runner could hash a document it was holding; only
+          # re-reading what the STORE now returns proves what was stored.
+          curl --fail-with-body -sS \
+            -H "X-Vault-Token: ${BAO_TOKEN}" \
+            "${BAO_ADDR}/v1/${BAO_MOUNT}/data/${BAO_PATH}" \
+            -o "$work/readback.json"
+
+          if [ -n "${BAO_FIELD}" ]; then
+            jq -r --arg f "${BAO_FIELD}" '.data.data[$f]' "$work/readback.json" \
+              > "$work/stored.json"
+          else
+            jq -c '.data.data' "$work/readback.json" > "$work/stored.json"
+          fi
+          rm -f "$work/readback.json"
+
+          poetry run dotmac-observability --contracts contracts \
+            inventory-digest "$work/stored.json" --expect "${EXPECTED_DIGEST}"
+
+      - name: Shred the working copies
+        # `always()` so the private document does not survive a failure, and
+        # deliberately the ONLY always-run step: a failure handler that gathers
+        # context is how this class of workflow leaks.
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -rf "${RUNNER_TEMP}/inventory"
+          echo "working copies removed"

@@ -26,8 +26,11 @@ from .render import differences, render_control_plane, tree_digest, write_tree
 from .validate import (
     Finding,
     InventoryError,
+    apply_supersession,
+    canonical_bytes,
     load,
     load_private_inventory,
+    load_supersession_request,
     resolution_findings,
     resolve,
     scan_for_private_material,
@@ -121,6 +124,44 @@ def _cmd_inventory_digest(contracts: Path, private: Path, expect: str | None) ->
             file=sys.stderr,
         )
         return 1
+    return 0
+
+
+def _cmd_inventory_apply(contracts: Path, request_path: Path, previous: Path, output: Path) -> int:
+    """Apply a reviewed retirement request to a stored private inventory.
+
+    The whole point of a committed request: the change is reviewed on protected
+    main in logical vocabulary, and this step is mechanical. Nothing here
+    accepts a target name from a command line or a workflow input, because a
+    name typed at run time is an unreviewed change to the environment.
+    """
+    import json
+
+    try:
+        request = load_supersession_request(request_path, contracts=contracts)
+        before = load_private_inventory(previous, contracts=contracts)
+    except InventoryError as error:
+        return _report(error.findings, heading="cannot apply the supersession request")
+
+    with previous.open("rb") as handle:
+        stored = json.load(handle)
+    document, findings = apply_supersession(request, before, stored)
+    if findings:
+        return _report(findings, heading="refusing to apply the supersession request")
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(canonical_bytes(document))
+    try:
+        after = load_private_inventory(output, contracts=contracts)
+    except InventoryError as error:
+        return _report(error.findings, heading="the produced document is not valid")
+
+    # Verified by the same gate an operator would run by hand, rather than
+    # trusted because this function produced it.
+    unsafe = supersede_findings(before, after, expect_previous_digest=before.digest)
+    if unsafe:
+        return _report(unsafe, heading="the produced document is not a safe supersession")
+    print(supersede_summary(before, after).render())
     return 0
 
 
@@ -244,6 +285,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="fail unless the document hashes to this digest; use it to verify a read-back",
     )
 
+    apply_request = commands.add_parser(
+        "inventory-apply",
+        help="apply a reviewed retirement request to a stored private inventory",
+    )
+    apply_request.add_argument("--request", type=Path, required=True)
+    apply_request.add_argument("--previous", type=Path, required=True)
+    apply_request.add_argument("--output", type=Path, required=True)
+
     supersede = commands.add_parser(
         "inventory-supersede",
         help="prove one private document legitimately replaces a named earlier version",
@@ -280,6 +329,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if arguments.command == "inventory-digest":
         return _cmd_inventory_digest(contracts, arguments.private_inventory, arguments.expect)
+    if arguments.command == "inventory-apply":
+        return _cmd_inventory_apply(
+            contracts, arguments.request, arguments.previous, arguments.output
+        )
     if arguments.command == "inventory-supersede":
         return _cmd_inventory_supersede(
             contracts,

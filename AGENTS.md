@@ -218,8 +218,20 @@ review discipline, not a guard, and it is a defect to describe it as enforced.
     fail on a partial write, so `inventory-digest --expect` exists and a
     supersession is not complete without it. The superseded version is
     RETAINED: it is the evidence for every receipt that names it.
+
+    **The workflow is the writer, and the change is a reviewed request.** A
+    hand-run supersession is the unversioned, unreproducible edit this
+    repository exists to remove, so `.github/workflows/private-inventory-supersede.yml`
+    performs the write, from protected `main` only, applying a
+    `supersession-request` merged after review. Nothing it emits is the
+    document: not a log line, not a job summary, not an artifact, and not on
+    the failure path — where a handler added to explain a failure is the one
+    that publishes the thing. A request can only RETIRE, because retiring needs
+    a logical name while provisioning needs a resolved value that must not
+    enter public Git or a CI input.
     — `tests/unit/test_private_inventory_supersede.py`,
-      `dotmac-observability inventory-supersede`
+      `tests/unit/test_supersession_request.py`,
+      `tests/architecture/test_supersession_workflow_cannot_leak.py`
 
 ---
 

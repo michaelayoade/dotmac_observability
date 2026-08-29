@@ -4,10 +4,16 @@ How a decommissioned product leaves the control plane without leaving orphans
 behind, and how the private inventory is moved to a new version safely.
 
 Owed by `docs/runbooks/README.md`. It lands with the capability it describes
-(`dotmac-observability inventory-supersede`) and not before, per that file's
-rule. Everything below is a repository operation plus one private-store write;
-**no step touches the Observer host**, and the host-side removal is assumed to
-have already happened and been recorded as adoption evidence.
+and not before, per that file's rule. **No step touches the Observer host**;
+the host-side removal is assumed to have already happened and been recorded as
+adoption evidence.
+
+**You do not run the supersession by hand.** A hand-run one is exactly the
+unversioned, unreproducible edit this programme replaces, so the write is
+performed by `.github/workflows/private-inventory-supersede.yml`, from
+protected `main`, applying a request that was reviewed and merged. Your job is
+to author that request and get it approved; the workflow does the rest and is
+the only writer.
 
 ## When this applies
 
@@ -53,93 +59,105 @@ It will fail with `RESOLUTION-UNUSED`, naming the now-orphaned binding. **That
 failure is the point** — it is the checklist telling you the private half is
 still outstanding. Do not silence it by putting the job back.
 
-### 2. Read the stored private inventory, and record its digest
+### 2. Read the stored digest
+
+Whoever holds access runs, or the workflow's first run reports:
 
 ```
 dotmac-observability --contracts contracts inventory-digest <stored>
 ```
 
-Note the digest. You will name it in step 4, and naming it is what makes the
-write safe.
+Note the digest. Do not print the document. Nothing in this procedure requires
+you to look at a resolved endpoint, and a terminal scrollback is a place
+resolved material should never reach.
 
-Do not print the document. Nothing in this procedure requires you to look at a
-resolved endpoint, and a terminal scrollback is a place resolved material
-should never reach.
+### 3. Write the retirement request
 
-### 3. Build the next version
+A committed, reviewable file — this is the change, and it is expressed entirely
+in logical vocabulary that ADR-0004 already publishes:
 
-Copy the stored document, increment `version` by exactly one, and remove the
-retired target's binding **and its credential binding together**. If the
-credential file was shredded on the host, the binding must go: a binding whose
-file does not exist renders a configuration the evaluator cannot load.
+```toml
+schema_version = "observability-supersession-request.v1"
+document = "<the private document's name>"
+rationale = "<why these entries are gone, with the evidence>"
 
-Change nothing else. A version that also carries an unrelated edit cannot be
-reviewed as one decision, and the summary in step 4 is what a reviewer reads.
+[previous]
+version = <n>
+sha256 = "<the digest from step 2>"
 
-### 4. Prove the succession
-
-```
-dotmac-observability --contracts contracts inventory-supersede \
-  --previous <stored> --next <new> \
-  --expect-previous-sha256 <the digest from step 2>
+[retire]
+targets = ["<logical target id>"]
 ```
 
-This refuses:
+Retiring a target retires its credential binding with it: they are one entry,
+and a binding whose credential file has been shredded renders a configuration
+the evaluator cannot load.
 
-- a previous document that does not hash to the digest you named — somebody
-  else wrote a version while you were editing, so **re-read and rebase**, never
-  force;
-- a renamed document, which is a new document rather than a new version and
-  makes every receipt naming the old one unresolvable;
-- a changed environment;
-- a version that is not exactly one higher;
-- a bump that changes nothing.
+**The contract has no field for adding anything**, and that is deliberate. A
+retirement needs a logical name; a provision needs a resolved endpoint or
+credential binding, which must not pass through public Git or a CI input.
+Adding an entry stays a human operation against the private store.
 
-On success it prints a change summary in **logical names and counts only** —
-target ids, credential-ref names, a credential-binding count. It never prints
-an endpoint, a store path, a file name or a destination, so the output is safe
-to paste into a review.
+### 4. Get it reviewed and merged to `main`
 
-### 5. Re-validate, both directions
+This is the approval. The request is a diff somebody read, on a protected
+branch, and the merge is what authorizes it — the same reasoning ADR-0006 §4
+gives for the publication exception carrying no `approved_by` field.
 
-```
-make schema-check PRIVATE=<new>
-```
+### 5. Dispatch the workflow from `main`
 
-Clean output means no public target is unresolved **and** no private binding is
-unused. Step 1's failure should now be gone; if it is not, the binding you
-removed was not the one the job pointed at.
+Actions → *Supersede the private inventory* → Run workflow, on branch `main`,
+with `request` set to the path of the file you merged.
 
-### 6. Write, then read back
+It refuses to run from any other ref. `workflow_dispatch` lets a caller pick
+any branch carrying the workflow, so without that guard a branch could supply
+both the workflow and the request it applies — the review gate bypassed by
+choosing a dropdown value.
 
-Write the new version to the private store, then verify what the store actually
-holds:
+The workflow then, in order: reads the stored version; records its digest;
+applies the request, refusing if the store has moved since the request was
+reviewed; **resolves the next version against the public inventory in both
+directions**; writes with OpenBao's own `cas` set to the version it read; reads
+the stored bytes back and verifies the digest; and shreds its working copies
+whether it succeeded or failed.
 
-```
-dotmac-observability --contracts contracts inventory-digest <stored> \
-  --expect <the digest inventory-supersede printed>
-```
+**Two compare-and-sets, catching different races.** The request's digest proves
+the CONTENT is the version that was reviewed. KV's `cas` proves no version
+landed between this run's read and its write. Neither subsumes the other.
 
-**Do not skip this because step 4 already printed a digest.** That digest
-proves the tool could hash a document it was holding in memory. This one proves
-the store holds those bytes, and it is the only version of the check that can
-fail on a truncated or partial write.
+Its entire output is digests, counts and logical names. It never emits the
+document — not to a log, a job summary, or an artifact, and not on the failure
+path, which is where this normally leaks.
+`tests/architecture/test_supersession_workflow_cannot_leak.py` enforces that
+over the workflow's own text, so a later edit adding an upload step fails the
+build rather than the review.
 
-### 7. Retain the superseded version
+### 6. Confirm
 
-Do not delete it. Every receipt that names version *n* is unresolvable evidence
-without version *n* to resolve against, and a promotion history whose inputs
-have been deleted cannot be audited afterwards.
-
-### 8. Rebind before promoting
-
-A deployment plan binds **only the new digest**. A plan carrying the old one
+The run's last step prints the read-back digest. Record it; the eventual
+deployment plan binds **only** that digest, and a plan carrying the old one
 would authorize the environment you have just retired a target from.
 
-Promotion additionally refuses if the current host census disagrees with the
-inventory. That check belongs to the promotion lane and does not exist yet
-(`AGENTS.md` rule 3, `docs/CONTROL_EXCEPTIONS.md`) — until it does, the
-comparison is a human one, and this runbook is the place it is written down.
+The superseded version is retained by KV and nothing in the workflow deletes
+it. Do not delete it by hand: every receipt naming version *n* is unresolvable
+evidence without version *n* to resolve against.
+
+### Before the first run — setup this runbook cannot verify
+
+- The `private-inventory` environment must exist with **required reviewers**.
+  The workflow declares the environment; protection rules are configured in
+  repository settings and cannot be asserted from the workflow file, so this
+  line is a setup step and not evidence that it is in place.
+- Four secrets must be configured: the OpenBao address and token, and the
+  mount and path of the document. All four are credential-custody layout and
+  therefore private under ADR-0004, which is why they are secrets rather than
+  values written down here. The workflow refuses to continue if any is empty.
+- The storage shape is **detected, not assumed**: the workflow reports whether
+  the document is the secret's data object or a single field, and refuses if it
+  can identify neither. Confirm which it found on the first run.
+- `inventory/` must be populated (delivery lane 3C). The workflow refuses
+  otherwise, because the two-directional resolution check cannot run and a
+  supersession that cannot be resolved is not one worth writing.
 
 ## What this procedure deliberately does not do
 
@@ -154,6 +172,13 @@ explicitly authorized operation. If it has already happened by hand, record it
 as adoption evidence first — `observer-as-built.md` §12 is the worked example —
 so the delta the next render must reproduce is written down before anyone tries
 to reproduce it.
+
+**It does not promote anything.** A superseded inventory is an input to a
+deployment plan, not a deployment. Binding the new digest and refusing on a
+census mismatch belong to the promotion lane, which does not exist
+(`AGENTS.md` rule 3, `docs/CONTROL_EXCEPTIONS.md`). Until it does, the
+comparison between the inventory and the current host census is a human one,
+and this is the place it is written down.
 
 **It does not attribute the rules it retires.** Deleting a rule because its
 product is gone says nobody needs it; it does not say who wrote it. Where
