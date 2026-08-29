@@ -1,0 +1,418 @@
+# Architecture
+
+As-built truth for `dotmac_observability`. `AGENTS.md` holds the hard rules and
+wins on any disagreement; `docs/adr/` holds the decisions and their status;
+`README.md` is onboarding. Anything below that describes behaviour the code
+does not have is a defect in this file.
+
+Read this alongside `docs/adr/0001-observability-control-plane-has-one-git-owner.md`
+(why the owner exists and where its authority stops) and
+`docs/adr/0002-deterministic-rendering-and-immutable-releases.md` (why the
+bytes are committed and why activation swaps a directory).
+
+## Why the repository exists
+
+The Dotmac Observer host runs the observability stack from
+`/opt/observability`: Prometheus, Alertmanager, Grafana and Loki. Its
+Prometheus and Alertmanager configuration had no version-controlled owner.
+`prometheus.yml` and `alerts.yml` were single-file bind mounts edited in place
+on the host, and the only edit gesture that survived was `cat >>` appending to
+the existing file, because a single-file bind mount is bound to an inode: a
+`sed -i` or an `mv` writes a new inode and the running container keeps reading
+the old one, so the edit appears to work and changes nothing until somebody
+recreates the container.
+
+An append-only, unattributed, non-atomic edit path cannot fail a promotion
+gate, because there is no promotion. The observable consequence is the one this
+repository was created to remove: central Prometheus scrapes ERP while loading
+none of ERP's rendered alert rules, and nothing anywhere reports the
+disagreement.
+
+Two structural conclusions follow, and they are the whole design. Configuration
+must be produced from reviewed inputs rather than typed at a host prompt
+(`render.py`), and it must be activated as a whole directory rather than
+patched file by file (`_compose` mounts `${OBSERVABILITY_RELEASE}/prometheus`,
+not `${OBSERVABILITY_RELEASE}/prometheus/prometheus.yml`).
+
+## Ownership
+
+| Owner | Decides |
+| --- | --- |
+| Product / module | What a metric means, and what condition is worth alerting on |
+| Product assembly | The metrics exporter, and the product's own rule bundle as a published artifact |
+| `dotmac-deployment-foundation` (in `dotmac_starter_mt`) | Reusable rendering, conformance and promotion mechanics |
+| **`dotmac_observability`** | Which bundle is accepted, what is scraped, how the evaluators are configured, who is paged, and how a release reaches the host |
+| OpenBao | Secret values |
+| `dotmac_governance` | Cross-repository engineering standards |
+
+### Assembly is not authorship
+
+The failure mode this boundary exists to prevent is small and attractive: once
+a repository owns the evaluator, changing a threshold centrally is one line,
+and it silently moves a product decision out of the product. The product's own
+tests then prove something the fleet no longer runs, and the next product
+release quietly reverts the central "fix" or fails to.
+
+So this repository pins and assembles. It never authors a product alert
+expression and never edits a fetched bundle: if a rule is wrong, the product
+repository publishes a new bundle and the pin moves. The only expressions it
+may own are its own control-plane meta-alerts (deadman, evaluator health,
+bundle-digest mismatch), which it owns because no product is in a position to
+observe them. See `AGENTS.md` §"The line this repository must not cross" for
+the canonical statement and rule 5 for its enforcement status.
+
+## Inputs
+
+The typed desired state is assembled from a fixed set of documents, located by
+`validate._inventory_files`:
+
+| Path | Contract | Becomes |
+| --- | --- | --- |
+| `inventory/control-plane.toml` | `contracts/control-plane.schema.json` | `model.ControlPlane` |
+| `inventory/targets/*.toml` | `contracts/target.schema.json`, `kind = "targets"` | `model.TargetSet` |
+| `inventory/federations/*.toml` | `contracts/target.schema.json`, `kind = "federation"` | `model.Federation` |
+| `routing/receivers.toml` | `contracts/routing.schema.json`, `kind = "receivers"` | `model.Receiver` |
+| `routing/policies.toml` | `contracts/routing.schema.json`, `kind = "policies"` | `model.RouteDefaults`, `model.Route` |
+| `routing/inhibition.toml` | `contracts/routing.schema.json`, `kind = "inhibition"` | `model.Inhibition` |
+| `bundles/` | `contracts/bundle-lock.schema.json` | nothing yet; loading arrives in PR 3 |
+
+The directory globs are `sorted()`, not raw `Path.glob`. Glob yields in
+directory order, which differs between filesystems and changes when a file is
+rewritten; unsorted inputs would make the rendered bytes depend on where the
+checkout happens to live, and the byte gate would fail for reasons no reviewer
+could act on.
+
+A document's `kind` is checked, never inferred from the directory it sits in
+(`load` emits a `KIND` finding for a file under `inventory/federations` that
+does not declare `kind = "federation"`). Placement is a convention; the
+discriminator is the contract.
+
+Every collection on `model.DesiredState` is a tuple in declaration order and
+every record is a frozen dataclass. That is not tidiness. The renderer, the
+semantic gates and (from PR 6) the drift comparison all read the same object,
+so if any of them could mutate it, "the desired state" would depend on the
+order the callers ran in and the byte gate would be checking a moving target.
+
+## Three-layer validation
+
+`validate.py` is deliberately three layers, and the separation is load-bearing.
+
+**Schema** (`contracts/*.schema.json`, JSON Schema 2020-12, run through
+`jsonschema.Draft202012Validator`) decides whether a document is well-formed.
+Shape questions live here so a malformed file fails identically for every
+reader, including a reader that is not this Python package. Errors are sorted
+by `absolute_path` so two runs over the same broken file report in the same
+order; an unstable error list makes a CI diff unreadable. Both multi-kind
+contracts branch with `if`/`then` on `kind` rather than `oneOf`, because
+`oneOf` collapses every branch's errors into a single "not valid under any of
+the given schemas" and tells an operator nothing about which field is wrong.
+
+**Loading** turns a validated document into a frozen `model` record. Nothing is
+constructed from an unvalidated document, which is the premise that makes the
+casts in the loader safe and lets the model carry no defensive code for shapes
+the schema already refused. Documented defaults for optional knobs
+(`DEFAULT_SCRAPE_INTERVAL`, `DEFAULT_SCRAPE_TIMEOUT`,
+`DEFAULT_EVALUATION_INTERVAL`, `DEFAULT_RESOLVE_TIMEOUT`,
+`DEFAULT_SECRETS_DIR`) live here once, rather than being spelled again in the
+renderer where the two copies could drift.
+
+**Semantics** (`semantic_findings`) answers the questions no single document
+can, because they are about relationships between documents. A schema cannot
+know that a route names a receiver that does not exist, that two products
+claimed the same job name, or that an email receiver was declared while
+`[smtp]` was not. The current gates:
+
+| Code | Refuses |
+| --- | --- |
+| `RECEIVER-CHAT-ID` | A Telegram integration whose `destination` is not an integer chat id |
+| `SMTP-UNCONFIGURED` | An email integration with no `[smtp]` block |
+| `RECEIVER-NO-DESTINATION` | A non-webhook integration with no destination |
+| `RECEIVER-SILENT` | A receiver with no integrations and no reviewed `null_policy` |
+| `ROUTE-UNDECLARED` | A route or default naming a receiver `receivers.toml` does not declare |
+| `ROUTE-DUPLICATE` | Two routes sharing an `id` |
+| `RECEIVER-UNUSED` | A declared receiver no route or default reaches |
+| `SEVERITY-UNROUTED` | No route matching `severity="warning"` or `severity="critical"` |
+| `SEVERITY-UNDELIVERED` | A warning or critical route landing on a null receiver |
+| `JOB-DUPLICATE` | Two scrape jobs, or a job and a federation, sharing a name |
+| `TARGET-UNREACHABLE-EXPECTATION` | `expected` greater than the number of declared endpoints |
+| `FEDERATION-PREFIX-COLLISION` | Two upstreams renaming into the same prefix |
+
+Findings are returned, never raised one at a time. A gate that stops at the
+first problem makes an operator re-run it once per mistake; `cli._report`
+prints all of them and exits non-zero once. `InventoryError` carries the whole
+tuple for the same reason.
+
+Several of these codes exist because the failure they describe is invisible in
+production. A Telegram chat id quoted as a string is rejected by Alertmanager
+at config load and presents as a receiver that simply never delivers; nothing
+fires to tell anyone notifications broke. `TARGET-UNREACHABLE-EXPECTATION`
+guards the same class of silence from the other end: a job that resolves to
+zero targets produces no failures and no series, and is indistinguishable, to
+every alert written over it, from a healthy system.
+
+## Rendering
+
+`render.render_control_plane` is the single authority for what the control
+plane's configuration bytes are. Everything else, the CLI included, is an
+adapter that calls it and writes or compares the result.
+
+It returns the whole tree in one fixed-order call:
+
+```
+prometheus/prometheus.yml
+alertmanager/alertmanager.yml
+docker-compose.yml
+```
+
+Wholeness is a rule, not a convenience. A renderer that emitted one file per
+call would invite a caller to update two of three and stage a configuration
+nobody has ever seen.
+
+### Dependency-free, hand-emitted YAML
+
+`yaml_emit.py` is a hand-written emitter for the small closed subset of YAML
+the control plane needs: nested mappings, sequences, scalars. It exists because
+`AGENTS.md` rule 13 promises the same bytes on any machine, and a general YAML
+library cannot promise that across versions. Quoting style, key ordering, line
+width and flow-versus-block choices are implementation details of the library,
+free to change in a minor release, and a rendered-bytes gate that fails because
+a dependency moved teaches everyone to stop trusting the gate.
+
+Every choice is therefore fixed in the open in that module: two-space indent,
+block style except for the empty collections `{}` and `[]` which have no block
+spelling, insertion order preserved and never sorted, a trailing newline, no
+trailing whitespace, and one quoting rule applied uniformly. A scalar is
+emitted plain only when it matches `^[A-Za-z_][A-Za-z0-9_.-]*$`, is not a YAML
+reserved word, and does not parse as a float; everything else is
+double-quoted. "Sometimes quoted" is a diff nobody can review, and an unquoted
+`15s` today is an unquoted `1e5` tomorrow. `bool` is checked before `int`
+because `bool` is an `int` in Python and `true` would otherwise render as `1`.
+
+This module is not a YAML implementation and does not aim to be. Its job is
+stability; the oracle for correctness is `promtool check config`, `promtool
+check rules` and `amtool check-config`, which the promotion receipt contract
+already reserves fields for (`validation.promtool_config`,
+`validation.promtool_rules`, `validation.amtool_config`,
+`validation.compose_config`). They are not part of `make check`, which stays
+offline and dependency-light; CI's `config-validation` job fetches a pinned
+toolchain and runs all three, plus `docker compose config`, against the
+rendered reference fixture.
+
+`jsonschema` is the only runtime dependency, and it validates rather than
+renders: its output is a pass or a fail, not bytes anyone commits, so a version
+change cannot move a committed artifact.
+
+### Digest over paths and contents
+
+`tree_digest` hashes each rendered path, a NUL, its contents, and another NUL,
+in the render's fixed order. Both halves matter: a render that moved a file
+without changing a byte inside it is still a different deployment, and a digest
+over contents alone would call the two identical. This digest is what the
+promotion receipt records as `rendered_digest`.
+
+`differences` reports three conditions against the committed tree: `missing`,
+`differs`, and `unexpected`. The third is the one that is easy to omit and
+matters most, because a stale file left behind in the release directory still
+gets mounted into the evaluator.
+
+### Fixed paths inside the containers
+
+`_PROMETHEUS_ETC = /etc/prometheus` and `_ALERTMANAGER_ETC = /etc/alertmanager`
+are module constants, and so are everything derived from them:
+
+| Constant | Value |
+| --- | --- |
+| `_RULES_GLOB` | `/etc/prometheus/rules/*.yml` |
+| `_TEMPLATES_GLOB` | `/etc/alertmanager/templates/*.tmpl` |
+| `_PROMETHEUS_SECRETS` | `/etc/prometheus/secrets` |
+| `_ALERTMANAGER_SECRETS` | `/etc/alertmanager/secrets` |
+
+These are not knobs, and `AGENTS.md` rule 14 does not ask them to be. Rule 14
+governs environment-specific values: what the host is, which port is published,
+how long retention runs, where the release lives. A path inside a container the
+same renderer also writes the mount for is not environment-specific; it is an
+internal joint between two lines of the same output. Making it configurable
+would let the config file and the volume mount disagree, and that disagreement
+is unobservable until an evaluator starts with no rules loaded, which is
+precisely the failure that produced this repository.
+
+The same reasoning drives the secrets constants. One host directory is mounted
+into both containers at a different path in each, and the credential reference
+in each rendered config is derived from the same constant that renders that
+container's mount. A hand-written credential path can point into the other
+service's tree, which renders and validates cleanly and then delivers nothing.
+
+`rule_files` is a glob over the release's `rules/` directory rather than a
+list of files, because the staged release already decides which bundles are
+present and a hand-kept list here would be a second, silently divergent answer
+to that question. Nothing populates `rules/` or `templates/` today; bundle
+assembly is PR 3 and `templates/alertmanager/` is empty.
+
+### Directory mounts, read-only
+
+Both services mount `${OBSERVABILITY_RELEASE:?release directory is required}/<service>`
+as a directory, `:ro`, plus the shared secrets directory, also `:ro`, plus a
+named data volume. `OBSERVABILITY_RELEASE` is the one variable with `:?` rather
+than a default, because a compose file that silently starts against the wrong
+release is worse than one that refuses to start.
+
+Directory mounts are the direct answer to the inode hazard described above. A
+release is a directory; activation swaps the pointer the mount resolves
+through; the container sees a whole consistent tree or the previous whole
+consistent tree, never a half-applied one. Single-file mounts are how the
+Observer host became append-only by hand.
+
+Images are pinned by digest (`image@sha256:...`), never by tag, because a
+receipt must be able to say exactly what ran, and `version` on
+`model.Evaluator` is human evidence for the receipt rather than an identity.
+Prometheus runs with `--web.enable-lifecycle` so activation can reload over the
+lifecycle API without recreating the container and losing the scrape window.
+
+The rendered compose declares exactly the two services this repository owns,
+under the project name `observability-<environment>`. Grafana and Loki run on
+the Observer host and are not rendered here; PR 2's read-only census records
+what is actually there before PR 3 writes any production inventory.
+
+### Federation renaming
+
+`AGENTS.md` rule 9 is enforced in the renderer, not by convention.
+`model.Federation.rename_prefix` is mandatory, and `_federation_config` always
+emits a `metric_relabel_configs` entry rewriting `(up|scrape_.+)` to
+`<prefix>${1}`. Imported `up` and `scrape_*` series describe the upstream's
+opinion of its own targets. Left under their original names they join this
+plane's health series, and a central `up == 0` then pages on a target this
+plane neither owns nor can repair. Renaming makes the two populations
+impossible to conflate in a query, which is a stronger guarantee than tuning
+the rule to exclude them. `FEDERATION-PREFIX-COLLISION` stops two upstreams
+renaming into one namespace and reintroducing exactly the confusion the rule
+removes. The federation scrape also sets `honor_labels: true`: this plane is
+importing the upstream's view, not relabelling it into its own.
+
+## Secrets
+
+Nothing in this repository holds a secret value, and nothing in it dereferences
+one. `model.SecretFile` carries two strings, `openbao_path` and `file_name`,
+both of which are safe to commit. The renderer turns the second into a path
+under the appropriate secrets constant and emits `bearer_token_file`,
+`bot_token_file`, `auth_password_file`, `url_file` or `api_url_file` depending
+on the integration kind. Placing the file is a deployment act; the value is
+host state sourced from OpenBao. `docs/SECURITY.md` holds the full posture,
+including the shape-based scanner and its two exclusions.
+
+## Promotion
+
+Promotion is a state machine. No stage is skippable and every stage before
+`ACCEPTED` rolls back to the exact preceding release:
+
+| State | Means |
+| --- | --- |
+| `FETCHED` | Every pinned bundle artifact has been retrieved |
+| `VALIDATED` | Digests match the lock, the inventory validates, the render is byte-identical, the secret scan is clean, and the evaluator tools accept the configuration |
+| `REHEARSED` | The whole release was applied to a disposable host and verified there |
+| `STAGED` | The immutable release directory exists on the target and the previous release pointer has been captured |
+| `RELOADED` | The evaluators have taken the new configuration |
+| `VERIFIED` | Targets are up to their declared `expected` count, rules exist and evaluate healthily, routes resolve, and the canary was delivered at the receiver |
+| `ACCEPTED` | The receipt is written and the release is the new rollback target |
+
+Two properties of `VERIFIED` are worth stating separately, because both are
+easy to get wrong in a way that passes. "Rule inactive" is not recovery
+evidence: a deleted rule, a failed evaluation and a vanished target all present
+as "not firing", so verification counts rules that exist and evaluate cleanly
+(`live.rules_healthy` in the receipt contract) and never treats absence as
+health. And canary delivery is proved at the receiver, not at Alertmanager's
+outbound attempt, because a 200 from a delivery API is not evidence a human can
+be reached (`canary.delivered`).
+
+`release.previous` in the receipt may be null only on the very first
+promotion. Any later null means the rollback target was not captured, which
+invalidates the rollback guarantee, so it is a receipt worth refusing.
+
+A receipt is written for a failed or rolled-back promotion too
+(`outcome: accepted | rolled-back | failed`): a promotion that leaves no record
+is indistinguishable from one that never ran.
+
+None of this is implemented. The contract
+(`contracts/promotion-receipt.schema.json`) is accepted; the facility is PR 6
+and the first production promotion is PR 7, separately authorized.
+
+## Three independently comparable artifacts
+
+Drift is detectable only because three descriptions of the same control plane
+exist and can be read separately:
+
+1. **Desired state** — this repository at an exact commit, loaded into one
+   `model.DesiredState` and rendered to a known `tree_digest`.
+2. **Live state** — read back from the Prometheus and Alertmanager HTTP APIs:
+   targets and their health, loaded rules and their evaluation state, the
+   resolved route tree.
+3. **Last verified receipt** — the record of what the last accepted promotion
+   actually proved, including `rendered_digest`, the bundle set, the release
+   pointer and the live counts at the time.
+
+Any pair can disagree, and each disagreement means something different. Desired
+against live is unpromoted change or a host edit. Live against receipt is
+something that changed after acceptance without going through promotion.
+Receipt against desired is a promotion that never happened. A design that can
+only read one of the three cannot detect drift at all, which is why
+`DesiredState` is a single value rather than a habit of reading files in the
+right order, and why the receipt is a contract rather than a log line.
+
+Comparison is PR 6. Today only the first artifact exists.
+
+## Delivery train
+
+| PR | Adds | State |
+| --- | --- | --- |
+| 1 | Governance (`AGENTS.md`, `docs/CONTROL_EXCEPTIONS.md`), the five contracts, the typed model, three-layer validation, the deterministic renderer and emitter, the CLI, the reference fixture with its committed rendered bytes, and the CI and sensitivity-proof work originally scheduled for PR 4 | **done, this change** |
+| 2 | A read-only as-built census of the Observer host, written to `docs/inventories/observer-as-built.md` | blocked: requires Michael to name the Observer SSH target explicitly |
+| 3 | Real production inventory under `inventory/`, bundle locks under `bundles/`, `bundle.py` (fetch and digest-verify), and `render-check` plus `schema-check` joining `make check` | planned |
+| 4 | CI workflows, the standards-profile pin, the architecture tests and the mutation-based sensitivity proofs | delivered early, in PR 1; the remaining proofs cover the capabilities PR 3 and PR 5 add |
+| 5 | Disposable-host rehearsal on 85.190.246.211, and `live_verify.py` | planned |
+| 6 | The promotion facility in `dotmac-deployment-foundation` vNext, plus `receipt.py` and `drift.py` here | planned |
+| 7 | Production bootstrap of the Observer host | planned, separately authorized |
+| 8 | ERP bundle onboarding: the first product bundle pinned, promoted and verified | planned |
+
+### What exists today
+
+Everything under `src/dotmac_observability/` listed as shipped below, the five
+contracts, the reference fixture at `tests/fixtures/reference/` with its
+committed `rendered/` tree, and five unit tests
+(`test_render_determinism.py`, `test_yaml_emit.py`, `test_routing_coverage.py`,
+`test_federation_rename.py`, `test_model_loading.py`).
+
+`make check` runs `poetry-lock-check`, `lint`, `format-check`, `type-check`,
+`secret-scan` and `test`. It deliberately does not run `render-check` or
+`schema-check`, because PR 1 ships no production inventory: those two are
+exercised against the fixture by the test suite and join `check` in PR 3.
+
+Governance enforcement landed in the same change rather than in PR 4:
+`tests/architecture/test_no_secret_material.py`,
+`test_repository_contract.py` and `test_control_exceptions.py`, the
+sensitivity proof at `tests/mutations/test_secret_detector_bites.py`, the
+standards-profile pin at `.dotmac/standards-profile.json` (which names
+`render.render_control_plane` and `validate.validate` as decision interfaces
+and `model.py` as a typed contract surface, matching what those modules'
+docstrings already claimed), and the two workflows
+`.github/workflows/ci.yml` and
+`.github/workflows/engineering-standards.yml`.
+
+The register of regions that are unmonitored rather than exempt is
+`docs/CONTROL_EXCEPTIONS.md`. Nine rules are declared unmonitored there today,
+every one of them waiting on machinery PR 3, PR 5 or PR 6 adds. Read that file
+before describing any rule as enforced: `AGENTS.md` marks each rule's
+enforcement individually, and a rule carrying `none yet (PR n)` is stated
+review discipline.
+
+### Module by module
+
+| Module | Responsibility | Status |
+| --- | --- | --- |
+| `model.py` | Frozen, ordered, fully typed desired state; one `DesiredState` value | shipped |
+| `validate.py` | Schema layer, typed loading, cross-document semantic gates, shape-based secret scanner | shipped |
+| `yaml_emit.py` | Deterministic block-YAML emitter for the subset the control plane needs | shipped |
+| `render.py` | The three rendered files, `tree_digest`, `write_tree`, `differences` | shipped |
+| `cli.py` | `validate`, `render [--check]`, `secret-scan`; thin adapters over the library | shipped |
+| `bundle.py` | Fetch a pinned product bundle, verify its digests, assemble the release `rules/` tree | PR 3 |
+| `live_verify.py` | Read live target, rule and route state from the evaluator APIs and compare it with the desired state | PR 5 |
+| `receipt.py` | Write and validate a promotion receipt against `contracts/promotion-receipt.schema.json` | PR 6 |
+| `drift.py` | Three-way comparison of desired state, live state and the last verified receipt | PR 6 |

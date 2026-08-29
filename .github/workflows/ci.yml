@@ -1,0 +1,294 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+# Read-only. Nothing here publishes, comments or writes a tag, and a token that
+# could do so is a token a compromised dependency could use.
+permissions:
+  contents: read
+
+# There is deliberately NO registry credential in this workflow. Unlike the
+# other Dotmac repositories, this one resolves nothing from the private index:
+# its single runtime dependency is `jsonschema` from PyPI. A copied
+# POETRY_HTTP_BASIC_* block would hand a read token to a job that has no use
+# for it, which is a standing grant with no consumer.
+
+jobs:
+  quality:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      # This list must equal `make check`'s prerequisites EXACTLY. A matrix
+      # naming a subset is a known past failure mode in this fleet: the Starter
+      # shipped one, and formatting plus committed assets then went unenforced
+      # on every pull request while `make check` still passed on a developer's
+      # machine. If a target is added to `check` in the Makefile it is added
+      # here in the same commit.
+      matrix:
+        target:
+          - poetry-lock-check
+          - lint
+          - format-check
+          - type-check
+          - secret-scan
+          - test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: ./.github/actions/setup-poetry
+      - run: poetry install
+      - run: make ${{ matrix.target }}
+
+  config-validation:
+    name: Rendered configuration is accepted by the real tools
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The renderer's unit tests prove the bytes are STABLE and match the
+    # committed expectation. They cannot prove the bytes are CONFIGURATION —
+    # no Python test knows that Prometheus renamed a field, tightened a
+    # relabel rule or stopped accepting a duration spelling. Only promtool and
+    # amtool know, so this job runs them. Without it, the first reader of a
+    # rendered file is the evaluator on the production host, and a rejected
+    # config there is a control plane that will not start.
+    env:
+      # Pinned. "latest" would make a green build depend on what upstream
+      # published this morning, and a config accepted by an unknown version is
+      # not evidence about the version the fleet runs.
+      PROMETHEUS_VERSION: "3.2.1"
+      ALERTMANAGER_VERSION: "0.28.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: ./.github/actions/setup-poetry
+      - run: poetry install
+
+      - name: Fetch and verify the pinned Prometheus toolchain
+        run: |
+          set -euo pipefail
+          # An UNVERIFIED toolchain download is a supply-chain hole in the one
+          # job whose entire purpose is verification: a tampered promtool would
+          # cheerfully approve anything, and the job would stay green while
+          # proving nothing. The published sha256sums.txt from the SAME release
+          # is fetched and the tarball checked against it; a mismatch, or a
+          # checksums file with no line for our exact asset, fails here.
+          root="${RUNNER_TEMP}/obs-toolchain"
+          bin="${root}/bin"
+          mkdir -p "$bin" "${root}/dl"
+          cd "${root}/dl"
+
+          fetch_verify() {
+            local repo="$1" version="$2" tool="$3"
+            local base="https://github.com/prometheus/${repo}/releases/download/v${version}"
+            local dir="${repo}-${version}.linux-amd64"
+            local tarball="${dir}.tar.gz"
+
+            curl -fsSL --retry 3 --retry-delay 5 -o "${tarball}" "${base}/${tarball}"
+            curl -fsSL --retry 3 --retry-delay 5 -o "${repo}-sha256sums.txt" "${base}/sha256sums.txt"
+
+            # Reduce the release-wide checksums file to the ONE line naming our
+            # asset. awk exits non-zero when there is no such line, so a
+            # renamed or absent asset fails rather than verifying nothing.
+            awk -v f="${tarball}" '$2 == f || $2 == "*" f { print; found = 1 }
+                                   END { exit !found }' \
+              "${repo}-sha256sums.txt" > "${tarball}.sha256"
+            sha256sum -c "${tarball}.sha256"
+
+            tar -xzf "${tarball}"
+            install -m 0755 "${dir}/${tool}" "${bin}/${tool}"
+          }
+
+          fetch_verify prometheus "${PROMETHEUS_VERSION}" promtool
+          fetch_verify alertmanager "${ALERTMANAGER_VERSION}" amtool
+
+          echo "${bin}" >> "$GITHUB_PATH"
+
+      - name: Report the verified toolchain versions
+        run: |
+          set -euo pipefail
+          promtool --version 2>&1 | head -1
+          amtool --version 2>&1 | head -1
+
+      - name: Render the reference fixture
+        run: |
+          set -euo pipefail
+          rm -rf "${RUNNER_TEMP}/rendered"
+          # The CLI cannot do this, and contorting it would be the wrong fix.
+          # `dotmac-observability --root X render` resolves schemas at
+          # `<root>/contracts`, but the fixture deliberately does NOT carry a
+          # copy of the contracts — a fixture that carries its own copy proves
+          # the copy, and the two drift the first time a schema changes. So the
+          # fixture must be loaded with root=tests/fixtures/reference and
+          # contracts=contracts, a combination the CLI has no flag for. Adding
+          # one would put a shape in the production adapter that exists only
+          # for CI. The library call below is the same `load` + `write_tree`
+          # pair the CLI itself uses, with the semantic gate the CLI applies
+          # before rendering kept in place.
+          poetry run python - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          from dotmac_observability.render import render_control_plane, write_tree
+          from dotmac_observability.validate import load, semantic_findings
+
+          state = load(Path("tests/fixtures/reference"), contracts=Path("contracts"))
+          findings = semantic_findings(state)
+          if findings:
+              for finding in findings:
+                  print(f"  {finding.render()}", file=sys.stderr)
+              sys.exit("refusing to render an inconsistent inventory")
+
+          output = Path(os.environ["RUNNER_TEMP"]) / "rendered"
+          tree = render_control_plane(state)
+          write_tree(tree, output)
+          for path, _ in tree:
+              print(f"rendered {path}")
+          PY
+
+      - name: promtool accepts the rendered Prometheus configuration
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/promcheck"
+          rules="${work}/rules"
+          secrets="${work}/secrets"
+          rm -rf "$work"
+          mkdir -p "$rules" "$secrets"
+          source="${RUNNER_TEMP}/rendered/prometheus/prometheus.yml"
+
+          # The rendered config names absolute HOST paths — the rule directory
+          # and the bearer-token files the deployment places. Neither exists on
+          # a runner, and creating them would mean writing outside the
+          # workspace with sudo, which this job must never do. Instead a COPY is
+          # rewritten to point at job-local stand-ins. This is done
+          # UNCONDITIONALLY rather than only-on-failure: a step whose behaviour
+          # depends on the tool's warning-versus-error policy for an unmatched
+          # glob is a step that silently changes meaning on the next upgrade.
+          # The original rendered bytes are never modified — only this copy is,
+          # and the copy is thrown away with the runner.
+          grep -oE '/etc/prometheus/secrets/[A-Za-z0-9._-]+' "$source" \
+            | sort -u \
+            | while read -r reference; do
+                printf 'placeholder' > "${secrets}/$(basename "$reference")"
+              done
+
+          sed -e "s#/etc/prometheus/rules#${rules}#g" \
+              -e "s#/etc/prometheus/secrets#${secrets}#g" \
+              "$source" > "${work}/prometheus.yml"
+
+          promtool check config "${work}/prometheus.yml"
+
+      - name: amtool accepts the rendered Alertmanager configuration
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/amcheck"
+          secrets="${work}/secrets"
+          templates="${work}/templates"
+          rm -rf "$work"
+          mkdir -p "$secrets" "$templates"
+          source="${RUNNER_TEMP}/rendered/alertmanager/alertmanager.yml"
+
+          # Same treatment, same reason: the config references credential files
+          # under /etc/alertmanager/secrets that are host state placed by the
+          # deployment (AGENTS.md rule 1 — this repository stores the logical
+          # file NAME, never the value). Placeholders are created here so the
+          # loader finds a readable file.
+          #
+          # This proves config SHAPE, not credentials. amtool reading the word
+          # "placeholder" says the receiver is well-formed and the file
+          # reference is wired; it says nothing about whether the real token is
+          # present, correct, or authorised. Delivery is proven by the canaries,
+          # not here.
+          grep -oE '/etc/alertmanager/secrets/[A-Za-z0-9._-]+' "$source" \
+            | sort -u \
+            | while read -r reference; do
+                printf 'placeholder' > "${secrets}/$(basename "$reference")"
+              done
+
+          sed -e "s#/etc/alertmanager/secrets#${secrets}#g" \
+              -e "s#/etc/alertmanager/templates#${templates}#g" \
+              "$source" > "${work}/alertmanager.yml"
+
+          amtool check-config "${work}/alertmanager.yml"
+
+      - name: docker compose parses the rendered deployment
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/composecheck"
+          rm -rf "$work"
+          mkdir -p "${work}/release/prometheus" "${work}/release/alertmanager" "${work}/secrets"
+          cp "${RUNNER_TEMP}/rendered/docker-compose.yml" "${work}/docker-compose.yml"
+
+          # Every environment-specific value in the rendered compose file is a
+          # knob with a documented default (AGENTS.md rule 14) except
+          # OBSERVABILITY_RELEASE, which uses `:?` because a release directory
+          # has no sensible default — pointing it somewhere by accident would
+          # mount the wrong configuration. `config` therefore fails without it,
+          # which is the intended behaviour and is exercised by supplying a
+          # temporary value here. `--quiet` means we are asserting the exit
+          # code, not diffing the interpolated output.
+          OBSERVABILITY_RELEASE="${work}/release" \
+          OBSERVABILITY_SECRETS="${work}/secrets" \
+            docker compose -f "${work}/docker-compose.yml" config --quiet
+
+  schemas:
+    name: Contracts are valid JSON Schema 2020-12
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # A malformed schema does not fail loudly — `jsonschema` treats an unknown
+    # keyword as a no-op, so a typo like "requred" silently validates nothing
+    # and every document passes. check_schema is what turns that into a build
+    # failure instead of a contract that accepts anything.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: ./.github/actions/setup-poetry
+      - run: poetry install
+      - name: Every contract is a well-formed 2020-12 schema
+        run: |
+          set -euo pipefail
+          poetry run python - <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          import jsonschema
+
+          DRAFT = "https://json-schema.org/draft/2020-12/schema"
+
+          paths = sorted(Path("contracts").glob("*.schema.json"))
+          if not paths:
+              sys.exit("contracts/ holds no *.schema.json — this check would pass vacuously")
+
+          failed = False
+          for path in paths:
+              schema = json.loads(path.read_text(encoding="utf-8"))
+              declared = schema.get("$schema")
+              if declared != DRAFT:
+                  # The validator the loader constructs is Draft202012Validator
+                  # regardless of what the file declares, so a file claiming an
+                  # older draft is validated under rules it was not written for.
+                  print(f"{path}: $schema is {declared!r}, expected {DRAFT}")
+                  failed = True
+              try:
+                  jsonschema.Draft202012Validator.check_schema(schema)
+              except jsonschema.SchemaError as error:
+                  print(f"{path}: {error}")
+                  failed = True
+              else:
+                  print(f"{path}: ok")
+
+          sys.exit(1 if failed else 0)
+          PY

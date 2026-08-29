@@ -1,0 +1,272 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dotmac.io/schemas/observability/target.v1.json",
+  "title": "observability-target.v1",
+  "description": "One inventory document. Either the scrape jobs for one product, or one federation import. The `kind` discriminator keeps the two apart: they render differently and rule 9 applies to only one of them.  Branching is if/then on `kind` rather than oneOf: oneOf collapses every branch's errors into one 'not valid under any of the given schemas', which tells an operator nothing about which field is wrong.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "kind"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "observability-target.v1"
+    },
+    "kind": {
+      "enum": [
+        "targets",
+        "federation"
+      ]
+    }
+  },
+  "$defs": {
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$"
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$"
+    },
+    "label": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "value"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "secret_file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "openbao_path",
+        "file_name"
+      ],
+      "properties": {
+        "openbao_path": {
+          "type": "string",
+          "pattern": "^secret/[A-Za-z0-9._/-]+$",
+          "description": "Where the value lives. Recorded so an operator can place it; never dereferenced by this repository."
+        },
+        "file_name": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "description": "Basename under the control plane's secrets_dir. The rendered config references this path; the value never enters Git."
+        }
+      }
+    },
+    "targets_document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind",
+        "product",
+        "owner",
+        "jobs"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "observability-target.v1"
+        },
+        "kind": {
+          "const": "targets"
+        },
+        "product": {
+          "$ref": "#/$defs/slug"
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Accountable team or person for these targets. A target nobody owns is a target nobody restores."
+        },
+        "jobs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/scrape_job"
+          }
+        }
+      }
+    },
+    "scrape_job": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job",
+        "scheme",
+        "metrics_path",
+        "endpoints"
+      ],
+      "properties": {
+        "job": {
+          "$ref": "#/$defs/slug"
+        },
+        "scheme": {
+          "enum": [
+            "http",
+            "https"
+          ]
+        },
+        "metrics_path": {
+          "type": "string",
+          "pattern": "^/[^\\s]*$"
+        },
+        "endpoints": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._-]+(?::[0-9]{1,5})?$"
+          }
+        },
+        "labels": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/label"
+          }
+        },
+        "scrape_interval": {
+          "$ref": "#/$defs/duration"
+        },
+        "scrape_timeout": {
+          "$ref": "#/$defs/duration"
+        },
+        "credential": {
+          "$ref": "#/$defs/secret_file"
+        },
+        "expected": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "How many targets this job MUST report as up. Live verification compares against this number, because a job that scrapes zero targets reports no failures."
+        }
+      }
+    },
+    "federation_document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind",
+        "name",
+        "owner",
+        "source",
+        "match",
+        "rename_prefix"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "observability-target.v1"
+        },
+        "kind": {
+          "const": "federation"
+        },
+        "name": {
+          "$ref": "#/$defs/slug"
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "scheme",
+            "endpoint",
+            "path"
+          ],
+          "properties": {
+            "scheme": {
+              "enum": [
+                "http",
+                "https"
+              ]
+            },
+            "endpoint": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]+(?::[0-9]{1,5})?$"
+            },
+            "path": {
+              "type": "string",
+              "pattern": "^/[^\\s]*$"
+            },
+            "credential": {
+              "$ref": "#/$defs/secret_file"
+            }
+          }
+        },
+        "match": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Prometheus `match[]` selectors. Import deliberately, never `{__name__=~\".+\"}`."
+        },
+        "rename_prefix": {
+          "type": "string",
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*_$",
+          "description": "AGENTS.md rule 9. Imported `up` and `scrape_*` are renamed to <prefix>up etc. so a central rule can never mistake an upstream's health for a target this plane owns. Required: there is no correct federation without it."
+        },
+        "labels": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/label"
+          }
+        },
+        "scrape_interval": {
+          "$ref": "#/$defs/duration"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "targets"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "$ref": "#/$defs/targets_document"
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "federation"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "$ref": "#/$defs/federation_document"
+      }
+    }
+  ]
+}

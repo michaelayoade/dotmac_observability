@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dotmac.io/schemas/observability/promotion-receipt.v1.json",
+  "title": "observability-promotion-receipt.v1",
+  "description": "What a completed promotion proved, recorded as facts a later reader can re-check. The receipt is one of the three artifacts drift compares (AGENTS.md rule 12): desired state in Git, live state read from the APIs, and this record of the last verified deployment.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "outcome",
+    "environment",
+    "control_plane_revision",
+    "rendered_digest",
+    "bundles",
+    "evaluator",
+    "host",
+    "release",
+    "validation",
+    "live",
+    "canary",
+    "runs",
+    "timestamps"
+  ],
+  "properties": {
+    "schema_version": { "const": "observability-promotion-receipt.v1" },
+    "outcome": {
+      "enum": ["accepted", "rolled-back", "failed"],
+      "description": "A receipt is written for a failure too. A promotion that leaves no record is indistinguishable from one that never ran."
+    },
+    "environment": { "type": "string", "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$" },
+    "control_plane_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "rendered_digest": { "$ref": "#/$defs/sha256" },
+    "bundles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["product", "source_revision", "rules_sha256", "rule_count"],
+        "properties": {
+          "product": { "type": "string", "minLength": 1 },
+          "source_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+          "rules_sha256": { "$ref": "#/$defs/sha256" },
+          "rule_count": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "evaluator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prometheus_version", "alertmanager_version"],
+      "properties": {
+        "prometheus_version": { "type": "string", "minLength": 1 },
+        "alertmanager_version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity"],
+      "properties": { "identity": { "type": "string", "minLength": 1 } }
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["previous", "current"],
+      "properties": {
+        "previous": {
+          "type": ["string", "null"],
+          "description": "Null only on the very first promotion. Any later null means the rollback target was not captured, which invalidates rule 11."
+        },
+        "current": { "type": "string", "minLength": 1 }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["render_check", "secret_scan", "promtool_config", "promtool_rules", "amtool_config", "compose_config"],
+      "properties": {
+        "render_check": { "$ref": "#/$defs/check" },
+        "secret_scan": { "$ref": "#/$defs/check" },
+        "promtool_config": { "$ref": "#/$defs/check" },
+        "promtool_rules": { "$ref": "#/$defs/check" },
+        "amtool_config": { "$ref": "#/$defs/check" },
+        "compose_config": { "$ref": "#/$defs/check" }
+      }
+    },
+    "live": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targets_expected", "targets_up", "rules_loaded", "rules_healthy", "rules_semantic_digest", "routes_verified"],
+      "properties": {
+        "targets_expected": { "type": "integer", "minimum": 0 },
+        "targets_up": { "type": "integer", "minimum": 0 },
+        "rules_loaded": { "type": "integer", "minimum": 0 },
+        "rules_healthy": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "AGENTS.md rule 10. Counted from rules that EXIST and evaluate cleanly. Absence never counts as health."
+        },
+        "rules_semantic_digest": { "$ref": "#/$defs/sha256" },
+        "routes_verified": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "canary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fired", "delivered", "recovered"],
+      "properties": {
+        "fired": { "type": "boolean" },
+        "delivered": {
+          "type": "boolean",
+          "description": "Proved at the RECEIVER, not at Alertmanager's outbound attempt. A 200 from a delivery API is not evidence a human can be reached."
+        },
+        "recovered": { "type": "boolean" },
+        "receiver": { "type": "string", "minLength": 1 }
+      }
+    },
+    "rollback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exercised", "restored_release", "succeeded"],
+      "properties": {
+        "exercised": { "type": "boolean" },
+        "restored_release": { "type": ["string", "null"] },
+        "succeeded": { "type": "boolean" }
+      }
+    },
+    "runs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ci", "rehearsal", "promotion"],
+      "properties": {
+        "ci": { "$ref": "#/$defs/run_ref" },
+        "rehearsal": { "$ref": "#/$defs/run_ref" },
+        "promotion": { "$ref": "#/$defs/run_ref" }
+      }
+    },
+    "timestamps": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["started_at", "finished_at"],
+      "properties": {
+        "started_at": { "type": "string", "format": "date-time" },
+        "finished_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed"],
+      "properties": {
+        "passed": { "type": "boolean" },
+        "detail": { "type": "string" }
+      }
+    },
+    "run_ref": {
+      "type": ["string", "null"],
+      "description": "An immutable external run identifier. Null means the step genuinely did not run, and a reader must treat the corresponding claim as unproven rather than assumed."
+    }
+  }
+}

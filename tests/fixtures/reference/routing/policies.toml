@@ -1,0 +1,26 @@
+schema_version = "observability-routing.v1"
+kind = "policies"
+
+[defaults]
+receiver = "platform-mail"
+group_by = ["alertname", "product", "environment"]
+group_wait = "30s"
+group_interval = "5m"
+repeat_interval = "4h"
+
+[[routes]]
+id = "critical-to-oncall"
+matchers = ['severity="critical"']
+receiver = "oncall"
+group_wait = "10s"
+repeat_interval = "1h"
+
+[[routes]]
+id = "warning-to-oncall"
+matchers = ['severity="warning"']
+receiver = "oncall"
+
+[[routes]]
+id = "informational-recorded"
+matchers = ['severity="info"']
+receiver = "recorded-only"
