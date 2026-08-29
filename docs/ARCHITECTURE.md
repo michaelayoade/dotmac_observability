@@ -367,7 +367,7 @@ Comparison is PR 6. Today only the first artifact exists.
 | 2 | A read-only as-built census of the Observer host, written to `docs/inventories/observer-as-built.md` | blocked: requires Michael to name the Observer SSH target explicitly |
 | 3 | Real production inventory under `inventory/`, bundle locks under `bundles/`, `bundle.py` (fetch and digest-verify), and `render-check` plus `schema-check` joining `make check` | planned |
 | 4 | CI workflows, the standards-profile pin, the architecture tests and the mutation-based sensitivity proofs | delivered early, in PR 1; the remaining proofs cover the capabilities PR 3 and PR 5 add |
-| 5 | Disposable-host rehearsal on 85.190.246.211, and `live_verify.py` | planned |
+| 5 | Disposable-host rehearsal on the dedicated test server, and `live_verify.py` | planned |
 | 6 | The promotion facility in `dotmac-deployment-foundation` vNext, plus `receipt.py` and `drift.py` here | planned |
 | 7 | Production bootstrap of the Observer host | planned, separately authorized |
 | 8 | ERP bundle onboarding: the first product bundle pinned, promoted and verified | planned |
