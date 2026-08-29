@@ -18,26 +18,31 @@ AGENTS = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
 LEDGER = (REPO_ROOT / "docs" / "CONTROL_EXCEPTIONS.md").read_text(encoding="utf-8")
 
 _RULE = re.compile(r"^\s*(\d+)\. \*\*", re.MULTILINE)
-_UNMONITORED = re.compile(r"`none yet \(PR (\d+)\)`")
-_LEDGER_ROW = re.compile(r"^\| (\d+) \| .+ \| .+ \| PR (\d+) \|$", re.MULTILINE)
+# The monitoring token is free text, not a PR number. It was `PR (\d+)` until
+# a rule arrived whose guard lands with an external release rather than a
+# local PR — and the digit-only pattern did not fail, it simply stopped
+# seeing that rule. A ratchet with a blind spot is worse than no ratchet,
+# because it reports green over the gap.
+_UNMONITORED = re.compile(r"`none yet \(([^`)]+)\)`")
+_LEDGER_ROW = re.compile(r"^\| (\d+) \| .+ \| .+ \| ([^|]+?) \|$", re.MULTILINE)
 _DECLARED = re.compile(r"^declared-unmonitored: (\d+)$", re.MULTILINE)
 
 
-def _agents_unmonitored() -> dict[int, int]:
-    """Rule number -> PR that will monitor it, read from AGENTS.md."""
+def _agents_unmonitored() -> dict[int, str]:
+    """Rule number -> the token naming what will monitor it, from AGENTS.md."""
     starts = [(int(match.group(1)), match.start()) for match in _RULE.finditer(AGENTS)]
     assert starts, "no numbered rules found in AGENTS.md; the parser has drifted"
-    out: dict[int, int] = {}
+    out: dict[int, str] = {}
     for index, (number, start) in enumerate(starts):
         end = starts[index + 1][1] if index + 1 < len(starts) else len(AGENTS)
         found = _UNMONITORED.search(AGENTS[start:end])
         if found is not None:
-            out[number] = int(found.group(1))
+            out[number] = found.group(1).strip()
     return out
 
 
-def _ledger_rows() -> dict[int, int]:
-    return {int(rule): int(pr) for rule, pr in _LEDGER_ROW.findall(LEDGER)}
+def _ledger_rows() -> dict[int, str]:
+    return {int(rule): token.strip() for rule, token in _LEDGER_ROW.findall(LEDGER)}
 
 
 def test_the_rules_are_numbered_contiguously_from_one():
@@ -72,12 +77,29 @@ def test_no_ledger_row_outlives_its_rule():
     )
 
 
-def test_the_ledger_and_the_rules_agree_on_which_pr_closes_each_gap():
+def test_the_ledger_and_the_rules_agree_on_what_closes_each_gap():
     agents = _agents_unmonitored()
-    for rule, pr in _ledger_rows().items():
+    for rule, token in _ledger_rows().items():
         assert (
-            agents[rule] == pr
-        ), f"rule {rule}: AGENTS.md says PR {agents[rule]}, ledger says PR {pr}"
+            agents[rule] == token
+        ), f"rule {rule}: AGENTS.md says {agents[rule]!r}, ledger says {token!r}"
+
+
+def test_the_parser_reads_a_non_numeric_monitoring_token():
+    """Sensitivity proof for the generalised token.
+
+    A rule whose guard arrives with an external release names that release, not
+    a local PR number. The earlier digit-only pattern skipped such a rule in
+    SILENCE — every assertion here still passed while one gap went uncounted,
+    which is the precise failure a ratchet exists to prevent. This test fails
+    if the parser ever regresses to numbers only.
+    """
+    tokens = set(_agents_unmonitored().values())
+    assert tokens, "no unmonitored rules parsed at all"
+    assert any(not token.startswith("PR ") for token in tokens), (
+        "every monitoring token is a PR number; if that is genuinely true now, delete "
+        "this test rather than weakening it"
+    )
 
 
 def test_the_declared_count_is_the_ratchet():

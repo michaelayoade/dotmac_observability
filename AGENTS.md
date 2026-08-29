@@ -37,18 +37,18 @@ review discipline, not a guard, and it is a defect to describe it as enforced.
    digest, rules artifact pointer, `rules_sha256`, `metrics_manifest_sha256`
    and rule count. Promotion fetches the artifact and verifies the digest
    before anything is rendered. A version STRING is not an identity.
-   — `contracts/bundle-lock.schema.json`; verification `none yet (PR 3)`
+   — `contracts/bundle-lock.schema.json`; verification `none yet (PR 3C)`
 
 5. **Product rules stay product-owned.** This repository pins and assembles;
    it never authors a product alert expression, and it never edits a fetched
    bundle. If a rule is wrong, the product repository fixes it and publishes a
    new bundle. A local patch would make one version name two contracts.
-   — enforcement: `none yet (PR 3)` (fetched bundles are byte-compared to their digest)
+   — enforcement: `none yet (PR 3C)` (fetched bundles are byte-compared to their digest)
 
 6. **Duplicate alert names, duplicate recording rules, or incompatible label
    vocabularies fail the build.** Two products may not both own `WorkerStalled`,
    and two bundles may not disagree about what `severity` can be.
-   — enforcement: `none yet (PR 3)`
+   — enforcement: `none yet (PR 3C)`
 
 7. **Every `warning` and `critical` route reaches a declared receiver**, or an
    explicitly reviewed null policy that says in words why this class of alert
@@ -61,7 +61,7 @@ review discipline, not a guard, and it is a defect to describe it as enforced.
    metrics manifest with a declared type, unit and bounded label vocabulary.
    Prometheus returning no series is not health — an alert over a metric nobody
    emits is permanently silent and indistinguishable from "all clear".
-   — enforcement: `none yet (PR 3)`
+   — enforcement: `none yet (PR 3C)`
 
 9. **Federated `up` and `scrape_*` series are renamed on import.** A central
    rule must never confuse an imported upstream's health with the health of a
@@ -145,7 +145,23 @@ review discipline, not a guard, and it is a defect to describe it as enforced.
     deliberately requires a per-target exception block carrying a rationale
     and a named approver; cleartext is never the default and never an
     omission.
-    — enforcement: `none yet (PR 3)`
+    — enforcement: `none yet (PR 3B)`
+
+19. **Every published surface declares its exposure and its address family.**
+    Exposure (`none`, `loopback`, `ingress`, `public`) and address family
+    (`ipv4`, `ipv6`, `dual_stack`) are both mandatory, with no default: an
+    undeclared value is a refusal, never an inferred one, because a default is
+    how a wildcard bind reached a second address family unnoticed and left the
+    firewall rules written for it in a chain the traffic never traverses
+    (ADR-0005, `docs/inventories/observer-as-built.md` §9.1). A bare
+    `PORT:PORT` publish is refused, an unauthenticated `public` surface is
+    refused, and a backend that declares `ingress` may not also publish a host
+    port. The vocabulary and its rendering belong to
+    `dotmac-deployment-foundation`'s `IngressPolicy.v1`; this repository adopts
+    it and owns only which surfaces are declared and how they are promoted. A
+    resolved address, port, DNS record, certificate identity or credential
+    binding never appears in public Git (rule 18).
+    — enforcement: `none yet (Foundation adoption)`
 
 ---
 
