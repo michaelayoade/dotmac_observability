@@ -123,14 +123,29 @@ review discipline, not a guard, and it is a defect to describe it as enforced.
     repository on this account's plan, so the alternative was an unprotected
     `main` with no CI at all.
 
-    Everything committed here is world-readable the moment it lands —
-    including inventory nobody has written yet. Rule 1 keeps secret VALUES
-    out. Public visibility asks a second question rule 1 does not answer:
-    whether a non-secret fact is still something to publish. A production
-    scrape endpoint, an internal hostname and a host identity are each
-    non-secret under rule 1 and each recon material. That question must be
-    answered before PR 3 writes production inventory, not after.
-    — enforcement: `none yet (decision: public-inventory-endpoint-exposure)`
+    Everything committed here is world-readable the moment it lands, and Git
+    history is not retractable. Rule 1 keeps secret VALUES out; public
+    visibility asks a second question rule 1 does not answer, and ADR 0004
+    answers it: **public Git carries the LOGICAL description, private
+    inventory carries the resolved material.**
+
+    Public: logical target ID (`erp-production`), service owner and
+    environment, metric and alert contracts, expected capabilities, scrape
+    protocol, health semantics, bundle and inventory schema, synthetic CI
+    endpoints, and the private inventory's version and digest. Private:
+    resolved hostname or IP, port and complete scrape URL, TLS and server
+    identity, credential-file binding (`openbao_path` included), federation
+    endpoint, network-route details — held under an approved OpenBao
+    deployment-inventory path or another explicitly owned private source.
+
+    Promotion resolves the logical target, validates it against the public
+    schema, renders deterministically, records the private inventory's version
+    and digest — never its values — in the receipt, and compares drift by
+    digest without printing an endpoint. A production endpoint published
+    deliberately requires a per-target exception block carrying a rationale
+    and a named approver; cleartext is never the default and never an
+    omission.
+    — enforcement: `none yet (PR 3)`
 
 ---
 

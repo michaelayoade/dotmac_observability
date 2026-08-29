@@ -59,12 +59,44 @@ something to publish. A production scrape endpoint, an internal hostname and a
 host identity are each non-secret under rule 1, and each is a map for someone
 who has got nowhere yet.
 
-Nothing in the repository today answers that question, and no detector can:
-a check that banned hostnames would ban the inventory this repository exists
-to hold. It is tracked as `public-inventory-endpoint-exposure` in
-`docs/CONTROL_EXCEPTIONS.md` and must be resolved before PR 3 writes
-production inventory. Git history is not retractable — a value committed
-publicly and removed in the next commit has still been published.
+ADR-0004 answers that second question, and `AGENTS.md` rule 18 now states the
+answer as a hard rule: **public Git carries the logical description of the
+control plane; private inventory carries the resolved material.**
+
+Published here: the logical target ID (`erp-production`), the service owner
+and environment, metric and alert contracts, expected capabilities, the scrape
+protocol, health semantics, the bundle and inventory schemas, the synthetic
+`.invalid` CI endpoints, and the version and digest of the private inventory a
+render consumed. Withheld: the resolved hostname or IP, the port and complete
+scrape URL, TLS and server identity, the credential-file binding —
+`openbao_path` included — the federation endpoint, and network-route detail.
+That material lives under an approved OpenBao deployment-inventory path or
+another private inventory source with a named owner. A promotion resolves the
+logical target, validates it against the public schema, renders
+deterministically, records the private inventory's version and digest rather
+than its values in the receipt, and compares drift by digest without printing
+an endpoint. A production endpoint published on purpose needs a per-target
+exception carrying a rationale and a named approver: cleartext is never the
+default.
+
+Two things follow for a reader of this document. First, the secret-reference
+model described in the section above is the CURRENT contract, and ADR-0004
+changes it: a store path describes credential custody layout, so under the new
+policy an `openbao_path` is private material and belongs in the private
+inventory rather than in a committed TOML document. Public Git will hold
+neither the path nor the binding, and the scanner's present check — that every
+committed `openbao_path` assignment names a `secret/` store path — inverts
+into a refusal of the key altogether. Second, none of the split is enforced
+yet: the contracts that would carry it do not exist until PR 3, so rule 18 is
+a stated review discipline listed in `docs/CONTROL_EXCEPTIONS.md` — not yet
+enforced (PR 3).
+
+The reason the answer had to precede PR 3 rather than follow it is unchanged
+and worth repeating. Git history is not retractable — a value committed to a
+public repository and removed in the next commit has still been published, to
+every clone, mirror and crawler that touched the repository in between. A
+credential answers that by being rotated; a hostname, a port and a network
+route do not.
 
 
 ## The secret scanner
