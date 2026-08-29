@@ -24,8 +24,7 @@ enforced, and when the count below disagrees with the table. The downward
 direction is the one that matters: a ledger that only ever grows is a backlog,
 while one that must shrink deliberately is a plan.
 
-declared-unmonitored: 9
-declared-decisions: 1
+declared-unmonitored: 10
 
 | rule | subject | why there is no detector yet | monitored by |
 | --- | --- | --- | --- |
@@ -38,17 +37,7 @@ declared-decisions: 1
 | 10 | "Rule inactive" is not recovery evidence | This is a property of the live verifier, which is written against a running evaluator on the disposable host. | PR 5 |
 | 11 | Promotion failure restores the exact preceding release | Requires the staging and activation machinery. | PR 6 |
 | 12 | Desired, live and receipt states are independently comparable | Desired state exists. Live state and receipts do not. | PR 6 |
-
-## Blocked on a decision, not on a PR
-
-Some gaps cannot be closed by writing code here. Listing them in the table
-above would be misleading: a PR number promises someone can finish the work,
-and nobody in this repository can. They are tracked separately so the ratchet
-does not quietly absorb them.
-
-| decision | subject | why no detector can close it | decision needed |
-| --- | --- | --- | --- |
-| public-inventory-endpoint-exposure | Rule 18: production endpoints, internal hostnames and host identities become world-readable when PR 3 writes them | No detector can decide it. Whether a scrape endpoint is safe to publish is a judgement about this specific estate, not a property of the file. A regex banning hostnames would also ban the inventory the repository exists to hold. | Before PR 3 writes production inventory, Michael decides whether endpoint and host values are committed in cleartext, or indirected behind a promotion-time substitution the way credentials already are. PR 2's census will show exactly what would be published. |
+| 18 | Public Git carries the logical description; resolved endpoints, ports, host identities and credential bindings stay private | ADR 0004 settles the split, but the contracts that would carry it do not exist yet: there is no `target_id` field to require, no private-inventory schema to digest and no per-target exception block to demand. The inverted `openbao_path` check lands with them. | PR 3 |
 
 ## Rules that ARE enforced today
 
