@@ -115,7 +115,22 @@ review discipline, not a guard, and it is a defect to describe it as enforced.
     Only an explicitly authorized promotion touches a live host, and the target
     host must be named by a human in the authorizing request — never inferred
     from an inventory row.
-    — enforcement: `none yet (decision: branch-protection-needs-a-plan-or-visibility-choice)`
+    — branch protection on `main`: linear history required, force-push and
+      deletion refused, every change through a pull request
+
+18. **This repository is PUBLIC**, and that is a deliberate trade (ADR 0003).
+    Branch protection and CI minutes are both unavailable to a private
+    repository on this account's plan, so the alternative was an unprotected
+    `main` with no CI at all.
+
+    Everything committed here is world-readable the moment it lands —
+    including inventory nobody has written yet. Rule 1 keeps secret VALUES
+    out. Public visibility asks a second question rule 1 does not answer:
+    whether a non-secret fact is still something to publish. A production
+    scrape endpoint, an internal hostname and a host identity are each
+    non-secret under rule 1 and each recon material. That question must be
+    answered before PR 3 writes production inventory, not after.
+    — enforcement: `none yet (decision: public-inventory-endpoint-exposure)`
 
 ---
 

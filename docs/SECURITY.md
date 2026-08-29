@@ -46,6 +46,27 @@ problem, checked at promotion time, not this package's.
 line, so a value fetched into a working tree by hand is not accidentally
 staged.
 
+## The repository is public
+
+Public, deliberately: branch protection and CI minutes are both unavailable to
+a private repository on this account's plan, so the alternative was an
+unprotected `main` with no gates at all. ADR-0003 records the trade in full.
+
+The practical consequence for anyone committing here: **rule 1 is necessary
+and no longer sufficient.** Rule 1 asks whether a value is a secret. Public
+visibility asks a second question — whether a non-secret fact is still
+something to publish. A production scrape endpoint, an internal hostname and a
+host identity are each non-secret under rule 1, and each is a map for someone
+who has got nowhere yet.
+
+Nothing in the repository today answers that question, and no detector can:
+a check that banned hostnames would ban the inventory this repository exists
+to hold. It is tracked as `public-inventory-endpoint-exposure` in
+`docs/CONTROL_EXCEPTIONS.md` and must be resolved before PR 3 writes
+production inventory. Git history is not retractable — a value committed
+publicly and removed in the next commit has still been published.
+
+
 ## The secret scanner
 
 `validate.scan_for_secret_material` reads every file Git tracks and reports any

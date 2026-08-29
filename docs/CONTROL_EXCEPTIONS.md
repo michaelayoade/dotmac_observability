@@ -48,7 +48,7 @@ does not quietly absorb them.
 
 | decision | subject | why no detector can close it | decision needed |
 | --- | --- | --- | --- |
-| branch-protection-needs-a-plan-or-visibility-choice | Rule 17, the platform half: `main` accepts a direct push | GitHub refuses branch protection and repository rulesets on a private repository under this account's plan (HTTP 403, "Upgrade to GitHub Pro or make this repository public"). Every other Dotmac repository has protection because it is PUBLIC. This one holds Observer's scrape topology, host identities and OpenBao paths, so making it public to obtain protection trades a real recon surface for a process guard. | Michael chooses: keep it private and accept an unprotected `main`; make it public; or move the account to a paid plan. Until then the branch discipline is a stated working agreement with no platform enforcement. |
+| public-inventory-endpoint-exposure | Rule 18: production endpoints, internal hostnames and host identities become world-readable when PR 3 writes them | No detector can decide it. Whether a scrape endpoint is safe to publish is a judgement about this specific estate, not a property of the file. A regex banning hostnames would also ban the inventory the repository exists to hold. | Before PR 3 writes production inventory, Michael decides whether endpoint and host values are committed in cleartext, or indirected behind a promotion-time substitution the way credentials already are. PR 2's census will show exactly what would be published. |
 
 ## Rules that ARE enforced today
 
@@ -63,4 +63,5 @@ tell at a glance which half of AGENTS.md currently bites.
 | 13 | `tests/unit/test_render_determinism.py`, `make render-check` |
 | 14 | `tests/architecture/test_repository_contract.py` |
 | 15 | `tests/architecture/test_control_exceptions.py`, `tests/mutations/` |
+| 17 | branch protection on `main`: linear history, no force-push, no deletion, pull request required |
 | 16 | `.dotmac/standards-profile.json`, `.github/workflows/engineering-standards.yml` |
