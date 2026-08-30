@@ -249,6 +249,80 @@ review discipline, not a guard, and it is a defect to describe it as enforced.
       `tests/unit/test_supersession_request.py`,
       `tests/architecture/test_supersession_workflow_cannot_leak.py`
 
+22. **One bundle, rendered whole.** Everything the control plane deploys is one
+    `observability-bundle.v1` and one render: the evaluators, the log store and
+    shipper, dashboard provisioning, the Observer-owned syslog and rotation
+    contract, the declared infrastructure timezone, the roster of owned
+    resources, the retired-product list, the exposure policy and the
+    verification gates. A promotion that can activate a subset is a promotion
+    that can leave the host in a combination nobody described. The bundle holds
+    no topology and no credentials: a source is a named typed set bound
+    privately, a datasource URL is derived from the roster.
+    — `contracts/bundle.schema.json`, `tests/unit/test_bundle.py`,
+      `tests/mutations/test_bundle_gates_bite.py` (ADR-0008)
+
+23. **A published surface's chain is DERIVED from its kind and address family,
+    never chosen.** An IPv4 container publish is forwarded and traverses
+    `DOCKER-USER`; an IPv6 one terminates on `INPUT`. Seven IPv6 DROP rules were
+    found in `DOCKER-USER` on this host, where no such packet arrives, so every
+    port they name reads as closed and is open. This is `iptables` — `-i`, not
+    nftables' `iifname`. And **persistence is not authorship**: `netfilter-persistent
+    save` snapshots live state wholesale, so a rule surviving reboot says
+    nothing about who created it.
+    — `tests/unit/test_bundle.py`, `tests/mutations/test_bundle_gates_bite.py`
+
+24. **Target health and ingestion integrity are separate facts, and a gate
+    carries both.** `up == 1` says the scrape completed; it says nothing about
+    whether the samples were stored. Eighteen of eighteen targets read green on
+    this host while 1,858,942 samples were rejected. A verification gate
+    declares a `health` predicate AND an `integrity` predicate and the renderer
+    emits their conjunction; a gate whose two predicates are the same, or whose
+    integrity predicate names no ingestion counter, is refused.
+    — `contracts/bundle.schema.json`, `tests/unit/test_bundle.py`
+
+25. **A log file's owner, group and mode are DECLARED, and something other than
+    the privilege-dropped writer creates it.** rsyslog runs as `syslog` and
+    `/var/log` is `root:syslog 0755`, so it can append to a file it owns and
+    cannot create one; `/var/log/mail.log` did not exist and one action
+    suspended 10,161 times in thirty days while the mail facility went nowhere.
+    The directory is NOT widened. systemd-tmpfiles creates the file as root
+    with the declared ownership, logrotate recreates it the same way with an
+    explicit `create <mode> <owner> <group>`, and `postrotate` reopens the
+    writer rather than `copytruncate` losing what falls between the copy and
+    the truncate.
+    — `tests/unit/test_bundle.py`, `scripts/rotation_proof.py` run by CI's
+      `rotation-proof` job, whose three negative controls must each fail
+
+26. **A retired product stays retired, and the check is standing rather than a
+    sweep.** A retirement declares every spelling the product was known by, and
+    a rendered tree mentioning one fails the render. Over RENDERED bytes, for
+    two reasons: it covers every surface the bundle produces rather than the
+    subset somebody thought to search, and it cannot read nothing — a sweep
+    over a tree it failed to load reports "no references" exactly as a clean
+    one does, and an item recorded UNKNOWN twice starts being read as absent.
+    — `contracts/bundle.schema.json`, `tests/unit/test_bundle.py`
+
+27. **A stored private document is CLASSIFIED before it is loaded.** Both
+    mutation tools validate the previous version against the accepted contract
+    as their first act, so a store holding the pre-contract capture format
+    fails with 68 schema errors in a tool whose job is to print a digest —
+    after the precondition guard has passed. A capture is migrated by a
+    reviewed `migrate-capture` request whose every produced byte comes from the
+    store; the one field the capture lacks, the host binding, arrives as a
+    repository secret in the single step that needs it. Migrating changes the
+    document's digest, which is the compare-and-set precondition, so a request
+    naming the pre-migration digest is refused afterwards — correctly, and the
+    refusal names `inventory-classify` as how to tell that from a lost update.
+    — `contracts/private-inventory-capture.schema.json`,
+      `tests/unit/test_capture_migration.py`,
+      `tests/architecture/test_supersession_workflow_cannot_leak.py` (ADR-0008)
+
+28. **The CI matrix equals `make check`'s prerequisites exactly.** A matrix
+    naming a subset is a documented past failure on this fleet: the gate keeps
+    passing locally while nothing enforces it on a pull request. Previously a
+    comment; now enforced.
+    — `tests/architecture/test_ci_matches_the_makefile.py`
+
 ---
 
 ## The line this repository must not cross

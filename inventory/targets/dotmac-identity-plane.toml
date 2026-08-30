@@ -17,3 +17,8 @@ metrics_path = "/metrics"
 authenticated = false
 expected = 1
 scrape_interval = "30s"
+
+  # As-built instance label, expressible since ADR-0008.
+  [[jobs.static_labels]]
+  name = "instance"
+  value = "dotmac-identity-plane"

@@ -8,6 +8,20 @@ owner = "platform-operations"
 # Four resolved endpoints (census §4: four node-exporter targets). `expected`
 # is the count that MUST report up — a job resolving to fewer emits no failure
 # of its own, which every alert over it reads as a healthy system.
+#
+# RESIDUAL PARITY GAP, narrowed by ADR-0008 and not closed. The as-built gives
+# each of the four endpoints a DIFFERENT logical `instance` label. ADR-0008's
+# `static_labels` is per JOB, so it expresses the five single-endpoint cases
+# and not this one: a per-endpoint label has to be paired with the endpoint,
+# and the endpoints live in the private inventory.
+#
+# Recorded rather than worked around, and the consequence is stated so a drift
+# comparison is not quietly wrong: until this is closed, a render of this job
+# is not byte-identical to the as-built, and the difference is an
+# unrepresentable label rather than a real change. The two candidate repairs
+# both cost something a reviewer should choose between — split the job per host
+# (which changes the `job` label on every series) or let a private endpoint
+# carry its own label (which moves four logical names out of public review).
 [[jobs]]
 job = "node-exporter"
 target_id = "node-exporter"

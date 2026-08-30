@@ -1,0 +1,220 @@
+schema_version = "observability-bundle.v1"
+
+# SYNTHETIC. Every image digest is a repeated nibble, every owner is a
+# fictional team, and the only source set resolves through the fixture's own
+# private inventory. Nothing here describes a real estate — which is the whole
+# reason a public reader can render this tree and no other (ADR-0006).
+
+[timezone]
+infrastructure = "UTC"
+presentation = "Africa/Lagos"
+rationale = """
+Infrastructure writes UTC so two hosts in different zones cannot disagree \
+about the order of events with nothing in either log saying so; dashboards \
+render the zone the people reading them live in.\
+"""
+
+[loki]
+retention = "720h"
+reject_older_than = "168h"
+ingestion_rate_mb = 16
+ingestion_burst_mb = 24
+
+  [loki.runtime]
+  image = "docker.io/grafana/loki"
+  digest = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+  version = "3.4.2"
+  listen = "127.0.0.1:3100"
+
+[promtail]
+
+  [promtail.runtime]
+  image = "docker.io/grafana/promtail"
+  digest = "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+  version = "3.4.2"
+  listen = "127.0.0.1:9080"
+
+  [[promtail.jobs]]
+  name = "varlogs"
+  path_glob = "/var/log/*.log"
+
+    [[promtail.jobs.labels]]
+    name = "job"
+    value = "varlogs"
+
+  [[promtail.jobs]]
+  name = "containers"
+  path_glob = "/var/lib/docker/containers/*/*-json.log"
+  decode_docker_json = true
+
+    [[promtail.jobs.labels]]
+    name = "job"
+    value = "containers"
+
+[grafana]
+
+  [grafana.runtime]
+  image = "docker.io/grafana/grafana"
+  digest = "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+  version = "11.5.2"
+  listen = "127.0.0.1:3000"
+
+  [[grafana.datasources]]
+  name = "metrics"
+  kind = "prometheus"
+  service = "prometheus"
+  default = true
+
+  [[grafana.datasources]]
+  name = "logs"
+  kind = "loki"
+  service = "loki"
+  default = false
+
+  [[grafana.dashboard_providers]]
+  name = "control-plane"
+  folder = "Control plane"
+
+[syslog]
+
+  # /var/log is root:syslog 0755 and rsyslog runs privilege-dropped, so it can
+  # append to a file it owns and cannot CREATE one. The directory stays 0755
+  # and systemd-tmpfiles creates the files instead.
+  [syslog.directory]
+  path = "/var/log"
+  owner = "root"
+  group = "syslog"
+  mode = "0755"
+
+  [[syslog.files]]
+  facility = "mail.*"
+  path = "/var/log/mail.log"
+  owner = "syslog"
+  group = "adm"
+  mode = "0640"
+
+  [[syslog.files]]
+  facility = "mail.err"
+  path = "/var/log/mail.err"
+  owner = "syslog"
+  group = "adm"
+  mode = "0640"
+
+  [syslog.rotation]
+  frequency = "daily"
+  keep = 14
+  compress = true
+
+[[roster]]
+name = "prometheus"
+kind = "service"
+owner = "observability-control-plane"
+port = 9090
+
+[[roster]]
+name = "alertmanager"
+kind = "service"
+owner = "observability-control-plane"
+port = 9093
+
+[[roster]]
+name = "loki"
+kind = "service"
+owner = "observability-control-plane"
+port = 3100
+
+[[roster]]
+name = "promtail"
+kind = "service"
+owner = "observability-control-plane"
+port = 9080
+
+[[roster]]
+name = "grafana"
+kind = "service"
+owner = "observability-control-plane"
+port = 3000
+
+[[roster]]
+name = "prometheus_data"
+kind = "volume"
+owner = "observability-control-plane"
+
+[[roster]]
+name = "alertmanager_data"
+kind = "volume"
+owner = "observability-control-plane"
+
+[[roster]]
+name = "loki_data"
+kind = "volume"
+owner = "observability-control-plane"
+
+[[roster]]
+name = "promtail_data"
+kind = "volume"
+owner = "observability-control-plane"
+
+[[roster]]
+name = "grafana_data"
+kind = "volume"
+owner = "observability-control-plane"
+
+# A synthetic retirement, present so the gate is exercised by the reference
+# render rather than only by the production tree — a gate that never runs
+# against the fixture is a gate CI proves nothing about.
+[[retired]]
+name = "reference-retired"
+tokens = ["reference-retired-product"]
+decommissioned = "2026-01-01"
+rationale = "A synthetic product, retired so the gate has something to assert about the reference render."
+residual_data = "None: the reference tree is synthetic and no store has ever held a sample for it."
+
+[exposure]
+
+  # Named and typed. What `management` resolves to is in the private inventory:
+  # a management prefix is a map of where the operators are, and the interface
+  # a tunnel terminates on is one hop from it.
+  [[exposure.source_sets]]
+  name = "management"
+  kind = "tunnel_interface"
+
+  [[exposure.surfaces]]
+  name = "ssh"
+  kind = "host_service"
+  port = 22
+  protocol = "tcp"
+  family = "dual_stack"
+  exposure = "ingress"
+  allow_from = "management"
+  authenticated = true
+
+  # A container publish. IPv4 reaches it through FORWARD and therefore
+  # DOCKER-USER; IPv6 terminates on INPUT. The renderer derives both from
+  # `kind` and the family, which is why a rule cannot be written into the
+  # chain the traffic does not traverse.
+  [[exposure.surfaces]]
+  name = "prometheus"
+  kind = "container_published"
+  port = 9090
+  protocol = "tcp"
+  family = "dual_stack"
+  exposure = "loopback"
+  authenticated = false
+
+  [[exposure.surfaces]]
+  name = "alertmanager"
+  kind = "container_published"
+  port = 9093
+  protocol = "tcp"
+  family = "dual_stack"
+  exposure = "loopback"
+  authenticated = false
+
+[verification]
+
+  [[verification.gates]]
+  name = "ingestion-integrity"
+  health = "min(up{job=~\".+\"}) == 1"
+  integrity = "increase(prometheus_target_scrapes_sample_duplicate_timestamp_total[15m]) == 0"
+  window = "30m"

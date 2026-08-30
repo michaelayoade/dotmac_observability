@@ -24,15 +24,22 @@ from pathlib import Path
 
 from .render import differences, render_control_plane, tree_digest, write_tree
 from .validate import (
+    ACCEPTED_SCHEMA_VERSION,
+    CAPTURE_SCHEMA_VERSION,
     Finding,
     InventoryError,
     apply_supersession,
     canonical_bytes,
+    classify_stored_inventory,
     load,
+    load_capture_inventory,
     load_private_inventory,
     load_supersession_request,
+    migrate_capture,
+    migration_findings,
     resolution_findings,
     resolve,
+    retirement_findings,
     scan_for_private_material,
     scan_for_secret_material,
     semantic_findings,
@@ -183,6 +190,151 @@ def _cmd_inventory_apply(contracts: Path, request_path: Path, previous: Path, ou
     return 0
 
 
+def _cmd_inventory_classify(stored: Path, expect: str | None) -> int:
+    """Say which contract a stored document is written against, and stop.
+
+    The step the supersession workflow did not have, and the reason its first
+    real failure was 68 schema errors on a document that is not corrupt at all.
+    Both mutation tools load the previous version through the ACCEPTED contract
+    before doing anything else, so a store holding the pre-contract capture
+    format fails in the least legible place available — after the precondition
+    guard has passed, in a tool whose job is to print a digest.
+
+    It reads exactly one field, ``schema_version``, and prints exactly one
+    line. No key name, no length, no value: a classifier that described the
+    document would be the leak the whole workflow is built to avoid.
+
+    Exit codes are the interface. 0 for the accepted contract, 2 for the
+    capture format, 3 for anything else — so a workflow can branch on the
+    answer without parsing prose, and an unrecognised third shape is
+    distinguishable from a known-old one rather than being sorted into
+    whichever it happens to resemble.
+    """
+    import json
+
+    if not stored.is_file():
+        print(f"no such document: {stored}", file=sys.stderr)
+        return 1
+    try:
+        with stored.open("rb") as handle:
+            document = json.load(handle)
+    except json.JSONDecodeError as error:
+        print(f"the stored document is not valid JSON ({error.msg})", file=sys.stderr)
+        return 1
+    if not isinstance(document, dict):
+        print("the stored document is not a JSON object", file=sys.stderr)
+        return 1
+    declared = classify_stored_inventory(document)
+    print(f"format {declared}")
+    if expect is not None and declared != expect:
+        # CONFIRMATION, not discovery — the same rule the storage shape already
+        # follows. The reviewed request declares which contract the stored
+        # version is in; a store that disagrees is a change nobody reviewed, so
+        # this refuses instead of adapting to it.
+        print(
+            f"  the reviewed request declares {expect!r} and the store holds {declared!r}; "
+            "refusing rather than adapting to a change nobody reviewed",
+            file=sys.stderr,
+        )
+        return 4
+    if declared == ACCEPTED_SCHEMA_VERSION:
+        return 0
+    if declared == CAPTURE_SCHEMA_VERSION:
+        print(
+            "  the store holds the PRE-CONTRACT capture format. It is not corrupt and it is "
+            "not a retirement problem: bringing it to the accepted contract needs a "
+            "`migrate-capture` request and `inventory-migrate`, and must happen before any "
+            "retirement. See docs/runbooks/migrate-the-capture-format.md",
+            file=sys.stderr,
+        )
+        return 2
+    print(
+        "  the stored document declares a schema_version this repository does not know. "
+        "Refusing to sort it into whichever known format it resembles: the two are migrated "
+        "by different code and being wrong about which one is holding a production estate",
+        file=sys.stderr,
+    )
+    return 3
+
+
+def _cmd_inventory_migrate(
+    root: Path,
+    contracts: Path,
+    request_path: Path,
+    stored: Path,
+    host_binding: Path,
+    output: Path,
+) -> int:
+    """Rewrite a capture-format document into the accepted contract.
+
+    Every value in the result comes from ``stored`` except the host binding,
+    which the capture format does not hold and which arrives as a FILE — from a
+    configured private source on the runner, never from public Git and never
+    from a workflow input, which is the distinction AGENTS.md rule 21 draws and
+    the reason this is provisioning without disclosure.
+
+    The federation split is taken from the PUBLIC inventory and cross-checked
+    against the request. Both, not either: the request is what a reviewer read,
+    and the public inventory is what the renderer will look in.
+    """
+    import json
+
+    try:
+        request = load_supersession_request(request_path, contracts=contracts)
+    except InventoryError as error:
+        return _report(error.findings, heading="cannot read the migration request")
+    if request.kind != "migrate-capture":
+        print(
+            f"this command applies a migrate-capture request; the request is {request.kind!r}",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        state = load(root, contracts=contracts)
+    except InventoryError as error:
+        return _report(error.findings, heading="inventory is not loadable")
+    try:
+        capture = load_capture_inventory(stored, contracts=contracts)
+    except InventoryError as error:
+        return _report(error.findings, heading="the stored document is not a readable capture")
+
+    with host_binding.open("rb") as handle:
+        binding = json.load(handle)
+    if not isinstance(binding, dict):
+        print("the host binding file is not a JSON object", file=sys.stderr)
+        return 1
+
+    produced, findings = migrate_capture(
+        capture,
+        request,
+        binding,
+        (federation.target_id for federation in state.federations),
+    )
+    if findings:
+        return _report(findings, heading="refusing to migrate")
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(canonical_bytes(produced))
+    try:
+        after = load_private_inventory(output, contracts=contracts)
+    except InventoryError as error:
+        return _report(error.findings, heading="the migrated document is not valid")
+
+    unsafe = migration_findings(capture, after, expect_previous_digest=request.previous_digest)
+    if unsafe:
+        return _report(unsafe, heading="the migrated document is not a safe supersession")
+    resolution = resolution_findings(state, after)
+    if resolution:
+        return _report(resolution, heading="the migrated document does not resolve")
+    # Counts and logical names only, exactly as a retirement summary prints.
+    print(
+        f"migrated {capture.version} -> {after.version}: "
+        f"{len(after.targets)} target(s), {len(after.federations)} federation(s), "
+        f"{len(after.receivers)} receiver(s), {len(after.source_sets)} source set(s)"
+    )
+    return 0
+
+
 def _cmd_inventory_supersede(
     contracts: Path, previous: Path, following: Path, expect_previous: str
 ) -> int:
@@ -217,6 +369,12 @@ def _cmd_render(root: Path, contracts: Path, output: Path, private: Path, *, che
         return _report(error.findings, heading="refusing to render an unresolved inventory")
 
     tree = render_control_plane(state, resolution)
+    # Over the RENDERED bytes, and before anything is written. A retired
+    # product reappearing in any surface the bundle produces stops the render
+    # rather than being noticed by whoever reads the diff.
+    retired = retirement_findings(state, tree)
+    if retired:
+        return _report(retired, heading="refusing to render a retired product's monitoring")
     if not check:
         write_tree(tree, output)
         print(f"rendered {len(tree)} file(s) into {output}  digest={tree_digest(tree)}")
@@ -311,6 +469,40 @@ def main(argv: Sequence[str] | None = None) -> int:
     apply_request.add_argument("--previous", type=Path, required=True)
     apply_request.add_argument("--output", type=Path, required=True)
 
+    classify = commands.add_parser(
+        "inventory-classify",
+        help="say which contract a stored private document is written against, and stop",
+    )
+    classify.add_argument("stored", type=Path)
+    classify.add_argument(
+        "--expect",
+        default=None,
+        help=(
+            "fail unless the stored document declares this contract. Turns the classifier "
+            "from a reporter into a gate, which is what a mutation workflow needs before it "
+            "loads anything."
+        ),
+    )
+
+    migrate = commands.add_parser(
+        "inventory-migrate",
+        help="rewrite a capture-format document into the accepted contract",
+    )
+    migrate.add_argument("--request", type=Path, required=True)
+    migrate.add_argument("--stored", type=Path, required=True)
+    migrate.add_argument(
+        "--host-binding",
+        type=Path,
+        required=True,
+        help=(
+            "a JSON object carrying target_id, identity and ssh_alias. The accepted contract "
+            "requires all three and the capture format holds none of them, so they arrive as a "
+            "file from a configured private source \u2014 never through this repository and never "
+            "through a workflow input, both of which are readable."
+        ),
+    )
+    migrate.add_argument("--output", type=Path, required=True)
+
     shape = commands.add_parser(
         "request-shape",
         help="print the storage shape a reviewed supersession request confirms",
@@ -353,6 +545,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if arguments.command == "inventory-digest":
         return _cmd_inventory_digest(contracts, arguments.private_inventory, arguments.expect)
+    if arguments.command == "inventory-classify":
+        return _cmd_inventory_classify(arguments.stored, arguments.expect)
+    if arguments.command == "inventory-migrate":
+        return _cmd_inventory_migrate(
+            root,
+            contracts,
+            arguments.request,
+            arguments.stored,
+            arguments.host_binding,
+            arguments.output,
+        )
     if arguments.command == "request-shape":
         return _cmd_request_shape(contracts, arguments.request)
     if arguments.command == "inventory-apply":

@@ -231,6 +231,66 @@ jobs:
           OBSERVABILITY_SECRETS="${work}/secrets" \
             docker compose -f "${work}/docker-compose.yml" config --quiet
 
+  rotation-proof:
+    name: The rendered rotation contract survives a real rotation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The renderer's unit tests prove the rotation stanza SAYS the right thing.
+    # They cannot prove logrotate agrees, that rsyslog can open what logrotate
+    # creates, or that a mail-facility message actually lands — and the fault
+    # this contract exists to fix was exactly that gap: a stanza that read
+    # correctly, a directory whose permissions nobody had written down, and one
+    # action suspended 10,161 times in thirty days while the mail facility went
+    # nowhere at all.
+    #
+    # So this job runs the real tools on an ISOLATED tree under $RUNNER_TEMP.
+    # It never touches /var/log, never installs a unit, and never runs
+    # anything as a service: rsyslogd runs in the foreground with its own
+    # config, its own socket and its own working directory, and is killed at
+    # the end. Nothing here needs the host's logging to work, and nothing here
+    # can break it.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: ./.github/actions/setup-poetry
+      - run: poetry install
+
+      - name: Install rsyslog and logrotate
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rsyslog logrotate
+          # Whatever the image starts by default is stopped: this job must
+          # exercise ITS instance, and a second daemon holding the same socket
+          # would make the result depend on which one won.
+          sudo systemctl stop rsyslog 2>/dev/null || true
+          logrotate --version | head -1
+          rsyslogd -v | head -1
+
+      - name: Render the reference bundle
+        run: |
+          set -euo pipefail
+          rm -rf "${RUNNER_TEMP}/rendered"
+          poetry run dotmac-observability \
+            --root tests/fixtures/reference \
+            --contracts contracts \
+            render \
+            --private-inventory tests/fixtures/reference/private/inventory.json \
+            --output "${RUNNER_TEMP}/rendered"
+
+      - name: Rotate an isolated real file and prove the mail facility survives it
+        run: |
+          set -euo pipefail
+          # The proof is a SCRIPT rather than inline steps because it runs
+          # twice: once against the rendered artefacts, and then again against
+          # deliberately broken copies, which must FAIL. A check that has never
+          # been observed to fail is not evidence.
+          sudo --preserve-env=RUNNER_TEMP python3 scripts/rotation_proof.py \
+            --rendered "${RUNNER_TEMP}/rendered" \
+            --work "${RUNNER_TEMP}/rotation"
+
   schemas:
     name: Contracts are valid JSON Schema 2020-12
     runs-on: ubuntu-latest

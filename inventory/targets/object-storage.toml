@@ -14,6 +14,12 @@ authenticated = true
 expected = 1
 path_rationale = "MinIO's own documented cluster metrics endpoint, published in its upstream operator documentation and identical on every MinIO deployment; the path is protocol rather than concealment, and it is not guessable-by-obscurity in any sense."
 
+  # As-built instance label, expressible since ADR-0008. A logical host or
+  # service name, not a resolved address; the private-material scan is what
+  # keeps the distinction from eroding.
+  [[jobs.static_labels]]
+  name = "instance"
+  value = "dotmac-s3"
 [[jobs]]
 job = "minio-node"
 target_id = "minio-node"
@@ -22,3 +28,10 @@ metrics_path = "/minio/v2/metrics/node"
 authenticated = true
 expected = 1
 path_rationale = "MinIO's own documented per-node metrics endpoint, the sibling of the cluster path above and equally published upstream; scraping both is how MinIO separates cluster-wide series from per-node series."
+
+  # As-built instance label, expressible since ADR-0008. A logical host or
+  # service name, not a resolved address; the private-material scan is what
+  # keeps the distinction from eroding.
+  [[jobs.static_labels]]
+  name = "instance"
+  value = "dotmac-s3"

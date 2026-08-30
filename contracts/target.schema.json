@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://dotmac.io/schemas/observability/target.v2.json",
   "title": "observability-target.v2",
-  "description": "One inventory document. Either the scrape jobs for one product, or one federation import. The `kind` discriminator keeps the two apart: they render differently and rule 9 applies to only one of them.  Branching is if/then on `kind` rather than oneOf: oneOf collapses every branch's errors into one 'not valid under any of the given schemas', which tells an operator nothing about which field is wrong.  v2 applies ADR-0004. A job declares a LOGICAL `target_id` and whether it authenticates; it no longer carries `endpoints` or a `credential`, both of which moved to the private inventory. The one way an endpoint can still be written down here is inside a `publication` block that also demands a rationale — so the per-target exception is enforced by construction rather than by a check, because there is no field an endpoint can be typed into that does not also ask why publishing it is acceptable. The block carries no approver: the approval is the protected-branch merge that accepted the rationale, which is externally attested, and a name in the file would be a second and weaker claim about the same event.",
+  "description": "One inventory document. Either the scrape jobs for one product, or one federation import. The `kind` discriminator keeps the two apart: they render differently and rule 9 applies to only one of them.  Branching is if/then on `kind` rather than oneOf: oneOf collapses every branch's errors into one 'not valid under any of the given schemas', which tells an operator nothing about which field is wrong.  v2 applies ADR-0004. A job declares a LOGICAL `target_id` and whether it authenticates; it no longer carries `endpoints` or a `credential`, both of which moved to the private inventory. The one way an endpoint can still be written down here is inside a `publication` block that also demands a rationale \u2014 so the per-target exception is enforced by construction rather than by a check, because there is no field an endpoint can be typed into that does not also ask why publishing it is acceptable. The block carries no approver: the approval is the protected-branch merge that accepted the rationale, which is externally attested, and a name in the file would be a second and weaker claim about the same event.  Amended 2026-08-30 (ADR-0008) with two OPTIONAL fields the accepted contract could not express and the as-built needs: `params`, without which a target that selects its exposition format is rendered wrong, and `static_labels`, without which the running configuration's logical instance labels are unrepresentable and byte-parity is impossible. Both are additive and optional, so every v2 document written before this amendment is still a valid v2 document -- which is why the version does not move. A required field changing is a different contract; an optional field appearing is the same contract answering a question it could not answer before.",
   "type": "object",
   "required": [
     "schema_version",
@@ -53,7 +53,7 @@
         "endpoints",
         "rationale"
       ],
-      "description": "The ADR-0004 per-target exception: a deliberate decision to publish a resolved endpoint in public Git. Legitimate for a target already on the public internet, where indirection buys nothing. Both fields are required together, which is the whole design — an exception that could be taken by leaving a field out is the default this contract exists to remove.  It carries NO approver field, deliberately. A name typed into a tracked file is self-attested: nothing verifies it, the person named never sees it, and it manufactures the appearance of an approval record where there is none. What authorizes this disclosure is the protected-branch review that merged it, which is externally attested and carries immutable coordinates. The rationale is here because a reviewer must be able to disagree with it; the approval is in the merge, where it can be checked.",
+      "description": "The ADR-0004 per-target exception: a deliberate decision to publish a resolved endpoint in public Git. Legitimate for a target already on the public internet, where indirection buys nothing. Both fields are required together, which is the whole design \u2014 an exception that could be taken by leaving a field out is the default this contract exists to remove.  It carries NO approver field, deliberately. A name typed into a tracked file is self-attested: nothing verifies it, the person named never sees it, and it manufactures the appearance of an approval record where there is none. What authorizes this disclosure is the protected-branch review that merged it, which is externally attested and carries immutable coordinates. The rationale is here because a reviewer must be able to disagree with it; the approval is in the merge, where it can be checked.",
       "properties": {
         "endpoints": {
           "type": "array",
@@ -138,7 +138,7 @@
         "path_rationale": {
           "type": "string",
           "minLength": 40,
-          "description": "Required when `metrics_path` is not `/metrics`. States why the non-default path is protocol rather than concealment — because a path chosen precisely because it is not guessable is a secret in a field the contract does not treat as one."
+          "description": "Required when `metrics_path` is not `/metrics`. States why the non-default path is protocol rather than concealment \u2014 because a path chosen precisely because it is not guessable is a secret in a field the contract does not treat as one."
         },
         "authenticated": {
           "type": "boolean",
@@ -150,6 +150,30 @@
           "items": {
             "$ref": "#/$defs/label"
           }
+        },
+        "static_labels": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/label"
+          },
+          "description": "Labels attached to every series this job produces, on the STATIC CONFIG rather than as a relabel. PUBLIC: these are logical names an operator chose -- `dotmac-db-primary`, `dotmac-s3` -- and a logical name is what the whole public half of ADR-0004 is made of. Added because the as-built assigns them and neither half of the contract had anywhere to put them, so byte-parity with the running configuration was impossible for every job that carries one, and a render-versus-live comparison could not distinguish a real difference from an unrepresentable one. The risk this opens is that somebody types a resolved address in as an `instance` value; that is caught by the private-material scan, which reads every tracked file and does not care which field an address is written into (ADR-0006 section 8). Distinct from `labels`, which this contract already had and which the renderer emits on the same static config: `labels` is kept for compatibility and `static_labels` is its documented spelling for values that identify the target rather than describing the product."
+        },
+        "params": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "propertyNames": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "description": "URL query parameters sent with the scrape. PUBLIC, and classified the same way `metrics_path` was: a parameter that selects an exposition FORMAT is scrape protocol, not topology. Added because the accepted contract could not express it and a live target needs it -- the OpenBao job sends `format=prometheus`, and without it OpenBao answers with its own JSON, which Prometheus accepts as a scrape and stores nothing from. A render made from the public contract alone was therefore silently wrong for that target. It is a mapping of name to a list of values, matching Prometheus's own shape, so a parameter taking two values is representable rather than quietly truncated."
         },
         "scrape_interval": {
           "$ref": "#/$defs/duration"
