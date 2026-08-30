@@ -272,33 +272,57 @@ jobs:
       - name: Unconfine rsyslogd on this runner, and prove it
         run: |
           set -euo pipefail
-          # Ubuntu ships an AppArmor profile for /usr/sbin/rsyslogd that permits
-          # /var/log and /etc/rsyslog.d and little else. This job deliberately
-          # runs rsyslogd against an ISOLATED tree under $RUNNER_TEMP, which the
-          # profile denies — the first run failed with
-          # "could not open config file ...: Permission denied" while running as
-          # root, which reads as a bug in the proof and is confinement.
+          # Ubuntu ships an AppArmor profile for rsyslogd that permits /var/log
+          # and /etc/rsyslog.d and little else. This job deliberately runs
+          # rsyslogd against an isolated tree, which the profile denies — and
+          # the denial arrives as "could not open config file: Permission
+          # denied" while running as ROOT, which reads as a bug in the proof.
           #
           # The profile is unloaded on this disposable runner rather than the
           # proof being moved into /var/log, because the whole point is that it
           # never touches the host's real logging. Nothing about AppArmor is
-          # under test here, and nothing about the rotation contract depends on
-          # it.
-          profile=/etc/apparmor.d/usr.sbin.rsyslogd
-          if [ -f "$profile" ]; then
-            sudo apparmor_parser -R "$profile"
+          # under test here.
+          echo "before:"
+          sudo aa-status 2>/dev/null | grep -i rsyslog || echo "  (no rsyslog profile listed)"
+
+          # Removed by PROFILE NAME through the securityfs interface, not by
+          # file path. The first attempt matched `/etc/apparmor.d/usr.sbin.rsyslogd`
+          # and then verified by grepping for the string "usr.sbin.rsyslogd" —
+          # but the profile is NAMED `/usr/sbin/rsyslogd`, with slashes. So the
+          # file test could miss, the verification could not match either way,
+          # and the step reported "unconfined" having done nothing. A check that
+          # cannot fail is not a check.
+          for name in /usr/sbin/rsyslogd rsyslogd; do
+            printf '%s' "$name" | sudo tee /sys/kernel/security/apparmor/.remove >/dev/null 2>&1 || true
+          done
+          # And move any profile file aside so nothing reloads it.
+          for profile in /etc/apparmor.d/*rsyslog*; do
+            [ -e "$profile" ] || continue
             sudo mv "$profile" "${profile}.disabled"
-          fi
-          # PROVEN, not assumed. `|| true` on the unload above would leave a
-          # confined binary and a green step; this asserts the profile is gone
-          # before the proof runs, so a future image that confines rsyslogd
-          # differently fails here rather than inside the proof.
-          if sudo aa-status --json 2>/dev/null | grep -q "usr.sbin.rsyslogd"; then
-            echo "rsyslogd is still confined by AppArmor; the proof cannot run"
-            sudo aa-status | head -40
+            echo "moved aside: $profile"
+          done
+
+          echo "after:"
+          remaining=$(sudo aa-status 2>/dev/null | grep -i rsyslogd || true)
+          if [ -n "$remaining" ]; then
+            echo "rsyslogd is STILL confined by AppArmor; the proof cannot run:"
+            echo "$remaining"
             exit 1
           fi
-          echo "rsyslogd is unconfined on this runner"
+          echo "  rsyslogd is unconfined"
+
+          # Sensitivity: the verification must be able to see a profile at all.
+          # Grepping aa-status for a name that is never present would pass on a
+          # machine where AppArmor is not running, on one where it is, and on
+          # one where the grep pattern is simply wrong — which is what happened.
+          if ! sudo aa-status >/dev/null 2>&1; then
+            echo "aa-status does not work here, so the check above proved nothing"
+            exit 1
+          fi
+          if ! sudo aa-status | grep -q "profiles are in enforce mode"; then
+            echo "aa-status returned nothing recognisable; the verification is vacuous"
+            exit 1
+          fi
 
       - name: Render the reference bundle
         run: |
