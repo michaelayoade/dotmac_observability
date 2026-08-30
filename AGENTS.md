@@ -199,6 +199,56 @@ review discipline, not a guard, and it is a defect to describe it as enforced.
     carries immutable coordinates (Governance ADR 0013).
     — `tests/architecture/test_authorization_is_not_owned_here.py`
 
+21. **A private inventory version is SUPERSEDED, never overwritten.** Writing a
+    new version names the digest of the version it replaces, and the write is
+    refused when that digest is not what the store currently holds. The
+    succession is checked as a whole: same document, same environment, version
+    exactly one higher, and something actually changed.
+
+    Compare-and-set rather than a blind write, because the failure it prevents
+    leaves no trace. Two operators read version 1, each edits it, each writes
+    version 2; the second write wins and the first one's change — a
+    decommissioned product's target removed, say — is back in the environment
+    with nothing anywhere recording that it ever left. The next promotion
+    resolves it and scrapes a host that no longer exists.
+
+    A digest printed after a write does not catch this: it proves the writer
+    can hash what it is holding. Reading the stored bytes back and comparing
+    them against the digest that was meant to be stored is the half that can
+    fail on a partial write, so `inventory-digest --expect` exists and a
+    supersession is not complete without it. The superseded version is
+    RETAINED: it is the evidence for every receipt that names it.
+
+    **The workflow is the writer, and the change is a reviewed request.** A
+    hand-run supersession is the unversioned, unreproducible edit this
+    repository exists to remove, so `.github/workflows/private-inventory-supersede.yml`
+    performs the write, from protected `main` only, applying a
+    `supersession-request` merged after review. Nothing it emits is the
+    document: not a log line, not a job summary, not an artifact, and not on
+    the failure path — where a handler added to explain a failure is the one
+    that publishes the thing. A request can only RETIRE, because retiring needs
+    a logical name while provisioning needs a resolved value that must not
+    enter public Git or a CI input.
+
+    Three properties of WHERE it runs and WITH WHAT, each of which was a defect
+    in an earlier draft. It runs on a NAMED fixed-egress runner, never a hosted
+    one, because the store's listener is contained behind an allowlist and
+    widening that to reach a dynamic range would undo the containment to serve
+    a convenience. The credential lives in the steps that touch the store and
+    nowhere above them, because a job-level `env` hands a production token to
+    checkout, the setup actions and everything `poetry install` executes. And
+    READING and WRITING are separate path-scoped identities: discovery needs no
+    write capability at all, the writer needs no list capability, and one
+    identity able to do both is the thing to eliminate.
+
+    The storage shape is CONFIRMED against the reviewed request, never
+    discovered and acted on in the same run. Discovery is its own read-only
+    workflow that reports and stops, with a human in between — a shape detected
+    and immediately written is a probe whose result nobody reviewed.
+    — `tests/unit/test_private_inventory_supersede.py`,
+      `tests/unit/test_supersession_request.py`,
+      `tests/architecture/test_supersession_workflow_cannot_leak.py`
+
 ---
 
 ## The line this repository must not cross

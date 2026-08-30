@@ -77,15 +77,21 @@ __all__ = [
     "SECRET_SCAN_EXCLUSIONS",
     "Finding",
     "InventoryError",
+    "SupersedeSummary",
+    "SupersessionRequest",
+    "apply_supersession",
     "canonical_bytes",
     "canonical_digest",
     "load",
     "load_private_inventory",
+    "load_supersession_request",
     "resolution_findings",
     "resolve",
     "scan_for_private_material",
     "scan_for_secret_material",
     "semantic_findings",
+    "supersede_findings",
+    "supersede_summary",
     "validate",
 ]
 
@@ -742,18 +748,41 @@ def load_private_inventory(path: Path, *, contracts: Path) -> PrivateInventory:
         raise InventoryError(
             [Finding("MISSING", str(path), "the private inventory document is absent")]
         )
-    with path.open("rb") as handle:
-        document: Document = json.load(handle)
+    try:
+        with path.open("rb") as handle:
+            document: Document = json.load(handle)
+    except json.JSONDecodeError as error:
+        # A partial write is the EXPECTED input on the read-back path: a
+        # supersession writes the document and then re-reads the stored bytes
+        # precisely so a truncated one is caught. Letting that surface as a
+        # traceback would make the one failure this check exists to detect the
+        # one it reports worst — and an operator following a runbook cannot act
+        # on a stack trace.
+        raise InventoryError(
+            [
+                Finding(
+                    "MALFORMED",
+                    f"{path}:{error.lineno}",
+                    f"the document is not valid JSON ({error.msg}); if this is a read-back "
+                    "after a write, the stored bytes are incomplete",
+                )
+            ]
+        ) from error
     findings += _validate_document(contracts, "private-inventory", document, str(path))
     if findings:
         raise InventoryError(findings)
 
     host = _mapping(document["host"])
+    # The environment's identity, version aside. Built by copying and dropping
+    # one key rather than by mutating `document`, which is still needed intact
+    # for the full digest immediately below.
+    content = {key: value for key, value in document.items() if key != "version"}
     return PrivateInventory(
         document=str(document["document"]),
         version=int(cast(int, document["version"])),
         environment=str(document["environment"]),
         digest=canonical_digest(document),
+        content_digest=canonical_digest(content),
         host=HostBinding(
             target_id=str(host["target_id"]),
             identity=str(host["identity"]),
@@ -1235,3 +1264,298 @@ def validate(
     except InventoryError as error:
         return findings + error.findings
     return findings + resolution_findings(state, inventory)
+
+
+# ── Superseding a private inventory (compare-and-set) ───────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class SupersedeSummary:
+    """What changed between two versions of one private inventory.
+
+    Deliberately holds LOGICAL names and counts only. `target_id` and
+    `credential_ref` are public vocabulary (ADR-0004) and a reviewer needs them
+    to see what moved; endpoints, store paths, file names and destinations are
+    the resolved material this summary exists to avoid printing.
+
+    The credential figures are counts rather than names for the same reason a
+    basename is private: naming which binding lost its credential is naming the
+    binding.
+    """
+
+    document: str
+    previous_version: int
+    next_version: int
+    previous_digest: str
+    next_digest: str
+    targets_added: tuple[str, ...]
+    targets_removed: tuple[str, ...]
+    federations_added: tuple[str, ...]
+    federations_removed: tuple[str, ...]
+    receivers_added: tuple[str, ...]
+    receivers_removed: tuple[str, ...]
+    credentials_before: int
+    credentials_after: int
+
+    def render(self) -> str:
+        lines = [
+            f"supersedes {self.document} v{self.previous_version} "
+            f"sha256={self.previous_digest}",
+            f"        -> {self.document} v{self.next_version} sha256={self.next_digest}",
+        ]
+        for label, added, removed in (
+            ("targets", self.targets_added, self.targets_removed),
+            ("federations", self.federations_added, self.federations_removed),
+            ("receivers", self.receivers_added, self.receivers_removed),
+        ):
+            if added:
+                lines.append(f"  + {label}: {', '.join(added)}")
+            if removed:
+                lines.append(f"  - {label}: {', '.join(removed)}")
+        lines.append(
+            f"  credential bindings: {self.credentials_before} -> {self.credentials_after}"
+        )
+        return "\n".join(lines)
+
+
+def _credential_count(inventory: PrivateInventory) -> int:
+    bound = [binding.credential for binding in inventory.targets]
+    bound += [binding.credential for binding in inventory.federations]
+    bound += [binding.credential for binding in inventory.receivers]
+    return sum(1 for credential in bound if credential is not None)
+
+
+def supersede_findings(
+    previous: PrivateInventory,
+    following: PrivateInventory,
+    *,
+    expect_previous_digest: str,
+) -> tuple[Finding, ...]:
+    """Refuse anything that is not an in-place succession of one document.
+
+    ``expect_previous_digest`` is the compare-and-set half, and it is required
+    rather than optional. Writing a new version by overwriting whatever is
+    currently stored is a lost update waiting to happen: two operators editing
+    from the same starting point produce two v2 documents, the second write
+    wins silently, and the change the first one made — a retired target
+    removed, say — is back in the environment with nothing to show it ever
+    left. Naming the version you believe you are replacing turns that into a
+    refusal instead of a surprise.
+    """
+    findings: list[Finding] = []
+    if previous.digest != expect_previous_digest:
+        findings.append(
+            Finding(
+                "SUPERSEDE-PREVIOUS-DIGEST",
+                previous.document,
+                "the previous document does not hash to the digest this supersession names, "
+                "so it is not the version being replaced; re-read the stored document and "
+                "rebase the change onto it rather than overwriting",
+            )
+        )
+    if following.document != previous.document:
+        findings.append(
+            Finding(
+                "SUPERSEDE-DOCUMENT",
+                following.document,
+                f"document name changed from {previous.document!r}; a rename is a new "
+                "document, not a new version, and every receipt naming the old one becomes "
+                "unresolvable",
+            )
+        )
+    if following.environment != previous.environment:
+        findings.append(
+            Finding(
+                "SUPERSEDE-ENVIRONMENT",
+                following.document,
+                f"environment changed from {previous.environment!r} to "
+                f"{following.environment!r}",
+            )
+        )
+    if following.version != previous.version + 1:
+        findings.append(
+            Finding(
+                "SUPERSEDE-VERSION",
+                following.document,
+                f"version must be exactly {previous.version + 1}, got {following.version}; a "
+                "skipped number leaves a version nobody can produce and a reused one makes "
+                "two documents answer to the same name",
+            )
+        )
+    if following.content_digest == previous.content_digest:
+        findings.append(
+            Finding(
+                "SUPERSEDE-NO-CHANGE",
+                following.document,
+                "the two versions describe an identical environment and differ only in their "
+                "version number; a bump with no change makes two receipts look like different "
+                "environments when nothing moved",
+            )
+        )
+    return tuple(findings)
+
+
+def supersede_summary(previous: PrivateInventory, following: PrivateInventory) -> SupersedeSummary:
+    """Describe the change in logical names and counts, never in resolved values."""
+
+    def names(inventory: PrivateInventory, group: str) -> set[str]:
+        if group == "receivers":
+            return {binding.credential_ref for binding in inventory.receivers}
+        rows = inventory.targets if group == "targets" else inventory.federations
+        return {binding.target_id for binding in rows}
+
+    def moved(group: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        before, after = names(previous, group), names(following, group)
+        return tuple(sorted(after - before)), tuple(sorted(before - after))
+
+    targets_added, targets_removed = moved("targets")
+    federations_added, federations_removed = moved("federations")
+    receivers_added, receivers_removed = moved("receivers")
+    return SupersedeSummary(
+        document=following.document,
+        previous_version=previous.version,
+        next_version=following.version,
+        previous_digest=previous.digest,
+        next_digest=following.digest,
+        targets_added=targets_added,
+        targets_removed=targets_removed,
+        federations_added=federations_added,
+        federations_removed=federations_removed,
+        receivers_added=receivers_added,
+        receivers_removed=receivers_removed,
+        credentials_before=_credential_count(previous),
+        credentials_after=_credential_count(following),
+    )
+
+
+# ── Applying a reviewed supersession request ────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class SupersessionRequest:
+    """A reviewed, PUBLIC instruction to retire logical entries.
+
+    Retirement only. Removing an entry needs its logical name, which ADR-0004
+    already publishes; adding one needs a resolved endpoint or credential
+    binding, which must never pass through public Git or a CI input. So the
+    request contract has no field for provisioning, and that is a boundary
+    rather than an unfinished first cut.
+    """
+
+    document: str
+    previous_version: int
+    previous_digest: str
+    storage_shape: str
+    """The CONFIRMED storage shape, reviewed rather than discovered.
+
+    An earlier draft had the workflow detect this at run time and then write
+    immediately, which is detection rather than confirmation — the same defect
+    as a probe whose result nobody reads before acting on it. Discovery now
+    reports and stops; a human puts the answer here; the mutation refuses if the
+    store disagrees.
+    """
+    rationale: str
+    targets: tuple[str, ...]
+    federations: tuple[str, ...]
+    receivers: tuple[str, ...]
+
+
+def load_supersession_request(path: Path, *, contracts: Path) -> SupersessionRequest:
+    if not path.is_file():
+        raise InventoryError([Finding("MISSING", str(path), "the supersession request is absent")])
+    document = _read_toml(path)
+    findings = _validate_document(contracts, "supersession-request", document, str(path))
+    if findings:
+        raise InventoryError(findings)
+    previous = _mapping(document["previous"])
+    storage = _mapping(document["storage"])
+    retire = _mapping(document["retire"])
+
+    def group(name: str) -> tuple[str, ...]:
+        raw = retire.get(name)
+        return () if raw is None else _strings(raw)
+
+    return SupersessionRequest(
+        document=str(document["document"]),
+        previous_version=int(cast(int, previous["version"])),
+        previous_digest=str(previous["sha256"]),
+        storage_shape=str(storage["shape"]),
+        rationale=str(document["rationale"]),
+        targets=group("targets"),
+        federations=group("federations"),
+        receivers=group("receivers"),
+    )
+
+
+def apply_supersession(
+    request: SupersessionRequest, previous: PrivateInventory, stored: Mapping[str, object]
+) -> tuple[Mapping[str, object], tuple[Finding, ...]]:
+    """Produce the next version's document, or say why the request cannot apply.
+
+    ``stored`` is the raw parsed document rather than the loaded record,
+    because what is written back must be the stored bytes minus the retired
+    entries — not a re-serialisation of this package's model. A model-shaped
+    rewrite would silently drop any field a future schema version adds and this
+    loader does not yet read, turning an unrelated deployment's data into
+    collateral of a retirement.
+    """
+    findings: list[Finding] = []
+    if request.document != previous.document:
+        findings.append(
+            Finding(
+                "REQUEST-DOCUMENT",
+                request.document,
+                f"the request names document {request.document!r} but the stored document is "
+                f"{previous.document!r}; a request aimed at another environment's inventory "
+                "is refused rather than applied",
+            )
+        )
+    if request.previous_version != previous.version:
+        findings.append(
+            Finding(
+                "REQUEST-VERSION",
+                request.document,
+                f"the request supersedes version {request.previous_version} but the stored "
+                f"document is version {previous.version}",
+            )
+        )
+    if request.previous_digest != previous.digest:
+        findings.append(
+            Finding(
+                "REQUEST-PREVIOUS-DIGEST",
+                request.document,
+                "the stored document does not hash to the digest this request names, so it is "
+                "not the version the request was reviewed against; re-read it, rebase the "
+                "request and have the change reviewed again",
+            )
+        )
+    if findings:
+        return {}, tuple(findings)
+
+    following = {key: value for key, value in stored.items() if key != "version"}
+    following["version"] = previous.version + 1
+
+    def retire(group: str, key: str, names: tuple[str, ...]) -> None:
+        rows = cast(Sequence[Mapping[str, object]], following.get(group, []))
+        present = {str(row[key]) for row in rows}
+        for name in names:
+            if name not in present:
+                # A no-op removal means the request is stale or names the wrong
+                # entry. Applying it quietly would produce a version whose diff
+                # does not match the change that was reviewed.
+                findings.append(
+                    Finding(
+                        "REQUEST-ABSENT",
+                        f"{request.document}#{group}/{name}",
+                        f"the request retires {name!r} from {group}, which the stored document "
+                        "does not contain",
+                    )
+                )
+        following[group] = [row for row in rows if str(row[key]) not in set(names)]
+
+    retire("targets", "target_id", request.targets)
+    retire("federations", "target_id", request.federations)
+    retire("receivers", "credential_ref", request.receivers)
+    if findings:
+        return {}, tuple(findings)
+    return following, ()

@@ -1,0 +1,122 @@
+# Report what the private inventory store currently holds, and STOP.
+#
+# It exists because the mutation workflow must not work the storage shape out
+# for itself. A shape discovered at run time and acted on immediately is
+# detection, not confirmation — the same defect as a probe whose result nobody
+# reads before acting on it. This reports; a human puts the answer in a
+# reviewed supersession request; the mutation verifies against that and refuses
+# on disagreement.
+#
+# READ-ONLY BY IDENTITY, not by intention. It uses a path-scoped READER
+# credential with no write capability at all, so "this workflow does not write"
+# is a property of the token rather than a promise made by the YAML.
+#
+# It emits shape, KV version and digest. Never the document — not to a log, a
+# job summary or an artifact, and not on the failure path.
+# `tests/architecture/test_supersession_workflow_cannot_leak.py` enforces that
+# over this file's text.
+
+name: Discover the private inventory shape
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-inventory-discover
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: Report shape, version and digest
+    # The same named dedicated runner as the mutation workflow, reaching the
+    # store through the same proven WireGuard tunnel. Access is bound to the
+    # tunnel identity rather than to a source address on the plaintext
+    # listener, so a hosted runner is not merely discouraged here — it could
+    # not authenticate. An absent runner leaves this QUEUED.
+    runs-on: [self-hosted, dotmac-control-runner]
+    # Bounds EXECUTION, not queueing. A dispatch with no matching runner
+    # registered waits in the queue; it is not failed by this budget, so
+    # "runner absent" never presents as a job that went wrong. What this
+    # does bound is a hung request against the store.
+    timeout-minutes: 10
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: ./.github/actions/setup-poetry
+      - run: poetry install
+
+      - name: Refuse a hosted runner
+        run: |
+          set -euo pipefail
+          # Belt and braces with `runs-on`. The label pair is what schedules
+          # this job; `RUNNER_ENVIRONMENT` is what the runner reports about
+          # itself, so the two disagreeing means a runner is registered under a
+          # label that does not describe it.
+          if [ "${RUNNER_ENVIRONMENT:-}" != "self-hosted" ]; then
+            echo "this workflow must run on the named fixed-egress runner,"
+            echo "not on a hosted runner reached from a dynamic address range"
+            exit 1
+          fi
+
+      # The reader credential appears HERE and nowhere earlier. Every action
+      # above — checkout, setup, poetry install — runs without it, so no
+      # third-party step inherits a production credential from a job-level env.
+      - name: Report what the store holds
+        env:
+          BAO_ADDR: ${{ secrets.OPENBAO_ADDR }}
+          BAO_TOKEN: ${{ secrets.OPENBAO_INVENTORY_READER_TOKEN }}
+          BAO_MOUNT: ${{ secrets.OBSERVABILITY_PRIVATE_INVENTORY_MOUNT }}
+          BAO_PATH: ${{ secrets.OBSERVABILITY_PRIVATE_INVENTORY_PATH }}
+          BAO_FIELD: ${{ secrets.OBSERVABILITY_PRIVATE_INVENTORY_FIELD }}
+        run: |
+          set -euo pipefail
+          for name in BAO_ADDR BAO_TOKEN BAO_MOUNT BAO_PATH; do
+            if [ -z "${!name:-}" ]; then echo "$name is not configured"; exit 1; fi
+          done
+          work="${RUNNER_TEMP}/discover"
+          mkdir -p "$work"; chmod 700 "$work"
+
+          curl --fail-with-body -sS \
+            -H "X-Vault-Token: ${BAO_TOKEN}" \
+            "${BAO_ADDR}/v1/${BAO_MOUNT}/data/${BAO_PATH}" \
+            -o "$work/response.json"
+
+          echo "kv version: $(jq -r '.data.metadata.version' "$work/response.json")"
+
+          if jq -e '.data.data.schema_version' "$work/response.json" >/dev/null 2>&1; then
+            echo "shape: data-object"
+            jq -c '.data.data' "$work/response.json" > "$work/document.json"
+          elif [ -n "${BAO_FIELD:-}" ] \
+            && jq -e --arg f "${BAO_FIELD}" '.data.data[$f]' "$work/response.json" >/dev/null 2>&1
+          then
+            echo "shape: field"
+            jq -r --arg f "${BAO_FIELD}" '.data.data[$f]' "$work/response.json" \
+              > "$work/document.json"
+          else
+            echo "shape: UNRECOGNISED — the secret is neither a document at its top level"
+            echo "nor a single configured field. Do not write a supersession request until"
+            echo "this is understood."
+            exit 1
+          fi
+          rm -f "$work/response.json"
+
+          poetry run dotmac-observability --contracts contracts \
+            inventory-digest "$work/document.json"
+
+          echo
+          echo "Put the shape above into the supersession request's [storage] block."
+          echo "This workflow writes nothing and its credential cannot."
+
+      - name: Shred the working copy
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -rf "${RUNNER_TEMP}/discover"
+          echo "working copy removed"

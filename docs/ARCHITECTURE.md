@@ -80,6 +80,7 @@ The typed desired state is assembled from a fixed set of documents, located by
 | `routing/policies.toml` | `contracts/routing.schema.json`, `kind = "policies"` | `model.RouteDefaults`, `model.Route` |
 | `routing/inhibition.toml` | `contracts/routing.schema.json`, `kind = "inhibition"` | `model.Inhibition` |
 | `bundles/` | `contracts/bundle-lock.schema.json` | nothing yet; loading arrives in PR 3C |
+| `inventory/supersessions/*.toml` | `contracts/supersession-request.schema.json` | `model`-free: a reviewed instruction consumed by the supersession workflow, never by a render |
 
 And one input that is deliberately NOT in this repository:
 
@@ -273,6 +274,25 @@ render-check` compares the reference fixture's committed bytes against a fresh
 render of the same synthetic inputs. That is exactly as strong a determinism
 gate as before: determinism is a property of the renderer and its inputs, not
 of whether those inputs are real.
+
+### Two digests over a private inventory, and why
+
+`load_private_inventory` computes both, and the pair is what makes a
+supersession checkable.
+
+`digest` is over the whole canonical document and is the RECORD's identity —
+what a receipt or a plan binds, and what a read-back is compared against.
+
+`content_digest` is the same hash with `version` removed, and is the
+ENVIRONMENT's identity. Two versions sharing it describe the same estate and
+differ only in numbering.
+
+The second is not a convenience. A supersession must refuse a version bump that
+changes nothing, and a comparison of full digests cannot detect one at all,
+because incrementing the version is itself a change to the bytes. That check
+was written first against full digests, was dead code, and was found by the
+test rather than by review — which is the argument for the test, and for
+recording the shape here.
 
 ### Digest over paths and contents
 
@@ -618,6 +638,8 @@ review discipline.
 | `cli.py` | `validate`, `render [--check]`, `secret-scan`; thin adapters over the library | shipped |
 | `bundle.py` | Fetch a pinned product bundle, verify its digests, assemble the release `rules/` tree | PR 3C |
 | `validate.load_private_inventory` / `resolve` | Read and digest an ObserverInventoryV1 document, and join it to the public state with every lookup proved | shipped |
+| `validate.supersede_findings` / `supersede_summary` | Prove one private document legitimately replaces a NAMED earlier version, and describe the change in logical names only | shipped |
+| `validate.load_supersession_request` / `apply_supersession` | Apply a reviewed, public retirement request to a stored private document, preserving fields this package does not read | shipped |
 | `validate.scan_for_private_material` | Refuse resolved material anywhere in the tracked tree (rule 18) | shipped |
 | `live_verify.py` | Read live target, rule and route state from the evaluator APIs and compare it with the desired state | PR 5 |
 | `receipt.py` | Write and validate a promotion receipt against `contracts/promotion-receipt.schema.json` | PR 6 |

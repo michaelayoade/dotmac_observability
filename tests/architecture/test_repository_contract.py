@@ -39,6 +39,7 @@ def test_the_declared_contracts_are_all_present():
         # shape discloses nothing; publishing it is what lets a reviewer
         # disagree with the split.
         "private-inventory.schema.json",
+        "supersession-request.schema.json",
     }
     # `deployment-authorization.schema.json` is deliberately ABSENT. Defining
     # one here would make an adopter into a second deployment control plane;
