@@ -155,10 +155,24 @@ def _rsyslog_config(work: Path, rendered: Path, logs: Path, spool: Path, socket:
     config.write_text(
         "\n".join(
             [
-                'module(load="imuxsock" SysSock.Name="' + str(socket) + '")',
+                # The system socket is turned OFF and an explicit input is
+                # declared instead. `SysSock.Name` looked like it should work
+                # and did not: the file was created and stayed at zero bytes,
+                # because this instance was listening on the host's /dev/log
+                # while `logger -u` wrote to a socket nothing was reading.
+                #
+                # Turning the system socket off is also the better isolation.
+                # With it on, this instance competes with whatever else on the
+                # runner holds /dev/log, and the proof's result would depend on
+                # which of them won.
+                'module(load="imuxsock" SysSock.Use="off")',
+                f'input(type="imuxsock" Socket="{socket}" CreatePath="on")',
                 "$WorkDirectory " + str(spool),
                 "$PrivDropToUser syslog",
                 "$PrivDropToGroup syslog",
+                # Off, because rsyslog's default collapses a repeated message
+                # into "last message repeated N times" — and this proof writes
+                # the same canary before and after a rotation.
                 "$RepeatedMsgReduction off",
                 body,
                 "",
@@ -260,6 +274,19 @@ def prove(rendered: Path, work: Path, stanza_text: str | None = None) -> None:
 
     config = _rsyslog_config(work, rendered, logs, spool, socket)
     process = _start(config, pidfile)
+
+    def drain() -> str:
+        """Whatever rsyslogd has said so far, without blocking.
+
+        Attached to every failure raised below. A proof that reports "the file
+        is empty" and discards the daemon's own explanation makes the next
+        person reproduce the run to learn something the run already knew.
+        """
+        if process.stderr is None:
+            return ""
+        os.set_blocking(process.stderr.fileno(), False)
+        return (process.stderr.read() or b"").decode(errors="replace")
+
     try:
         # The socket has to exist before anything is written to it. rsyslogd
         # creates it during startup, and a `logger` that runs first fails with
@@ -319,13 +346,16 @@ def prove(rendered: Path, work: Path, stanza_text: str | None = None) -> None:
             ) from error
 
         # And the failure the host actually had: an action that suspended.
-        stderr = b""
-        if process.stderr is not None:
-            os.set_blocking(process.stderr.fileno(), False)
-            stderr = process.stderr.read() or b""
-        suspensions = len(re.findall(rb"suspended", stderr))
+        suspensions = len(re.findall(r"suspended", drain()))
         if suspensions:
             raise ProofFailure(f"rsyslog suspended an action {suspensions} time(s) during the run")
+    except ProofFailure as error:
+        said = drain().strip()
+        listing = ", ".join(sorted(entry.name for entry in logs.iterdir()))
+        raise ProofFailure(
+            f"{error}\n    rsyslogd said: {said or '(nothing)'}"
+            f"\n    log directory holds: {listing or '(empty)'}"
+        ) from error
     finally:
         process.send_signal(signal.SIGTERM)
         try:
