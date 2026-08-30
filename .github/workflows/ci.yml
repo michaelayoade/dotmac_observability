@@ -318,9 +318,21 @@ jobs:
           # twice: once against the rendered artefacts, and then again against
           # deliberately broken copies, which must FAIL. A check that has never
           # been observed to fail is not evidence.
-          sudo --preserve-env=RUNNER_TEMP python3 scripts/rotation_proof.py \
+          # Under /var/tmp rather than $RUNNER_TEMP. rsyslog drops privilege to
+          # the `syslog` user, and every ancestor of the isolated tree has to be
+          # traversable by it; $RUNNER_TEMP sits under a home directory that is
+          # not, and the resulting `open error: Permission denied` is
+          # indistinguishable from the production fault this proof detects.
+          # /var/tmp is 1777, world-traversable, and equally disposable.
+          #
+          # The path is an ARGUMENT, so the script itself holds no absolute path
+          # outside its own working tree — asserted by
+          # tests/architecture/test_ci_matches_the_makefile.py.
+          work=/var/tmp/dotmac-rotation-proof
+          sudo rm -rf "$work"
+          sudo python3 scripts/rotation_proof.py \
             --rendered "${RUNNER_TEMP}/rendered" \
-            --work "${RUNNER_TEMP}/rotation"
+            --work "$work"
 
   schemas:
     name: Contracts are valid JSON Schema 2020-12

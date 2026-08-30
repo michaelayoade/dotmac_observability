@@ -62,6 +62,17 @@ class ProofFailure(Exception):
     """A property the proof asserts did not hold."""
 
 
+class EnvironmentUnfit(Exception):
+    """The runner cannot host the proof, which is not the same as a failed proof.
+
+    Kept distinct on purpose. "The contract is broken" and "this machine cannot
+    let a privilege-dropped writer reach the isolated tree" produce the same
+    symptom — an empty file — and treating the second as the first is how a
+    green-or-red signal starts meaning neither. A negative control that failed
+    for THIS reason would also count as a pass, which is worse.
+    """
+
+
 @dataclass(frozen=True)
 class Contract:
     """The owner, group and mode the rendered tmpfiles line declares.
@@ -140,6 +151,36 @@ def _prepare(work: Path, rendered: Path, contract: Contract) -> tuple[Path, Path
     spool.mkdir()
     shutil.chown(spool, contract.owner, contract.owner)
     return logs, target, spool
+
+
+def _assert_writer_can_open(target: Path, owner: str) -> None:
+    """Prove the privilege-dropped writer can open the file, before rsyslog tries.
+
+    The precondition rsyslog itself reports as `open error: Permission denied`,
+    which is indistinguishable from the production fault this proof exists to
+    detect. Checking it separately is what keeps the two apart: every ancestor
+    of the isolated tree has to be traversable by the writer, and on a runner
+    the tree may sit under a home directory that is not.
+
+    Attempted AS the writer, not inferred from a mode. A stat-and-reason check
+    would have to reimplement the kernel's decision, and it is the kernel's
+    decision that matters.
+    """
+    probe = (
+        "import sys\n"
+        "try:\n"
+        f"    handle = open({str(target)!r}, 'a')\n"
+        "except OSError as error:\n"
+        "    sys.exit(str(error))\n"
+        "handle.close()\n"
+    )
+    result = _run(["runuser", "-u", owner, "--", sys.executable, "-c", probe])
+    if result.returncode != 0:
+        raise EnvironmentUnfit(
+            f"user {owner!r} cannot open {target} for append on this runner "
+            f"({(result.stdout + result.stderr).strip()}). Every ancestor has to be "
+            "traversable by the writer; move --work somewhere it is"
+        )
 
 
 def _rsyslog_config(work: Path, rendered: Path, logs: Path, spool: Path, socket: Path) -> Path:
@@ -269,6 +310,7 @@ def prove(rendered: Path, work: Path, stanza_text: str | None = None) -> None:
     _ensure_account(contract.owner)
     _ensure_account(contract.group)
     logs, target, spool = _prepare(work, rendered, contract)
+    _assert_writer_can_open(target, contract.owner)
     socket = work / "log.sock"
     pidfile = work / "rsyslogd.pid"
 
@@ -375,7 +417,11 @@ def main(argv: list[str] | None = None) -> int:
     stanza = (rendered / "host" / "logrotate.d" / "observability").read_text()
 
     print("positive control: the rendered contract")
-    prove(rendered, work / "positive")
+    try:
+        prove(rendered, work / "positive")
+    except EnvironmentUnfit as unfit:
+        print(f"  the runner cannot host this proof: {unfit}")
+        return 1
     print("  ok")
 
     # Each break is the removal of ONE declared property, and each one is a
@@ -407,6 +453,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"negative control: {name}")
         try:
             prove(rendered, work / f"negative{index}", stanza_text=stanza.replace(old, new, 1))
+        except EnvironmentUnfit as unfit:
+            # NOT counted as a refusal. A control that "failed" because the
+            # machine could not host it proves nothing, and letting it pass is
+            # how a sensitivity proof quietly stops being one.
+            print(f"  the runner cannot host this control: {unfit}")
+            failed = True
         except ProofFailure as error:
             print(f"  ok, refused: {error}")
         else:
