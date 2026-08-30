@@ -175,13 +175,42 @@ record" below.
 
 | # | Prerequisite | State | Gated on |
 | --- | --- | --- | --- |
-| 1 | Public inventory populated and reviewed (lane 3C) | outstanding | — blocks everything |
+| 1 | Public inventory populated and reviewed (lane 3C) | **proposed 2026-08-30, PR #12** | — blocks everything |
+| 1b | **Stored private document migrated to `private-inventory.v1`** | outstanding | — blocks 6 and 7; a human operation, NOT a supersession |
+| 1c | `routing/` populated (PR 3) — the workflow's `validate` step loads it | outstanding | — blocks 7 |
 | 2 | WireGuard tunnel to the secret store proven | **met 2026-08-30** | Michael's ruling: no credential crosses the plaintext listener |
 | 3 | Runner access **bound to the proven tunnel identity**, narrowly scoped | **met 2026-08-30** | 2 |
 | 4 | Reader and writer identities, then the workflow secrets | outstanding | 3 |
 | 5 | `private-inventory` environment configured | outstanding | 4 |
 | 6 | Discovery run once, shape confirmed into a committed request | outstanding | 5 |
 | 7 | Supersession dispatched | outstanding | 6 — and Michael's explicit authorization |
+
+### Rows 1b and 1c, added 2026-08-30
+
+**Row 1b is the one that changes the shape of this runbook.** The stored
+document declares `schema_version = "observability-private-inventory.v1
+(PROPOSED)"` — the capture format from PR #2, three PRs before ADR-0006
+accepted the contract — and produces **68 errors** against it
+(`observer-as-built.md` §15). Both `inventory-digest` and `inventory-apply`
+load and validate the previous version before doing anything else, so the
+workflow **fails at its first tool step**, before compare-and-set and before
+any write.
+
+It is not a retirement, so it cannot be done by this runbook. Reaching the
+contract means supplying `document` and a `host` binding, and `host` requires
+`identity` and `ssh_alias` — resolved values, which a supersession request
+deliberately has no field for. A human migrates the document against the
+private store; only then does a retirement become expressible.
+
+And **do not pre-write the request**: migration rewrites the document, which
+changes its digest, and that digest is the compare-and-set precondition. A
+request naming the pre-migration digest is refused after migration — correctly,
+but only after looking as though the work had been done.
+
+**Row 1c is a gap in the workflow's own precondition.** Its guard checks only
+that `inventory/control-plane.toml` exists, but the `validate` step it later
+runs loads `routing/` as well. With `routing/` absent the guard passes and the
+run fails further in, which is a worse failure shape than refusing up front.
 
 Rows 2 and 3 were met in the form row 3 was **rewritten** to, which is the
 check worth making rather than assuming: access is bound to a tunnel identity,
