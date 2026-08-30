@@ -116,7 +116,9 @@ def _ensure_account(name: str) -> None:
         _run(["groupadd", "--system", name])
 
 
-def _prepare(work: Path, rendered: Path, contract: Contract) -> tuple[Path, Path, Path]:
+def _prepare(
+    work: Path, rendered: Path, contract: Contract, sabotage: str | None = None
+) -> tuple[Path, Path, Path]:
     """Build an isolated /var/log analogue with the declared ownership.
 
     The DIRECTORY is created with the same mode the rendered contract declares
@@ -142,10 +144,26 @@ def _prepare(work: Path, rendered: Path, contract: Contract) -> tuple[Path, Path
     target = logs / contract.path.name
     # tmpfiles' job, done by hand because systemd-tmpfiles refuses a relocated
     # tree: create as root, with the declared owner, group and mode. This is
-    # the step whose ABSENCE is the whole fault.
-    target.touch()
-    shutil.chown(target, contract.owner, contract.group)
-    os.chmod(target, int(contract.mode, 8))
+    # the step whose ABSENCE is the whole fault, which is why `no-tmpfiles`
+    # below is a control rather than a hypothetical.
+    if sabotage == "no-tmpfiles":
+        # The production state exactly: /var/log/mail.log does not exist, the
+        # directory is not group-writable, and rsyslog is expected to create it.
+        pass
+    else:
+        target.touch()
+        if sabotage == "wrong-owner":
+            # Created, but by something that did not know who would write it —
+            # the shape a `create` with no owner produces when the original file
+            # is gone.
+            shutil.chown(target, "root", "root")
+        else:
+            shutil.chown(target, contract.owner, contract.group)
+        if sabotage == "wrong-mode":
+            # Owner read-only. The action opens for append and cannot.
+            os.chmod(target, 0o440)
+        else:
+            os.chmod(target, int(contract.mode, 8))
 
     spool = work / "spool"
     spool.mkdir()
@@ -338,6 +356,7 @@ def prove(
     work: Path,
     stanza_text: str | None = None,
     binary: str = "rsyslogd",
+    sabotage: str | None = None,
 ) -> None:
     """Run one full rotation cycle and assert every property.
 
@@ -347,8 +366,13 @@ def prove(
     contract = _parse_tmpfiles(rendered, "/var/log/mail.log")
     _ensure_account(contract.owner)
     _ensure_account(contract.group)
-    logs, target, spool = _prepare(work, rendered, contract)
-    _assert_writer_can_open(target, contract.owner)
+    logs, target, spool = _prepare(work, rendered, contract, sabotage)
+    if sabotage is None:
+        # Only on the positive path. Under sabotage the writer is SUPPOSED to be
+        # unable to open the file, and asserting otherwise would turn the
+        # control's intended failure into an EnvironmentUnfit that does not
+        # count as a refusal.
+        _assert_writer_can_open(target, contract.owner)
     socket = work / "log.sock"
     pidfile = work / "rsyslogd.pid"
 
@@ -472,39 +496,71 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print("  ok")
 
-    # Each break is the removal of ONE declared property, and each one is a
-    # thing somebody would plausibly leave out.
-    controls: list[tuple[str, str, str]] = [
+    # Each control removes ONE declared property, and each removal is a thing
+    # somebody would plausibly leave out.
+    #
+    # THE FIRST TWO ATTEMPTS AT THIS LIST WERE VACUOUS, and the reason is worth
+    # recording because it is not obvious. Weakening `create 0640 syslog adm` to
+    # a bare `create` changes nothing while the original file exists: logrotate
+    # falls back to the ORIGINAL file's owner and mode, so the recreated file
+    # comes back correct anyway. Both controls passed, and the run reported that
+    # a broken contract was fine — which is precisely the failure a sensitivity
+    # proof exists to make visible, caught here by the proof's own reporting.
+    #
+    # `create`'s arguments matter only when the original is GONE, which is the
+    # production state: /var/log/mail.log did not exist, `missingok` skipped the
+    # stanza, and rsyslog was left to create a file it cannot create. So the
+    # controls now break the ENVIRONMENT the contract describes rather than the
+    # stanza's spelling, because that is where the properties actually live.
+    controls: list[tuple[str, str, str | None, tuple[str, str] | None]] = [
         (
-            "create without an owner",
-            "    create 0640 syslog adm",
-            "    create 0640",
+            "no tmpfiles pre-creation — the production fault verbatim",
+            "The file does not exist and the directory is not group-writable, so the "
+            "privilege-dropped writer cannot create it. This is what ran for a month.",
+            "no-tmpfiles",
+            None,
         ),
         (
-            "create without a mode or an owner",
-            "    create 0640 syslog adm",
-            "    create",
+            "the file exists but is owned by root",
+            "What a `create` with no owner produces once the original is gone. The action "
+            "opens for append as `syslog` and cannot.",
+            "wrong-owner",
+            None,
+        ),
+        (
+            "the file exists, owned correctly, with no owner write bit",
+            "Mode 0440 instead of the declared 0640.",
+            "wrong-mode",
+            None,
         ),
         (
             "no postrotate reopen",
-            "    postrotate\n        /usr/lib/rsyslog/rsyslog-rotate\n    endscript",
-            "",
+            "rsyslog keeps writing into the renamed inode and the new file stays empty — "
+            "the failure that looks like success, because rotation itself worked.",
+            None,
+            ("    postrotate\n        /usr/lib/rsyslog/rsyslog-rotate\n    endscript", ""),
         ),
     ]
     failed = False
-    for index, (name, old, new) in enumerate(controls):
-        if old not in stanza:
-            print(f"negative control {name!r}: the rendered stanza no longer contains {old!r}")
-            print("  the control mutates nothing, so it would pass for the wrong reason")
-            failed = True
-            continue
+    for index, (name, why, sabotage, edit) in enumerate(controls):
+        stanza_text = None
+        if edit is not None:
+            search, replace = edit
+            if search not in stanza:
+                print(f"negative control {name!r}: the rendered stanza no longer contains it")
+                print("  the control mutates nothing, so it would pass for the wrong reason")
+                failed = True
+                continue
+            stanza_text = stanza.replace(search, replace, 1)
         print(f"negative control: {name}")
+        print(f"  ({why})")
         try:
             prove(
                 rendered,
                 work / f"negative{index}",
-                stanza_text=stanza.replace(old, new, 1),
+                stanza_text=stanza_text,
                 binary=arguments.rsyslogd,
+                sabotage=sabotage,
             )
         except EnvironmentUnfit as unfit:
             # NOT counted as a refusal. A control that "failed" because the

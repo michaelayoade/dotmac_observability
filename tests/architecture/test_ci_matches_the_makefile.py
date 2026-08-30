@@ -125,14 +125,14 @@ def test_the_rotation_proof_never_touches_the_real_log_tree():
             ), f"the proof names {forbidden!r} as a literal, so it touches host state"
 
 
-def test_each_negative_control_actually_mutates_the_rendered_stanza():
-    """The proof's proof.
+def test_each_stanza_editing_control_actually_mutates_the_rendered_stanza():
+    """The proof's proof, for the controls that edit the stanza.
 
-    Each control locates itself in the stanza by exact string. If the renderer
-    reworded the stanza, every control would mutate nothing, every deliberate
-    failure would stop happening, and the job would report that a broken
-    contract is fine. The script checks this at run time too; this fails in the
-    fast suite instead of only in the job that needs a runner with rsyslog.
+    A control that locates itself by exact string mutates nothing once the
+    renderer rewords that string, its deliberate failure stops happening, and
+    the job reports that a broken contract is fine. The script checks this at
+    run time too; this fails in the fast suite instead of only in the job that
+    needs a runner with rsyslog.
     """
     from dotmac_observability.render import LOGROTATE_CONFIG, render_control_plane
     from dotmac_observability.validate import load
@@ -142,8 +142,8 @@ def test_each_negative_control_actually_mutates_the_rendered_stanza():
         LOGROTATE_CONFIG
     ]
     source = PROOF.read_text(encoding="utf-8")
-    controls = re.findall(r'^\s+"(    (?:create|postrotate)[^"]*)",$', source, re.MULTILINE)
-    assert controls, "no negative-control search strings were found; the matcher has drifted"
+    controls = re.findall(r'\("(    (?:create|postrotate)[^"]*)", ""\)', source)
+    assert controls, "no stanza-editing control was found; the matcher has drifted"
     for control in controls:
         needle = control.encode().decode("unicode_escape")
         assert needle in stanza, (
@@ -151,3 +151,22 @@ def test_each_negative_control_actually_mutates_the_rendered_stanza():
             "contains. The control would mutate nothing and the proof would pass on a broken "
             "contract"
         )
+
+
+def test_every_sabotage_the_controls_name_is_one_the_proof_implements():
+    """The environment controls are strings, so a typo would silently do nothing.
+
+    `no-tmpfiles`, `wrong-owner` and `wrong-mode` reach `_prepare` as plain
+    values. A misspelled one falls through to the correct branch, the control
+    then passes, and the run reports a broken contract as fine — which is
+    exactly what the first two controls did before they were replaced, for a
+    different reason.
+    """
+    source = PROOF.read_text(encoding="utf-8")
+    named = set(re.findall(r'^\s+"(no-tmpfiles|wrong-owner|wrong-mode)",$', source, re.MULTILINE))
+    handled = set(re.findall(r'sabotage == "([a-z-]+)"', source))
+    assert named, "no environment control was found; the matcher has drifted"
+    assert named == handled, (
+        f"the controls name {sorted(named)} and _prepare handles {sorted(handled)}; a name "
+        "with no branch falls through to the correct behaviour and passes"
+    )
