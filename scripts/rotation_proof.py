@@ -190,14 +190,46 @@ def _log(socket: Path, message: str) -> None:
     result = _run(["logger", "-u", str(socket), "-p", "mail.info", "-t", "rotation-proof", message])
     if result.returncode != 0:
         raise ProofFailure(f"logger refused the message: {result.stderr}")
-    time.sleep(1)
 
 
-def _expect_contains(path: Path, needle: str) -> None:
+def _expect_contains(path: Path, needle: str, *, deadline: float = 15.0) -> None:
+    """Wait for ``needle`` to appear, rather than sleeping a fixed interval.
+
+    The rendered action carries the `-` prefix, which is rsyslog's spelling for
+    "do not fsync after every write" — the correct setting for a busy log and
+    the reason a fixed one-second sleep is not a reliable wait. Polling to a
+    deadline turns a flaky proof into a slow one, which is the right trade for
+    something whose failure has to mean what it says.
+
+    The deadline is generous and the loop exits on the first success, so the
+    normal case costs a fraction of a second.
+    """
+    started = time.monotonic()
+    while True:
+        if path.is_file() and needle in path.read_text(errors="replace"):
+            return
+        if time.monotonic() - started > deadline:
+            break
+        time.sleep(0.25)
     if not path.is_file():
-        raise ProofFailure(f"{path} does not exist")
-    if needle not in path.read_text(errors="replace"):
-        raise ProofFailure(f"{path} does not contain {needle!r}")
+        raise ProofFailure(f"{path} does not exist after {deadline:.0f}s")
+    raise ProofFailure(
+        f"{path} does not contain {needle!r} after {deadline:.0f}s; it holds "
+        f"{len(path.read_text(errors='replace'))} byte(s)"
+    )
+
+
+def _expect_absent(path: Path, needle: str, *, settle: float = 3.0) -> None:
+    """Assert ``needle`` does NOT appear, after giving it time to.
+
+    The asymmetric case, and the one an impatient check gets wrong: asserting
+    absence immediately proves only that the write had not landed YET. The
+    post-rotation message must not appear in the ROTATED file, and it takes a
+    moment to appear anywhere at all.
+    """
+    time.sleep(settle)
+    if path.is_file() and needle in path.read_text(errors="replace"):
+        raise ProofFailure(f"{path} contains {needle!r} and must not")
 
 
 def _expect_ownership(path: Path, contract: Contract) -> None:
@@ -229,6 +261,15 @@ def prove(rendered: Path, work: Path, stanza_text: str | None = None) -> None:
     config = _rsyslog_config(work, rendered, logs, spool, socket)
     process = _start(config, pidfile)
     try:
+        # The socket has to exist before anything is written to it. rsyslogd
+        # creates it during startup, and a `logger` that runs first fails with
+        # a message about the socket rather than about the contract.
+        waited = 0.0
+        while not socket.exists() and waited < 10.0:
+            time.sleep(0.25)
+            waited += 0.25
+        if not socket.exists():
+            raise ProofFailure(f"rsyslogd did not create its socket at {socket} within 10s")
         _log(socket, CANARY_BEFORE)
         _expect_contains(target, CANARY_BEFORE)
         _expect_ownership(target, contract)
@@ -257,19 +298,25 @@ def prove(rendered: Path, work: Path, stanza_text: str | None = None) -> None:
         rotated = Path(str(target) + ".1")
         if not rotated.exists():
             raise ProofFailure("rotation did not move the previous file aside")
-        _expect_contains(rotated, CANARY_BEFORE)
+        _expect_contains(rotated, CANARY_BEFORE, deadline=5.0)
 
         # The three properties the negative controls each break.
+        waited = 0.0
+        while not target.exists() and waited < 10.0:
+            time.sleep(0.25)
+            waited += 0.25
         if not target.exists():
             raise ProofFailure("rotation did not recreate the file")
         _expect_ownership(target, contract)
         _log(socket, CANARY_AFTER)
         _expect_contains(target, CANARY_AFTER)
-        if CANARY_AFTER in rotated.read_text(errors="replace"):
+        try:
+            _expect_absent(rotated, CANARY_AFTER)
+        except ProofFailure as error:
             raise ProofFailure(
                 "the post-rotation message landed in the ROTATED file, so the writer was "
-                "never told to reopen and is still holding the old descriptor"
-            )
+                f"never told to reopen and is still holding the old descriptor ({error})"
+            ) from error
 
         # And the failure the host actually had: an action that suspended.
         stderr = b""
