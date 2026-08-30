@@ -582,3 +582,95 @@ The repair went into the egress refresh script rather than only the live rule
 set, so it survives the refresh timer. A fix applied only to the running state
 is undone by the thing that regenerates it — the same lesson `AGENTS.md` rule 2
 states for `/opt/observability`.
+
+## 14. Independent revalidation of §13 — 2026-08-30
+
+§§12 and 13 carry the same provenance caveat: both were **reported by the
+operator who made the change** and transcribed. This section is the first part
+of that material to be **independently measured** by a second party, and it is
+recorded separately rather than folded into §13 so the two provenances stay
+distinguishable.
+
+Method: read-only inspection over authorized SSH — `wg show`, `sysctl`,
+`iptables`/`ip6tables` listings with counters, the persisted rulesets, the
+`systemctl` state of the persistence unit, the Prometheus read API, and TCP
+reachability probes from a second fleet host. **Nothing on either host was
+changed.** No credential value was read and no resolved address, port or store
+path appears below (ADR-0004); the reachability results are stated as a class
+rather than as a map, for the reason §9.1 gives.
+
+### What was confirmed
+
+| Property | Result |
+| --- | --- |
+| Tunnel liveness | Handshake current at inspection; the peer's `allowed-ips` is the runner's single-address prefix, so cryptokey routing already constrains it |
+| Reverse-path filtering | Loose mode on both the global and the tunnel scope, which is what makes an interface match meaningful rather than decorative |
+| The tunnel-bound accept row | Present, carrying **both** the runner's single-address prefix **and** the interface match, with a non-zero counter — live, not aspirational |
+| Rendered firewall form | **iptables**, so the match is `-i wg0`. OBS-22 stands: the nftables `iifname` spelling would be wrong on this host, and the `iif`-resolves-at-load boot hazard remains a runner-only concern |
+| Terminal deny | Live on both families; counters incremented under probe |
+| Persistence | Both rulesets carry the rows, and the persistence unit is enabled and active |
+| The store's scrape job | Healthy, with a recent successful scrape |
+| Post-CRM parity | 15 jobs, 18 active targets, **none down**, and **no CRM job present** |
+
+That last row independently confirms §12's reported parity numbers for the
+first time. §12 remains operator-reported for everything else it states.
+
+### Both address families, each with a positive control
+
+The store's published surface was probed from a fleet host that is **not** in
+its allowlist, testing each family on its own path in a single pass:
+
+- **Both families refuse** the store's surface.
+- **Multiple control ports on the same host, in the same pass, over the same
+  family, were reachable** — so the refusal is a property of that surface and
+  not of the prober's egress, its routing, or a missing address family.
+
+The control half is not ceremony. §9.1 records a probe discarded precisely
+because it failed against its control, and OBS-23 records three occasions in
+one day where a working deny-by-default control was read as a broken host. A
+refusal observed without a control in the same pass proves the probe ran, not
+that access is shut. An earlier single-control pass during this revalidation
+did read as a false negative on one family and was discarded on exactly those
+grounds before the broader control set was used.
+
+### The IPv6 rule is on the chain the traffic actually traverses
+
+OBS-07's finding was that IPv6 rules sat in a forward-only chain that
+`docker-proxy`-terminated traffic never reaches, so they could not fire. **For
+the secret store's surface that is no longer the case:** the deny is installed
+on the chain local traffic actually arrives on, and its counter **incremented
+under the external probe**. That increment is the sensitivity proof — a
+zero-counter rule is indistinguishable from an unreachable one, which is the
+whole substance of OBS-07, so "the rule exists" was not accepted as evidence
+here.
+
+This says nothing about the other ports OBS-07 covers. That finding stays open.
+
+### Persistence is not authorship — and two inert chains
+
+The persistence mechanism snapshots live state wholesale. So the rows being
+present in the persisted rulesets proves they **survive a reboot**, and proves
+nothing whatever about **who created them or when**. iptables carries no
+per-rule provenance, counters measure use rather than origin, and the persisted
+files' timestamps date the snapshot, not any individual row. Any claim about
+authorship has to come from the change record, not from the firewall.
+
+Two **empty chains with no jump** remain on the host, one per family, left by
+the known `swap_jump` defect in the apply script — its delete loop exits
+without failing the function, so a stale artefact can survive while the run
+reports success. They are inert: nothing jumps to them, and the terminal deny
+sits behind them regardless. They are recorded because they **read as live** to
+anyone listing the chains, which is the cost of that defect even while it is
+harmless.
+
+### What this section does NOT establish
+
+- It does not establish who authored any firewall row (above).
+- It does not re-measure §12's rule, group or attribution counts; only the job,
+  target and CRM-absence figures were checked.
+- It does not clear OBS-07 beyond the single surface named here.
+- It does not verify the private inventory's contents. Populating the public
+  `inventory/` requires the private document's logical `target_id` vocabulary,
+  which was not retrievable under this session's access; the store's KV version
+  and storage shape were confirmed, its contents were not read, and no target
+  vocabulary is asserted anywhere in this repository as a result.
