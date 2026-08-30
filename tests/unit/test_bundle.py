@@ -418,3 +418,36 @@ def test_rsyslog_is_told_not_to_create_directories():
     existed.
     """
     assert "$CreateDirs off" in _tree()[RSYSLOG_CONFIG]
+
+
+def test_an_integrity_predicate_that_compares_a_raw_counter_is_refused(reference_copy: Path):
+    """Condition 4's trap, made unrepresentable.
+
+    `<counter> == 0` is satisfiable by RESETTING the counter, by a fresh TSDB,
+    or by a container restart — and a predicate made true that way cannot be
+    told from one made true by a repair. This host's counter stands at roughly
+    1.86 million historical rejections and must stay visible; what is asserted
+    is that it does not GROW from a recorded baseline.
+    """
+    edit(
+        reference_copy / "inventory" / "bundle.toml",
+        INTEGRITY,
+        'integrity = "prometheus_target_scrapes_sample_duplicate_timestamp_total == 0"',
+    )
+    assert "GATE-INTEGRITY-NOT-DELTA" in _codes(reference_copy)
+
+
+def test_both_production_gates_are_delta_shaped_and_name_an_ingestion_counter():
+    """Over the REAL bundle, not the fixture.
+
+    The fixture proves the gate works. This proves the production document
+    passes it — which is only possible to check at all since `routing/` was
+    populated and the production tree became loadable.
+    """
+    production = load(Path(__file__).resolve().parents[2], contracts=CONTRACTS)
+    gates = production.bundle.gates
+    assert gates, "the production bundle declares no verification gate"
+    for gate in gates:
+        assert "increase(" in gate.integrity, gate.name
+        assert gate.health != gate.integrity, gate.name
+        assert "up" in gate.health, gate.name

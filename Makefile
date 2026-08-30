@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 .PHONY: help install lint format-check type-check test render render-check secret-scan \
-        private-scan schema-check poetry-lock-check check
+        private-scan schema-check production-check poetry-lock-check check
 
 # Every environment-specific value is an overridable knob with a documented
 # default (AGENTS.md rule 14). Nothing below hardcodes a host, port or path.
@@ -55,5 +55,17 @@ private-scan: ## AGENTS.md rule 18 — no resolved material in tracked files
 schema-check: ## Schema, cross-document and resolution gates over the reference inventory
 	$(RESOLVED) validate --private-inventory $(PRIVATE)
 
+production-check: ## The same PUBLIC gates over the real inventory/ and routing/
+	# Possible only since routing/ was populated: `load()` needs all three
+	# routing documents, so before that the production tree could not be read at
+	# all and this target would have failed for a reason unrelated to its
+	# subject. The fixture proves the gates work; this proves they PASS on the
+	# tree a promotion will actually render.
+	#
+	# Public gates only, and it says so out loud. The resolution gates need the
+	# private inventory, which by ADR-0006 never exists in a checkout — a
+	# promotion supplies it and cannot skip them.
+	$(CLI) --contracts $(CONTRACTS) validate
+
 check: poetry-lock-check lint format-check type-check secret-scan private-scan schema-check \
-       render-check test ## Everything CI runs
+       production-check render-check test ## Everything CI runs

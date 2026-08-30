@@ -76,6 +76,21 @@ tell at a glance which half of AGENTS.md currently bites.
 | 26 | `tests/unit/test_bundle.py` |
 | 27 | `tests/unit/test_capture_migration.py`, `tests/architecture/test_supersession_workflow_cannot_leak.py` |
 | 28 | `tests/architecture/test_ci_matches_the_makefile.py` |
+| 29 | Stated verdict discipline, recorded in `docs/inventories/observer-as-built.md` §17 — see the note below |
+| 30 | `GATE-INTEGRITY-NOT-DELTA` in `validate._bundle_findings`, `tests/unit/test_bundle.py` |
+| 31 | `tests/architecture/test_supersession_workflow_cannot_leak.py` |
+| 32 | `tests/architecture/test_ci_matches_the_makefile.py`, `tests/architecture/test_supersession_workflow_cannot_leak.py` |
+
+> **Rule 29 is the one entry above that is NOT a detector**, and saying so is
+> the point of this file. No test can decide whether a summary sentence
+> overclaims; what a test can do is refuse the shapes that make overclaiming
+> easy, which is what rules 30 to 32 do. Rule 29 is stated review discipline
+> over the wording of a verdict, and it is recorded here as such rather than
+> being listed among the enforced rules it sits beside.
+>
+> It is not in the unmonitored table either, because that table is for rules
+> whose detector is merely *not written yet*, each with the PR that will write
+> it. There is no PR that will write this one.
 
 > **Rule 25's enforcement is worth reading twice**, because it is the only
 > check in this repository that runs external programs and the only one whose

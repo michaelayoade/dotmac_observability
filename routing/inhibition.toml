@@ -1,0 +1,21 @@
+# Suppression rules.
+#
+# Measured against the live Alertmanager on 2026-08-30 and transcribed exactly,
+# including its `equal` list. No delta.
+
+schema_version = "observability-routing.v2"
+kind = "inhibition"
+
+[[rules]]
+id = "critical-suppresses-warning-for-the-same-alert-and-instance"
+source_matchers = ['severity="critical"']
+target_matchers = ['severity="warning"']
+equal = ["alertname", "instance"]
+rationale = """
+When the same alert on the same instance is already firing at critical, the \
+warning restating it is not independent information and doubles the page. \
+`equal` pins the suppression to that pair, so a warning about a DIFFERENT \
+alert or a different instance is never silenced by an unrelated critical — \
+which is the failure an inhibition without `equal` causes, and the reason the \
+contract refuses to let the field be omitted.
+"""

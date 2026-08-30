@@ -1026,3 +1026,94 @@ address** from the one Prometheus's `dotmac-sub-victoriametrics` job and its
 federation scrape use. Two addresses for one logical upstream, with nothing
 comparing them. Not investigated here; recorded so it is not discovered again
 from scratch.
+
+## 17. The verdict is `rendered_guarded`, not `deployed_repaired` — 2026-08-30
+
+The four faults of §16 are closed **in the renderer**. Each is now
+unrepresentable in any newly rendered bundle, which is a stronger and more
+durable property than "fixed" — a fix can be undone by the next hand edit,
+whereas a shape the contract cannot express stays unexpressible.
+
+**Observer is not yet running a rendered bundle.** Nothing on the host has been
+repaired, and reporting the first as though it were the second is the specific
+error this vocabulary exists to prevent.
+
+### The one measurement that settles it
+
+| Measured 2026-08-30T18:48:17Z | Value |
+| --- | --- |
+| Active targets healthy | **18 / 18** |
+| `prometheus_target_scrapes_sample_duplicate_timestamp_total` | **1,864,926** |
+
+Every target green. Nearly 1.9 million samples rejected. That single pair is
+the whole argument for the ingestion-integrity gate, and it makes the case
+better than the rule statement does: a check that reads only the first column
+reports a healthy system while data is being dropped.
+
+### `1,864,926` is the PRE-PROMOTION BASELINE, recorded so the delta is checkable
+
+Read at `1788115697` (2026-08-30T18:48:17Z), up from 1,858,942 measured earlier
+the same day — it is still climbing, which is itself the point.
+
+**Do not reset this counter.** Resetting it makes "no new rejected samples"
+true by construction: the predicate would pass instantly on a broken system and
+look identical to a genuine pass. The historical rejections must stay visible.
+What condition 4 asserts is the **delta from this recorded baseline**, not that
+the absolute value is zero.
+
+That is now enforced rather than merely written down. `GATE-INTEGRITY-NOT-DELTA`
+refuses an integrity predicate that compares a raw counter instead of wrapping
+it in `increase`, `rate`, `irate`, `delta`, `idelta` or `resets` — because a
+bare `counter == 0` is satisfiable by a reset, a fresh TSDB or a container
+restart, and a predicate made true that way cannot be told from one made true
+by a repair.
+
+### The six conditions for `deployed_repaired`
+
+None is met today.
+
+| # | Condition | State |
+| --- | --- | --- |
+| 1 | Platform CP authorizes the exact bundle digest | **blocked** — the issuer does not exist yet |
+| 2 | Foundation applies those exact bytes to Observer | blocked on 1 |
+| 3 | Live read-back matches the authorized **14-file** tree — all fourteen compared, not sampled | blocked on 2 |
+| 4 | All 18 targets healthy **AND** zero new rejections against the baseline above, counter not reset | blocked on 2 |
+| 5 | Mail rotation, Alertmanager singleton and **both-family** firewall behaviour pass live probes | blocked on 2 |
+| 6 | Rollback restores the prior digest and produces a receipt | blocked on 2 |
+
+Condition 4 is a **conjunction**, and either half alone is the failure already
+measured above.
+
+Condition 5's *both-family* is load-bearing for the same reason §16.5 was: the
+seven IPv6 rules in `DOCKER-USER` are dead and every port they name is open, so
+a v4-only probe passes while v6 stays exposed. Each probe also needs a positive
+control in the same pass — a refusal without one proves the probe ran, not that
+access is shut.
+
+Condition 6 is the one a lane skips when the forward path works. **A rollback
+that has never been exercised is a plan, not a capability**, and the receipt is
+what distinguishes the two.
+
+### What closed since §16
+
+- The three floating runtimes are **pinned by measurement**: Loki
+  `sha256:73e905b5…`, Promtail `sha256:6cfa64ec…`, Grafana `sha256:0f86bada…`,
+  read from the running containers' `RepoDigests`. The all-zero placeholders
+  are gone, and they were load-bearing while they stood — an invalid digest
+  fails at pull time, whereas a plausible wrong one promotes something.
+- `routing/` is **populated**: receivers, policies and inhibition, transcribed
+  from the live Alertmanager with one marked delta (explicit `warning` and
+  `critical` routes to the receiver the fall-through already reached, which
+  AGENTS.md rule 7 requires and which changes no alert's destination).
+- The production tree therefore **loads end to end for the first time**, and
+  `make production-check` runs the public gates over it in CI. Until `routing/`
+  existed this was impossible: `load()` needs all three routing documents.
+
+### One assumption still outstanding
+
+`routing/receivers.toml` proposes `credential_ref = "telegram-oncall"` for the
+single live Telegram binding. The private inventory was not readable when it
+was written, so if it uses a different logical name, resolution fails with
+`RESOLUTION-UNRESOLVED` at promotion. Flagged in the same shape and for the
+same reason as `host.target_id` in `inventory/control-plane.toml`: a loud
+failure at promotion, never a silent one.

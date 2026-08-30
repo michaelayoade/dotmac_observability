@@ -170,3 +170,59 @@ def test_every_sabotage_the_controls_name_is_one_the_proof_implements():
         f"the controls name {sorted(named)} and _prepare handles {sorted(handled)}; a name "
         "with no branch falls through to the correct behaviour and passes"
     )
+
+
+# ── Fork-controlled content, repository-wide ────────────────────────────────
+
+WORKFLOWS = sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml"))
+
+
+def test_there_are_workflows_to_check():
+    """Sensitivity: the glob found something, so the sweep below is not vacuous."""
+    assert len(WORKFLOWS) >= 3, [path.name for path in WORKFLOWS]
+
+
+def test_no_workflow_anywhere_uses_pull_request_target():
+    """Repository-wide, not just the two that touch the secret store.
+
+    `pull_request_target` runs TRUSTED base-branch workflow code with a
+    write-capable context and the repository's secrets, against a fork's head.
+    That is precisely why it BYPASSES the fork-workflow approval gate — and the
+    repository-wide `all_external_contributors` setting does not cover it,
+    because from Actions' point of view the workflow being run is the base
+    branch's own.
+
+    The guard is repository-wide because the danger is not specific to the
+    workflows that hold a credential today: a `pull_request_target` job on any
+    workflow can be given one tomorrow, and on this account the same runners
+    serve every workflow in the repository.
+
+    A checkout of `github.event.pull_request.head.sha` under that trigger is
+    the specific shape that turns it into arbitrary code execution, so it is
+    named here even though the trigger itself is already refused.
+    """
+    offenders = []
+    for path in WORKFLOWS:
+        text = path.read_text(encoding="utf-8")
+        code = "\n".join(line for line in text.splitlines() if not line.strip().startswith("#"))
+        header = code[: code.index("jobs:")] if "jobs:" in code else code
+        if "pull_request_target" in header:
+            offenders.append(f"{path.name}: pull_request_target trigger")
+        if "pull_request.head.sha" in code or "pull_request.head.ref" in code:
+            offenders.append(f"{path.name}: checks out a fork-controlled ref")
+    assert not offenders, (
+        "these workflows can execute fork-controlled content on this account's runners: "
+        f"{offenders}"
+    )
+
+
+def test_the_pull_request_target_detector_bites():
+    """Sensitivity proof. A sweep that found nothing must be shown able to find something."""
+    planted = "on:\n  pull_request_target:\n    types: [opened]\njobs:\n  x:\n    steps: []\n"
+    header = planted[: planted.index("jobs:")]
+    assert "pull_request_target" in header
+    checkout = (
+        "jobs:\n  x:\n    steps:\n      - uses: actions/checkout@v4\n"
+        "        with:\n          ref: ${{ github.event.pull_request.head.sha }}\n"
+    )
+    assert "pull_request.head.sha" in checkout

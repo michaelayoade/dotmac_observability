@@ -157,18 +157,74 @@ RUNNER = "[self-hosted, dotmac-control-runner]"
 _HOSTED = ("ubuntu-latest", "ubuntu-22", "ubuntu-24", "windows-", "macos-", "-latest")
 
 
+def _jobs(path) -> dict[str, str]:
+    """Each job's own text, split on the two-space job headers.
+
+    Needed since the supersession workflow grew a SECOND job. The properties
+    below are per-job — one job must be on the named runner and hold the
+    credential, the other must be hosted and hold nothing — and a whole-file
+    assertion cannot express that difference.
+    """
+    code = _code(path)
+    starts = [
+        (match.group(1), match.start())
+        for match in re.finditer(r"^  ([a-z][a-z0-9-]*):\s*$", code, re.MULTILINE)
+    ]
+    # `jobs:` sits at column 0, so every column-2 key under it is a job.
+    assert starts, f"{path.name}: no job headers found; the matcher has drifted"
+    out: dict[str, str] = {}
+    for index, (name, start) in enumerate(starts):
+        end = starts[index + 1][1] if index + 1 < len(starts) else len(code)
+        out[name] = code[start:end]
+    return out
+
+
+# The job that touches the store, per workflow. Named rather than inferred:
+# "the job with the credential" would make the guard depend on the property it
+# is checking.
+MUTATING_JOB = {
+    "private-inventory-supersede.yml": "supersede",
+    "private-inventory-discover.yml": "discover",
+}
+
+
 @pytest.mark.parametrize("path", BOTH, ids=lambda p: p.name)
-def test_neither_workflow_runs_on_a_hosted_runner(path):
-    runs_on = re.findall(r"^\s*runs-on:\s*(.+)$", _code(path), re.MULTILINE)
-    assert len(runs_on) == 1, f"{path.name} declares {len(runs_on)} runs-on"
+def test_the_job_that_touches_the_store_runs_only_on_the_named_runner(path):
+    jobs = _jobs(path)
+    name = MUTATING_JOB[path.name]
+    assert name in jobs, f"{path.name} has no {name!r} job; the guard is pointed at nothing"
+    runs_on = re.findall(r"^\s*runs-on:\s*(.+)$", jobs[name], re.MULTILINE)
+    assert len(runs_on) == 1, f"{path.name}:{name} declares {len(runs_on)} runs-on"
     declared = runs_on[0].strip()
     assert declared == RUNNER, (
-        f"{path.name} pins its runner to {declared!r}, not {RUNNER}. OpenBao is contained "
-        "behind an allowlist with a terminal DROP; a hosted runner arrives from a dynamic "
-        "range, and widening the allowlist to reach one would undo the containment"
+        f"{path.name}:{name} pins its runner to {declared!r}, not {RUNNER}. OpenBao is "
+        "contained behind an allowlist with a terminal DROP; a hosted runner arrives from a "
+        "dynamic range, and widening the allowlist to reach one would undo the containment"
     )
     for hosted in _HOSTED:
         assert hosted not in declared
+
+
+@pytest.mark.parametrize("path", BOTH, ids=lambda p: p.name)
+def test_every_other_job_is_hosted_and_holds_no_credential(path):
+    """A second job is allowed to be hosted, and allowed nothing else.
+
+    The pre-dispatch availability check MUST be hosted — it has to be able to
+    run precisely when the self-hosted runner cannot, which is the whole point
+    of it. What makes that safe is that it holds no secret at all, so the
+    hosted/self-hosted split stays exactly aligned with the credential split.
+    """
+    jobs = _jobs(path)
+    for name, body in jobs.items():
+        if name == MUTATING_JOB[path.name]:
+            continue
+        assert "secrets." not in body, (
+            f"{path.name}:{name} is not the store-touching job and references a secret. A "
+            "hosted job holding a production credential is the arrangement this whole "
+            "workflow is shaped to prevent"
+        )
+        for forbidden in (READER_SECRET, WRITER_SECRET, "BAO_TOKEN", "BAO_ADDR"):
+            assert forbidden not in body, f"{path.name}:{name} names {forbidden}"
 
 
 @pytest.mark.parametrize("path", BOTH, ids=lambda p: p.name)
@@ -178,9 +234,14 @@ def test_the_runner_is_not_indirected_through_a_variable(path):
     `runs-on: ${{ vars.X }}` reads well and is worse here: the variable can be
     changed to a hosted label in repository settings, which touches neither
     workflow nor this guard, and the change would not appear in any diff.
+
+    Checked on EVERY job, not just the store-touching one. A repointable label
+    on the availability check would let it report a runner that is not the one
+    the mutation will queue against.
     """
-    runs_on = re.findall(r"^\s*runs-on:\s*(.+)$", _code(path), re.MULTILINE)[0]
-    assert "vars." not in runs_on and "${{" not in runs_on
+    for name, body in _jobs(path).items():
+        for runs_on in re.findall(r"^\s*runs-on:\s*(.+)$", body, re.MULTILINE):
+            assert "vars." not in runs_on and "${{" not in runs_on, f"{path.name}:{name}"
 
 
 @pytest.mark.parametrize("path", BOTH, ids=lambda p: p.name)
@@ -382,9 +443,12 @@ def test_indirecting_the_runner_through_a_variable_is_caught():
     # The subtler regression: still not hosted, but now repointable in
     # repository settings without a diff anyone would review.
     planted = _executable(_text(SUPERSEDE).replace(RUNNER, "${{ vars.RUNNER }}"))
-    found = re.findall(r"^\s*runs-on:\s*(.+)$", planted, re.MULTILINE)[0]
-    assert "vars." in found
-    assert "vars." not in re.findall(r"^\s*runs-on:\s*(.+)$", _code(SUPERSEDE), re.MULTILINE)[0]
+    found = re.findall(r"^\s*runs-on:\s*(.+)$", planted, re.MULTILINE)
+    assert any("vars." in value for value in found)
+    assert not any(
+        "vars." in value
+        for value in re.findall(r"^\s*runs-on:\s*(.+)$", _code(SUPERSEDE), re.MULTILINE)
+    )
 
 
 def test_planting_a_job_level_env_is_caught():
@@ -557,3 +621,86 @@ def test_a_migration_and_a_retirement_take_different_tools():
     assert (
         'if [ "${KIND}" = "migrate-capture" ]; then' in code
     ), "the branch is not on the reviewed request's kind"
+
+
+# ── Fork-controlled content, and the pre-dispatch gate ──────────────────────
+
+
+@pytest.mark.parametrize("path", BOTH, ids=lambda p: p.name)
+def test_no_workflow_is_triggered_by_pull_request_target(path):
+    """`pull_request_target` runs TRUSTED base-branch code with a write context.
+
+    That is exactly why it bypasses the fork-workflow approval gate, and why
+    the repository-wide `all_external_contributors` setting does not cover it.
+    On a runner that can reach the secret store, executing anything a fork
+    controls would hand that reach to a stranger.
+    """
+    assert "pull_request_target" not in _code(path) or "!=" in _code(
+        path
+    ), f"{path.name} may be triggered by pull_request_target"
+    triggers = _code(path)
+    triggers = triggers[: triggers.index("jobs:")]
+    assert (
+        "pull_request_target" not in triggers
+    ), f"{path.name} declares a pull_request_target trigger"
+
+
+def test_the_mutation_refuses_pull_request_target_and_any_ref_but_main_at_run_time():
+    """Belt and braces with the trigger list, which is one line somebody adds.
+
+    The `if:` on the job is evaluated by GitHub; this is the in-shell refusal,
+    which also survives a job being copied into another workflow.
+    """
+    code = _code(SUPERSEDE)
+    assert 'GITHUB_EVENT_NAME}" = "pull_request_target"' in code
+    assert 'GITHUB_REF}" != "refs/heads/main"' in code
+
+
+def test_planting_a_pull_request_target_trigger_is_caught():
+    planted = _executable(
+        _text(SUPERSEDE).replace(
+            "on:\n  workflow_dispatch:", "on:\n  pull_request_target:\n  workflow_dispatch:"
+        )
+    )
+    header = planted[: planted.index("jobs:")]
+    assert "pull_request_target" in header
+    original = _code(SUPERSEDE)
+    assert "pull_request_target" not in original[: original.index("jobs:")]
+
+
+def test_the_mutation_cannot_queue_against_an_absent_runner():
+    """A job pinned to an absent runner QUEUES, and a queue is not an answer.
+
+    `timeout-minutes` bounds execution rather than queueing — deliberately, so
+    "no runner" never presents as "the run went wrong". The cost is that an
+    operator dispatching against a runner that was never registered learns
+    nothing at all. Availability is therefore established BEFORE the queue, by
+    a job that can always execute, and a failed precondition SKIPS the
+    dependent job rather than queueing it.
+    """
+    code = _code(SUPERSEDE)
+    jobs = _jobs(SUPERSEDE)
+    assert "runner-available" in jobs, "the pre-dispatch availability job is gone"
+    assert "needs: runner-available" in code, (
+        "the mutation does not depend on the availability check, so a failed check would "
+        "leave it queueing anyway"
+    )
+    check = jobs["runner-available"]
+    assert "actions/runners" in check, "the check does not ask which runners are registered"
+    assert '"online"' in check, "the check does not distinguish online from registered"
+    # Fail closed. An unverifiable precondition is not a satisfied one, and
+    # "warn and continue" reproduces the silent queue this job exists to remove.
+    assert "cannot list runners" in check and "exit 1" in check
+
+
+def test_the_availability_check_can_run_when_the_named_runner_cannot():
+    """The property that makes it a PRE-dispatch gate rather than a first step.
+
+    A check that shares the mutation's runner could not have run either, and
+    would queue beside it. It is hosted for exactly that reason, which is only
+    safe because it holds no credential — asserted separately above.
+    """
+    check = _jobs(SUPERSEDE)["runner-available"]
+    runs_on = re.findall(r"^\s*runs-on:\s*(.+)$", check, re.MULTILINE)
+    assert runs_on == ["ubuntu-latest"], runs_on
+    assert RUNNER not in check
