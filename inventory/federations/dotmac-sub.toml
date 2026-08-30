@@ -1,0 +1,38 @@
+# DotMac Sub's federated import.
+#
+# Rule 9 is satisfied: `rename_prefix` is mandatory and present, so imported
+# `up` and `scrape_*` arrive as `federated_up` etc. and a central rule can
+# never mistake Sub's health for a target this plane owns. Census §4 records
+# this relabelling as the one part of the as-built the renderer already
+# matches, and the prefix below is the measured live value.
+
+schema_version = "observability-target.v2"
+kind = "federation"
+name = "dotmac-sub-federation"
+target_id = "dotmac-sub-federation"
+owner = "sub-platform"
+rename_prefix = "federated_"
+
+# THE LARGEST OPEN DECISION IN THIS DOCUMENT, and deliberately not resolved
+# here. `target.schema.json` says in words: "Import deliberately, never
+# `{__name__=~".+"}`." The live federation imports exactly that wildcard, so
+# reproducing the as-built and obeying the contract's guidance point in
+# opposite directions.
+#
+# The wildcard is kept, for one reason: narrowing it means naming the series
+# this plane actually consumes, and getting that list wrong SILENTLY DROPS the
+# series an alert depends on — a rule over a missing series is permanently
+# inactive and reads exactly like "all clear", which is the failure rule 10
+# exists to name. A behaviour-preserving import that a reviewer can object to
+# is safer than a narrowed one nobody verified.
+#
+# Narrowing is Sub's decision, not this repository's: it requires knowing which
+# of Sub's series are consumed centrally, which the product owns. Until then
+# this is a knowing deviation from the contract's guidance rather than an
+# oversight, and it is the first thing to revisit before promotion.
+match = ['{__name__=~".+"}']
+
+[source]
+scheme = "http"
+path = "/federate"
+authenticated = false

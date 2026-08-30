@@ -1,0 +1,33 @@
+# Upstream exporters covering the fleet's hosts and containers, plus the log
+# store's own metrics. No product owns these; platform operations does.
+schema_version = "observability-target.v2"
+kind = "targets"
+product = "fleet-infrastructure"
+owner = "platform-operations"
+
+# Four resolved endpoints (census §4: four node-exporter targets). `expected`
+# is the count that MUST report up — a job resolving to fewer emits no failure
+# of its own, which every alert over it reads as a healthy system.
+[[jobs]]
+job = "node-exporter"
+target_id = "node-exporter"
+scheme = "http"
+metrics_path = "/metrics"
+authenticated = false
+expected = 4
+
+[[jobs]]
+job = "cadvisor"
+target_id = "cadvisor"
+scheme = "http"
+metrics_path = "/metrics"
+authenticated = false
+expected = 1
+
+[[jobs]]
+job = "loki"
+target_id = "loki"
+scheme = "http"
+metrics_path = "/metrics"
+authenticated = false
+expected = 1

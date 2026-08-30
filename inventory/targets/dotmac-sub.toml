@@ -1,0 +1,14 @@
+# DotMac Sub's VictoriaMetrics instance, scraped directly. Sub's federated
+# import is a separate document under inventory/federations/.
+schema_version = "observability-target.v2"
+kind = "targets"
+product = "dotmac-sub"
+owner = "sub-platform"
+
+[[jobs]]
+job = "dotmac-sub-victoriametrics"
+target_id = "dotmac-sub-victoriametrics"
+scheme = "http"
+metrics_path = "/metrics"
+authenticated = false
+expected = 1

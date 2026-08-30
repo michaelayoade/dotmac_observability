@@ -1,0 +1,24 @@
+# MinIO, which exposes cluster-wide and per-node metrics on two separate
+# documented paths and authenticates both.
+schema_version = "observability-target.v2"
+kind = "targets"
+product = "object-storage"
+owner = "platform-operations"
+
+[[jobs]]
+job = "minio-cluster"
+target_id = "minio-cluster"
+scheme = "http"
+metrics_path = "/minio/v2/metrics/cluster"
+authenticated = true
+expected = 1
+path_rationale = "MinIO's own documented cluster metrics endpoint, published in its upstream operator documentation and identical on every MinIO deployment; the path is protocol rather than concealment, and it is not guessable-by-obscurity in any sense."
+
+[[jobs]]
+job = "minio-node"
+target_id = "minio-node"
+scheme = "http"
+metrics_path = "/minio/v2/metrics/node"
+authenticated = true
+expected = 1
+path_rationale = "MinIO's own documented per-node metrics endpoint, the sibling of the cluster path above and equally published upstream; scraping both is how MinIO separates cluster-wide series from per-node series."

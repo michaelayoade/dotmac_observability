@@ -1,0 +1,16 @@
+# ERP is scraped here, but note OBS-19: none of the three live `dotmac_erp`
+# alert rules comes from ERP's rendered Foundation bundle, and adopting that
+# bundle as-is would subtract coverage. Scraping and rule ownership are
+# separate questions; this document settles only the first.
+schema_version = "observability-target.v2"
+kind = "targets"
+product = "dotmac-erp"
+owner = "erp-platform"
+
+[[jobs]]
+job = "dotmac-erp-app"
+target_id = "dotmac-erp-app"
+scheme = "https"
+metrics_path = "/metrics"
+authenticated = true
+expected = 1

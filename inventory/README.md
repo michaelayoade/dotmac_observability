@@ -31,9 +31,25 @@ The block carries no approver, deliberately: the approval is the protected-branc
 merge that accepted the rationale, and a name in the file would be self-attested
 (ADR-0006 §4).
 
-**Populated by PR 3C**, from PR 2's read-only census. The reference fixture at
-`tests/fixtures/reference/inventory/` shows the shape and is not production:
-its digests are placeholders and its one published endpoint is `.invalid`.
+**Populated** for `production` on 2026-08-30, derived from the live host
+rather than composed by hand: intervals, metrics paths, schemes, target counts,
+authentication flags, image digests and evaluator versions were all measured.
+The reference fixture at `tests/fixtures/reference/inventory/` shows the shape
+and is not production: its digests are placeholders and its one published
+endpoint is `.invalid`.
+
+Fifteen logical targets are declared here (fourteen scrape jobs plus one
+federation), against the sixteen the private document holds. The one it does
+not declare is the retired CRM entry, which is what the pending supersession
+retires — see `docs/inventories/observer-as-built.md` §15, and note that the
+supersession is **blocked** on a prior migration of the stored document.
+
+**`validate` cannot yet run to completion over this tree.** The loader requires
+the three `routing/` documents, which are PR 3's scope and are still absent, so
+a full cross-document and resolution pass refuses at load. Each document here
+has been validated against its own contract, and the public/private vocabulary
+reconciles in both directions, but that is not the same as the composed gate
+having run.
 
 **Trap:** `expected` on a scrape job is the number of targets that must report
 up, and it is not decoration. A job that resolves to zero targets emits no

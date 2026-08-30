@@ -1,0 +1,73 @@
+# The production observability control plane.
+#
+# LOGICAL ONLY (ADR-0004). The resolved host identity and SSH alias live in the
+# private inventory under this same `host.target_id`; nothing here says where
+# anything is.
+#
+# Derived from the live host rather than composed by hand: intervals, image
+# digests and evaluator versions were measured on 2026-08-30 (census §14's
+# method), so this document models what runs rather than what somebody
+# remembers running. Three DELIBERATE DELTAS from the as-built are marked
+# below — each is a reviewable decision, not a transcription slip.
+
+schema_version = "observability-control-plane.v2"
+environment = "production"
+release_root = "/opt/observability/releases"
+secrets_dir = "/opt/observability/secrets"
+
+# Measured on the host: global scrape_interval and evaluation_interval are both
+# 15s. `scrape_timeout` is unset in the as-built, which means Prometheus's own
+# 10s default; it is written explicitly here because a rendered configuration
+# should not depend on a default that a future upstream release may change.
+scrape_interval = "15s"
+scrape_timeout = "10s"
+evaluation_interval = "15s"
+
+# ASSUMPTION, flagged for review. The private inventory's `host.target_id` must
+# equal this value, and that field was not readable when this document was
+# written. `dotmac-observe` is the logical name the live configuration already
+# assigns to this host (it is the `instance` label on the node-exporter and
+# openbao jobs), which makes it the most defensible choice — but if the private
+# document disagrees, resolution fails with a host mismatch. That is a LOUD
+# failure at promotion, not a silent one, which is why it is safe to propose.
+[host]
+target_id = "dotmac-observe"
+
+# Digest-pinned by MEASUREMENT (census §2, OBS-02). Both tags float on
+# `:latest` on the host today; these are the digests actually running, and the
+# digest is the identity — the tag is not.
+[prometheus]
+image = "docker.io/prom/prometheus"
+digest = "sha256:e4254400b85610324913f0dc4acf92603d9984e7519414c5a12811aa6146acc3"
+version = "3.11.3"
+# DELIBERATE DELTA 1. The as-built publishes these on every interface; this
+# declares the loopback posture the contract requires (LISTEN-NOT-LOOPBACK) and
+# that docs/SECURITY.md cites. Declaring it does not apply it — the binding
+# changes only at promotion, and closing that gap is OBS-07's lane, which needs
+# proven out-of-band recovery first. A non-loopback address here would be a
+# resolved bind address and therefore private material.
+listen = "127.0.0.1:9090"
+
+[alertmanager]
+image = "docker.io/prom/alertmanager"
+digest = "sha256:51a825c2a40acc3e338fdd00d622e01ec090f72be2b3ea46be0839cd47a4d286"
+version = "0.32.1"
+listen = "127.0.0.1:9093"
+
+# DELIBERATE DELTA 2. The as-built's `external_labels` is EMPTY (OBS-09), so
+# this evaluator stamps nothing on its own series and nothing distinguishes
+# them by environment or control plane. §11 names this as a value the contracts
+# must gain before a faithful render, so it is supplied here rather than
+# reproducing the gap. This is the one place this document deliberately renders
+# something better than what runs.
+[[external_labels]]
+name = "environment"
+value = "production"
+
+[[external_labels]]
+name = "control_plane"
+value = "dotmac-observability"
+
+# No `[smtp]` block: delivery is Telegram-only and Alertmanager's global config
+# carries `resolve_timeout` alone (census §6). An SMTP block is required only
+# when a receiver declares an email integration, and none does.

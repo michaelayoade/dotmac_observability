@@ -1,0 +1,14 @@
+# The Knowledge service.
+schema_version = "observability-target.v2"
+kind = "targets"
+product = "claude-knowledge"
+owner = "platform-operations"
+
+[[jobs]]
+job = "claude-knowledge"
+target_id = "claude-knowledge"
+scheme = "https"
+metrics_path = "/knowledge/metrics"
+authenticated = true
+expected = 1
+path_rationale = "The exporter is mounted under the service's own published routing prefix, which is how every other Knowledge route is addressed; the prefix is part of the service's documented URL layout rather than an attempt to hide the endpoint."
