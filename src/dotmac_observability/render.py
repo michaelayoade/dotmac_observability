@@ -722,8 +722,17 @@ def _rsyslog(state: DesiredState) -> str:
             "directives are positional: an action written above the block that sets",
             "them inherits whatever the previously included file left behind, which",
             "is how a file ends up owned by whoever happened to be configured last.",
+            "",
+            "rsyslog creates NO directory. The tmpfiles configuration rendered",
+            "alongside this file owns the directory and the files, as root, with the",
+            "declared ownership; a privilege-dropped writer that also creates its own",
+            "parents would create them owned by itself, with whatever mode its umask",
+            "gave, and the declaration here would describe something that had already",
+            "happened differently.",
         )
     ]
+    lines.append("")
+    lines.append("$CreateDirs off")
     for entry in syslog.files:
         prefix = "" if entry.synchronous else "-"
         lines += [

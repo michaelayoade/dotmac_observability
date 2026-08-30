@@ -402,3 +402,19 @@ def test_render_refuses_to_write_a_tree_naming_a_retired_product(
     )
     assert code == 1
     assert not output.exists(), "the tree was written before the gate ran"
+
+
+def test_rsyslog_is_told_not_to_create_directories():
+    """The other half of "something else creates the file".
+
+    rsyslog's `omfile` creates parent directories by default. A
+    privilege-dropped writer that also creates its own parents creates them
+    owned by ITSELF with whatever its umask gave — so the tmpfiles declaration
+    would be describing something that had already happened differently, and
+    the ownership contract would silently be whatever won the race.
+
+    It is also what the CI rotation proof hit: `omfile: creating parent
+    directories ... failed: Permission denied`, on a directory that already
+    existed.
+    """
+    assert "$CreateDirs off" in _tree()[RSYSLOG_CONFIG]
