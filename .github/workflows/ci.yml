@@ -272,55 +272,45 @@ jobs:
       - name: Unconfine rsyslogd on this runner, and prove it
         run: |
           set -euo pipefail
-          # Ubuntu ships an AppArmor profile for rsyslogd that permits /var/log
-          # and /etc/rsyslog.d and little else. This job deliberately runs
-          # rsyslogd against an isolated tree, which the profile denies — and
-          # the denial arrives as "could not open config file: Permission
-          # denied" while running as ROOT, which reads as a bug in the proof.
+          # Ubuntu ships an AppArmor profile named `rsyslogd` that permits
+          # /var/log and /etc/rsyslog.d and little else. This job deliberately
+          # runs rsyslogd against an isolated tree, which the profile denies —
+          # and the denial arrives as "could not open config file: Permission
+          # denied" while running as ROOT, which reads as a bug in the proof
+          # rather than as confinement.
           #
-          # The profile is unloaded on this disposable runner rather than the
+          # The profile is torn down on this disposable runner rather than the
           # proof being moved into /var/log, because the whole point is that it
           # never touches the host's real logging. Nothing about AppArmor is
           # under test here.
-          echo "before:"
-          sudo aa-status 2>/dev/null | grep -i rsyslog || echo "  (no rsyslog profile listed)"
+          sudo apt-get install -y -qq apparmor-utils
 
-          # Removed by PROFILE NAME through the securityfs interface, not by
-          # file path. The first attempt matched `/etc/apparmor.d/usr.sbin.rsyslogd`
-          # and then verified by grepping for the string "usr.sbin.rsyslogd" —
-          # but the profile is NAMED `/usr/sbin/rsyslogd`, with slashes. So the
-          # file test could miss, the verification could not match either way,
-          # and the step reported "unconfined" having done nothing. A check that
-          # cannot fail is not a check.
-          for name in /usr/sbin/rsyslogd rsyslogd; do
-            printf '%s' "$name" | sudo tee /sys/kernel/security/apparmor/.remove >/dev/null 2>&1 || true
-          done
-          # And move any profile file aside so nothing reloads it.
-          for profile in /etc/apparmor.d/*rsyslog*; do
-            [ -e "$profile" ] || continue
-            sudo mv "$profile" "${profile}.disabled"
-            echo "moved aside: $profile"
-          done
-
-          echo "after:"
-          remaining=$(sudo aa-status 2>/dev/null | grep -i rsyslogd || true)
-          if [ -n "$remaining" ]; then
-            echo "rsyslogd is STILL confined by AppArmor; the proof cannot run:"
-            echo "$remaining"
+          # SENSITIVITY FIRST. If rsyslogd is not confined to begin with, the
+          # "after" check below would pass without the teardown having done
+          # anything, and the step would report a property it never established.
+          if ! sudo aa-status | grep -q rsyslogd; then
+            echo "rsyslogd is not confined on this image, so the teardown below"
+            echo "would prove nothing. If that is now genuinely true, delete this"
+            echo "step rather than letting it pass vacuously."
             exit 1
           fi
-          echo "  rsyslogd is unconfined"
+          echo "confined before teardown:"
+          sudo aa-status | grep rsyslogd
 
-          # Sensitivity: the verification must be able to see a profile at all.
-          # Grepping aa-status for a name that is never present would pass on a
-          # machine where AppArmor is not running, on one where it is, and on
-          # one where the grep pattern is simply wrong — which is what happened.
-          if ! sudo aa-status >/dev/null 2>&1; then
-            echo "aa-status does not work here, so the check above proved nothing"
-            exit 1
-          fi
-          if ! sudo aa-status | grep -q "profiles are in enforce mode"; then
-            echo "aa-status returned nothing recognisable; the verification is vacuous"
+          # `aa-teardown` unloads every profile. Blunter than removing one, and
+          # chosen after two narrower attempts failed for reasons worth
+          # recording: the profile FILE is `usr.sbin.rsyslogd` while the profile
+          # NAME is `rsyslogd`, so a file-path removal missed it; and writing
+          # the name to securityfs `.remove` left it loaded. A teardown has an
+          # unambiguous success condition, which is the property that matters
+          # more than surgical precision on a runner that is thrown away.
+          sudo aa-teardown
+
+          loaded=$(sudo aa-status | grep -oE '^[0-9]+ profiles are loaded' | grep -oE '^[0-9]+')
+          echo "profiles loaded after teardown: ${loaded}"
+          if [ "${loaded}" != "0" ]; then
+            echo "AppArmor still has ${loaded} profile(s) loaded:"
+            sudo aa-status | head -40
             exit 1
           fi
 
