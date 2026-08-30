@@ -1,0 +1,39 @@
+# The root defaults and the ordered route tree.
+#
+# Measured against the live Alertmanager on 2026-08-30 and reproduced with one
+# DELIBERATE DELTA, marked below.
+
+schema_version = "observability-routing.v2"
+kind = "policies"
+
+# The live root, transcribed exactly.
+[defaults]
+receiver = "default"
+group_by = ["alertname", "severity"]
+group_wait = "10s"
+group_interval = "10s"
+repeat_interval = "1h"
+
+# DELIBERATE DELTA, and the only one in this document. The live configuration
+# has NO child routes at all: every alert falls through the root to `default`.
+# AGENTS.md rule 7 requires that each `warning` and `critical` class reach a
+# DECLARED receiver rather than a fall-through, because "the default catches
+# it" is indistinguishable from "nobody chose where this goes" — and the two
+# read identically right up until somebody changes the default.
+#
+# Both routes below deliver to the same receiver the fall-through already
+# reached, so this is BEHAVIOUR-PRESERVING: no alert changes destination. What
+# changes is that the destination is now written down per severity, which is
+# what a reviewer needs in order to disagree with it.
+#
+# The two classes are the only ones the live rules emit: `alerts.yml` carries
+# 22 `severity: critical` and 30 `severity: warning`, and nothing else.
+[[routes]]
+id = "critical-to-oncall"
+matchers = ['severity="critical"']
+receiver = "default"
+
+[[routes]]
+id = "warning-to-oncall"
+matchers = ['severity="warning"']
+receiver = "default"

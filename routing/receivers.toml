@@ -1,0 +1,29 @@
+# Declared notification destinations.
+#
+# LOGICAL ONLY (ADR-0004). Which token file each credential_ref resolves to,
+# and which chat it reaches, live in the private inventory: a store path
+# describes credential custody and a destination names a real audience.
+#
+# Measured against the live Alertmanager on 2026-08-30: exactly one receiver,
+# with one Telegram integration and `send_resolved: true`. That is reproduced
+# faithfully below.
+
+schema_version = "observability-routing.v2"
+kind = "receivers"
+
+# ASSUMPTION, flagged for review — the same shape and the same reason as
+# `host.target_id` in inventory/control-plane.toml. The private inventory binds
+# `credential_ref` to a store path and a chat id, and that document was not
+# readable when this file was written. `telegram-oncall` is the most defensible
+# logical name for the one live Telegram binding, but if the private document
+# uses a different one, resolution fails with RESOLUTION-UNRESOLVED. That is a
+# LOUD failure at promotion rather than a silent one, which is why proposing it
+# is safe; it is NOT a claim that the name has been verified.
+[[receivers]]
+name = "default"
+owner = "platform-oncall"
+
+  [[receivers.integrations]]
+  type = "telegram"
+  credential_ref = "telegram-oncall"
+  send_resolved = true

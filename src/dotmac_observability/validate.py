@@ -160,6 +160,17 @@ _INTEGER = re.compile(r"^-?[0-9]+$")
 # refused at append. Every token below names a counter that only moves when a
 # sample the scrape returned was NOT stored, so a predicate mentioning none of
 # them is a predicate about something other than whether the data arrived.
+# A predicate is DELTA-SHAPED when its counter is wrapped in one of these.
+#
+# The distinction is condition 4 of a `deployed_repaired` verdict, and it is
+# the one an acceptance pass gets wrong. `<counter> == 0` is satisfiable by
+# RESETTING the counter, or by a fresh TSDB, or by a container that restarted —
+# and a predicate made true that way is indistinguishable from one made true by
+# a repair. Observer's counter stands at ~1.86 million historical rejections;
+# the assertion that matters is that it does not GROW from a recorded baseline,
+# which is a statement about a delta and cannot be made true by deletion.
+_RANGE_FUNCTIONS = frozenset({"increase", "rate", "irate", "delta", "idelta", "resets"})
+
 _INGESTION_TOKENS = frozenset(
     {
         "duplicate_timestamp",
@@ -1133,6 +1144,20 @@ def _bundle_findings(state: DesiredState) -> list[Finding]:
                     "the integrity predicate mentions none of "
                     f"{', '.join(sorted(_INGESTION_TOKENS))}; a gate whose second predicate is "
                     "not about ingestion is a gate with one predicate and a longer name",
+                )
+            )
+        if not any(f"{name}(" in gate.integrity for name in _RANGE_FUNCTIONS):
+            findings.append(
+                Finding(
+                    "GATE-INTEGRITY-NOT-DELTA",
+                    location,
+                    "the integrity predicate compares a counter directly instead of wrapping it "
+                    f"in one of {', '.join(sorted(_RANGE_FUNCTIONS))}. A bare `counter == 0` is "
+                    "made true by RESETTING the counter, by a fresh TSDB, or by a container "
+                    "restart, and a predicate satisfied that way cannot be told "
+                    "satisfied by a repair. This host's counter stands at roughly 1.86 million "
+                    "historical rejections and must stay visible; the assertion is that it does "
+                    "not grow from a recorded baseline",
                 )
             )
     return findings

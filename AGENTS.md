@@ -323,6 +323,50 @@ review discipline, not a guard, and it is a defect to describe it as enforced.
     comment; now enforced.
     — `tests/architecture/test_ci_matches_the_makefile.py`
 
+29. **`rendered_guarded` is not `deployed_repaired`.** A defect closed in the
+    renderer is unrepresentable in newly rendered bundles, which is durable and
+    real — and it is not a repair, because the host is not yet running a
+    rendered bundle. The second verdict requires all six of: the control plane
+    authorizes the exact bundle digest; Foundation applies those exact bytes;
+    live read-back matches the whole rendered tree, compared rather than
+    sampled; every target healthy AND zero new rejected samples against a
+    RECORDED baseline; the live probes pass on BOTH address families with a
+    positive control in the same pass; and rollback restores the prior digest
+    and produces a receipt. Claiming the second while holding the first is the
+    error this vocabulary exists to prevent.
+    — `docs/inventories/observer-as-built.md` §17
+
+30. **An integrity predicate is DELTA-SHAPED, and the counter is never reset.**
+    `<counter> == 0` is satisfiable by resetting the counter, by a fresh TSDB
+    or by a container restart, and a predicate made true that way cannot be
+    told from one made true by a repair. The counter on this host stands at
+    1,864,926 historical rejections and must stay visible; what is asserted is
+    that it does not grow from a recorded baseline.
+    — `GATE-INTEGRITY-NOT-DELTA`, `tests/unit/test_bundle.py`
+
+31. **A job that cannot run must FAIL, never queue.** A job pinned to an absent
+    or offline runner queues indefinitely — `timeout-minutes` bounds execution,
+    not queueing — so an operator learns nothing. Availability is established
+    BEFORE the queue by a job that can always execute, which the mutation
+    `needs:`; a failed precondition skips the dependent job instead of queueing
+    it. The check fails closed when it cannot read the runner list, because an
+    unverifiable precondition is not a satisfied one. It is hosted precisely so
+    it can run when the named runner cannot, which is safe only because it
+    holds no credential — and that is asserted, not assumed.
+    — `tests/architecture/test_supersession_workflow_cannot_leak.py`
+
+32. **No workflow may execute fork-controlled content on these runners.**
+    `pull_request_target` runs trusted base-branch workflow code with a
+    write-capable context against a fork's head, which is exactly why it
+    bypasses the fork-workflow approval gate — and the repository-wide
+    `all_external_contributors` setting does not cover it. Refused
+    repository-wide rather than only where a credential lives today, because
+    the same runners serve every workflow and a job can be given a secret
+    tomorrow. Checking out `pull_request.head.sha` under that trigger is the
+    shape that turns it into arbitrary code execution, and is refused by name.
+    — `tests/architecture/test_ci_matches_the_makefile.py`,
+      `tests/architecture/test_supersession_workflow_cannot_leak.py`
+
 ---
 
 ## The line this repository must not cross

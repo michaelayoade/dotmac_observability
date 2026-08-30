@@ -73,7 +73,87 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # ── The pre-dispatch gate ─────────────────────────────────────────────────
+  #
+  # A job pinned to an absent runner QUEUES. It is not failed, because
+  # `timeout-minutes` bounds execution rather than queueing — which is
+  # deliberate, so "no runner" never presents as "the run went wrong". The cost
+  # of that correctness is that an operator who dispatches against a runner
+  # that was never registered, or that is offline, learns nothing at all: the
+  # run simply sits there.
+  #
+  # So availability is established BEFORE the queue, by a job that can always
+  # execute, and the mutation `needs:` it. A failed precondition SKIPS the
+  # dependent job rather than queueing it, which is the difference between an
+  # answer and a wait.
+  #
+  # It holds no credential. It runs hosted precisely because it must be able to
+  # run when the self-hosted runner cannot, and a hosted runner is exactly what
+  # the mutation itself must never be — so the two are kept in separate jobs
+  # rather than the check being a step inside the job it is checking, which
+  # could not have run either.
+  runner-available:
+    name: Refuse to queue against an absent or offline runner
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      # Listing self-hosted runners needs this and nothing else. It is granted
+      # to THIS job only; the mutation job below keeps `contents: read`.
+      administration: read
+    steps:
+      - name: A runner carrying the required labels is registered and online
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh api "repos/${GITHUB_REPOSITORY}/actions/runners" > runners.json 2>err.txt; then
+            # FAIL CLOSED. An unverifiable precondition is not a satisfied one,
+            # and the alternative — warn and continue — reproduces exactly the
+            # silent queue this job exists to remove.
+            echo "cannot list runners for ${GITHUB_REPOSITORY}:"
+            cat err.txt
+            echo
+            echo "This job needs the 'administration: read' permission. Do not skip"
+            echo "the check to get past this: an unread precondition and a satisfied"
+            echo "one are the same green tick."
+            exit 1
+          fi
+
+          total=$(jq -r '.total_count' runners.json)
+          echo "runners registered on this repository: ${total}"
+
+          matching=$(jq -r '
+            [ .runners[]
+              | select([.labels[].name] | index("self-hosted"))
+              | select([.labels[].name] | index("dotmac-control-runner"))
+            ]' runners.json)
+
+          count=$(printf '%s' "$matching" | jq -r 'length')
+          if [ "${count}" -eq 0 ]; then
+            echo "no runner carries both 'self-hosted' and 'dotmac-control-runner'."
+            echo "Dispatching would queue this workflow indefinitely. Register the"
+            echo "runner first; see docs/runbooks/migrate-the-capture-format.md."
+            exit 1
+          fi
+
+          online=$(printf '%s' "$matching" | jq -r '[.[] | select(.status == "online")] | length')
+          if [ "${online}" -eq 0 ]; then
+            echo "${count} matching runner(s) are registered and NONE is online:"
+            printf '%s' "$matching" | jq -r '.[] | "  \(.name): status=\(.status) busy=\(.busy)"'
+            echo "Registered-but-offline queues exactly as absent does."
+            exit 1
+          fi
+
+          # Reported, not refused. A busy runner finishes its current job and
+          # takes this one; that is a wait with a known end, unlike an absent
+          # one.
+          printf '%s' "$matching" | jq -r '.[] | "  \(.name): status=\(.status) busy=\(.busy)"'
+          echo "${online} matching runner(s) online"
+
   supersede:
+    needs: runner-available
     name: Apply a reviewed retirement to the private inventory
     # The named dedicated runner. NOT Observer, not any product host, and not
     # the Foundation test host. It polls OUTBOUND and is never reached; nothing
@@ -118,6 +198,28 @@ jobs:
           if [ "${RUNNER_ENVIRONMENT:-}" != "self-hosted" ]; then
             echo "this workflow must run on the named fixed-egress runner, not on a"
             echo "hosted runner reached from a dynamic address range"
+            exit 1
+          fi
+
+      - name: Refuse fork-controlled content on this runner
+        run: |
+          set -euo pipefail
+          # `pull_request_target` runs TRUSTED base-branch workflow code with a
+          # write-capable context, which is exactly why it bypasses the
+          # fork-workflow approval gate — and `all_external_contributors` does
+          # not cover it. On a runner that can reach the secret store, executing
+          # anything a fork controls would hand that reach to a stranger.
+          #
+          # This workflow is dispatch-only from protected main, so the condition
+          # should be impossible. It is checked anyway: "impossible" is a
+          # property of the current trigger list, and a trigger list is one line
+          # somebody adds later.
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request_target" ]; then
+            echo "pull_request_target must never run on this runner"
+            exit 1
+          fi
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "refusing to run against ${GITHUB_REF}; protected main only"
             exit 1
           fi
 

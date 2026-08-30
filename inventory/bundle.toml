@@ -35,22 +35,34 @@ reject_older_than = "168h"
 ingestion_rate_mb = 16
 ingestion_burst_mb = 24
 
+  # PINNED BY MEASUREMENT 2026-08-30, replacing the deliberate all-zero
+  # placeholder this file shipped with. The three runtimes below all float on
+  # `:latest` on the host, so what ran yesterday and what runs after the next
+  # restart were two deployments with one description (census §2, OBS-02).
+  # These are the digests the running containers actually resolve to, read from
+  # `docker image inspect .RepoDigests` on the named host; the digest is the
+  # identity and the tag is not.
+  #
+  # The placeholder was not a stub to be tidied away: it was load-bearing while
+  # the measurement was outstanding, because an all-zero digest matches no
+  # image and fails at pull time, whereas a plausible-looking wrong one would
+  # have promoted something. Replacing it is the measurement landing, not the
+  # removal of scaffolding.
   [loki.runtime]
   image = "docker.io/grafana/loki"
-  digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-  # PLACEHOLDER DIGEST, and deliberately an obviously invalid one rather than a
-  # plausible wrong one. The three runtimes below are on `:latest` and their
-  # running digests were not measured in the pass that produced this document.
-  # A promotion resolves and pins them; until then this file must FAIL to
-  # promote rather than promote something. An all-zero digest matches no image,
-  # so the failure is at pull time and unmistakable.
+  digest = "sha256:73e905b51a7f917f7a1075e4be68759df30226e03dcb3cd2213b989cc0dc8eb4"
   listen = "127.0.0.1:3100"
 
 [promtail]
 
   [promtail.runtime]
   image = "docker.io/grafana/promtail"
-  digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  digest = "sha256:6cfa64ec432b24a912d640e2edb940eeae2666f61861a66c121d763dd7241381"
+  # Evidence, never the pin. Read from the image's own
+  # org.opencontainers.image.version label; Loki's and Grafana's images carry
+  # no such label, so neither declares a version rather than one being invented
+  # from a tag that floats.
+  version = "24.04"
   listen = "127.0.0.1:9080"
 
   # DELIBERATE DELTA. The as-built ships `/var/log/*.log` and the container
@@ -86,7 +98,7 @@ ingestion_burst_mb = 24
 
   [grafana.runtime]
   image = "docker.io/grafana/grafana"
-  digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  digest = "sha256:0f86bada30d65ef9d0183b90c1e2682ac92d53d95da8bed322b984ea78a4a73a"
   listen = "127.0.0.1:3000"
 
   [[grafana.datasources]]
