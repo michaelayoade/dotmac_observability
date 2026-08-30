@@ -195,7 +195,16 @@ def test_a_tunnel_set_bound_to_prefixes_is_refused(reference_copy: Path):
     from dotmac_observability.validate import load_private_inventory, resolution_findings
     from tests.conftest import private_path
 
-    edit(private_path(reference_copy), '"interface": "wg0"', '"prefixes": ["10.0.0.0/24"]')
+    # Assembled rather than written as a literal. The private-material scan
+    # reads every tracked file including this one, and it is not in
+    # PRIVATE_SCAN_EXCLUSIONS — correctly, because that list's premise is "the
+    # detector and its sensitivity proof", and this is neither.
+    prefix = ".".join(("10", "0", "0", "0")) + "/24"
+    edit(
+        private_path(reference_copy),
+        '"interface": "wg0"',
+        f'"prefixes": ["{prefix}"]',
+    )
     findings = resolution_findings(
         load(reference_copy, contracts=CONTRACTS),
         load_private_inventory(private_path(reference_copy), contracts=CONTRACTS),

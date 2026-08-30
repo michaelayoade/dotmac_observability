@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dotmac.io/schemas/observability/private-inventory-capture.v1.json",
+  "title": "observability-private-inventory.v1 (PROPOSED)",
+  "description": "The PRE-CONTRACT capture format, written down so a document already stored in it can be READ and migrated rather than hand-edited.  It is not a second private-inventory contract and nothing new may be written against it. It is the shape the 2026-08-29 census produced in PR #2, three PRs before ADR-0006 accepted `observability-private-inventory.v1` in PR #9. The stored production document declares `schema_version = \"observability-private-inventory.v1 (PROPOSED)\"` and yields 68 errors against the accepted contract, which is why both supersession tools fail at their first step: they load the previous version through the accepted contract before anything else happens.  Writing the old shape down is what turns that from a wall into a migration. `dotmac-observability inventory-classify` can now say WHICH format the store holds and refuse early with an instruction, instead of printing a schema error list that reads like a corrupt document. `inventory-migrate` can read it and produce an accepted-contract document whose values all came from the store -- which is the only way to provision `host.identity` and `host.ssh_alias` without a resolved value passing through public Git or a CI input.  THIS SCHEMA IS PUBLIC AND EVERY INSTANCE IS PRIVATE, exactly as for the accepted contract, and for the same reason: a shape discloses nothing.  It is deliberately PERMISSIVE about leaf types and STRICT about keys. The key set is what the census recorded in `docs/inventories/observer-as-built.md` section 15; the leaf types were never read out, and a contract that invented them would be asserting something nobody measured. The migration closes that gap the honest way -- it refuses, naming the key, when a leaf is not a shape it can map, so a guess can never reach the store.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "version",
+    "environment",
+    "targets"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "observability-private-inventory.v1 (PROPOSED)"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "environment": {
+      "type": "string",
+      "minLength": 1
+    },
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/captured_target"
+      },
+      "description": "Federations are FOLDED IN here rather than held in their own array, which is the single largest structural difference from the accepted contract: the census recorded 16 entries, one of which is the federation. The migration separates them by asking the PUBLIC inventory which logical ids are federations -- never by pattern-matching a name."
+    },
+    "receiver_bindings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/captured_receiver"
+      }
+    },
+    "alertmanager_endpoints": {
+      "description": "Refused by the accepted contract's closed object. Carried here so the migration can see it and say so; see `docs/adr/0008-the-observability-bundle.md` for the decision on where it goes."
+    },
+    "captured_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "captured_from": {
+      "type": "string",
+      "minLength": 1
+    },
+    "note": {
+      "type": "string"
+    }
+  },
+  "$defs": {
+    "captured_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_id", "resolved_endpoints"],
+      "properties": {
+        "target_id": { "type": "string", "minLength": 1 },
+        "resolved_endpoints": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Renamed to `endpoints` by the accepted contract."
+        },
+        "credential": {
+          "description": "Leaf shape not measured. The migration accepts an object carrying `openbao_path` and `file_name`, and refuses anything else by naming the target_id and the key -- never by inventing a mapping."
+        },
+        "metrics_path": { "type": "string" },
+        "params": {
+          "description": "One of the two gaps section 15 identified in the ACCEPTED contract rather than in this one. Without it the OpenBao job scrapes JSON instead of Prometheus exposition, so dropping it on migration would silently break a live target. It moves to the PUBLIC target document, where scrape protocol belongs."
+        },
+        "scheme": { "type": "string" },
+        "static_labels": {
+          "description": "The other gap. The as-built assigns logical `instance` labels rather than letting them default to the endpoint, and neither half of the accepted contract had anywhere to put them -- so byte-parity with the as-built was impossible for every job carrying one. It moves to the PUBLIC target document: a logical label value is not a resolved address, and the private-material scan is what keeps it from becoming one."
+        },
+        "tls_config": {
+          "description": "Neither carried nor silently dropped: the migration REFUSES a target that has one, because a TLS server-identity binding is private material with no home in the accepted contract, and dropping it would change how a live target is verified without saying so."
+        }
+      }
+    },
+    "captured_receiver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["receiver"],
+      "properties": {
+        "receiver": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Renamed to `credential_ref` by the accepted contract."
+        },
+        "credential_file": {
+          "description": "The accepted contract requires a `credential` OBJECT carrying both an `openbao_path` and a `file_name`; this capture holds only the file. The migration cannot invent a store path, so it refuses a receiver whose binding it cannot complete."
+        },
+        "kind": { "type": "string" },
+        "destination": { "type": "string" }
+      }
+    }
+  }
+}
