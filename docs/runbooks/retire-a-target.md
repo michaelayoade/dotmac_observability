@@ -173,15 +173,28 @@ wrong event, and somebody proceeds on a prerequisite that was never actually
 met. Rows 3 and 4 were briefly muddled this way — see "One correction to the
 record" below.
 
-| # | Prerequisite | Gated on |
-| --- | --- | --- |
-| 1 | Public inventory populated and reviewed (lane 3C) | — blocks everything |
-| 2 | **WireGuard tunnel to the secret store proven** | Michael's ruling: no credential crosses the plaintext listener |
-| 3 | Runner access **bound to the proven tunnel identity**, narrowly scoped | 2 |
-| 4 | Reader and writer identities, then the workflow secrets | 3 |
-| 5 | `private-inventory` environment configured | 4 |
-| 6 | Discovery run once, shape confirmed into a committed request | 5 |
-| 7 | Supersession dispatched | 6 |
+| # | Prerequisite | State | Gated on |
+| --- | --- | --- | --- |
+| 1 | Public inventory populated and reviewed (lane 3C) | outstanding | — blocks everything |
+| 2 | WireGuard tunnel to the secret store proven | **met 2026-08-30** | Michael's ruling: no credential crosses the plaintext listener |
+| 3 | Runner access **bound to the proven tunnel identity**, narrowly scoped | **met 2026-08-30** | 2 |
+| 4 | Reader and writer identities, then the workflow secrets | outstanding | 3 |
+| 5 | `private-inventory` environment configured | outstanding | 4 |
+| 6 | Discovery run once, shape confirmed into a committed request | outstanding | 5 |
+| 7 | Supersession dispatched | outstanding | 6 — and Michael's explicit authorization |
+
+Rows 2 and 3 were met in the form row 3 was **rewritten** to, which is the
+check worth making rather than assuming: access is bound to a tunnel identity,
+and the runner's ordinary address was never added to the plaintext listener's
+allowlist. Verified in both directions — the tunnel-side listener reachable,
+the ordinary address refused by a terminal DROP. Recorded in
+`docs/inventories/observer-as-built.md` §13.
+
+Nothing in either workflow changed to accommodate the new transport, and that
+is worth one sentence: the store's address was always a secret and the runner
+was always pinned by label, so a change of transport touched configuration
+rather than code. A design that had hardcoded either would have needed editing
+here.
 
 ### Row 3 is a tunnel identity, not a source allowlist
 
@@ -293,12 +306,29 @@ path. The split is doing real work: discovery needs no write capability at all,
 and the writer needs no list capability. **A single identity that can do both
 is the thing to eliminate, not a convenience to preserve.**
 
-Plus `OPENBAO_ADDR`, `OBSERVABILITY_PRIVATE_INVENTORY_MOUNT` and
-`OBSERVABILITY_PRIVATE_INVENTORY_PATH`, and
-`OBSERVABILITY_PRIVATE_INVENTORY_FIELD` only where the shape is `field`. All are
-credential-custody layout and therefore private under ADR-0004, which is why
-they are secrets rather than values written down here. Both workflows refuse if
-any required one is empty.
+The complete set the two workflows read, so nothing has to be inferred at
+provisioning time:
+
+| Secret | Required | Value |
+| --- | --- | --- |
+| `OPENBAO_ADDR` | always | The store's **tunnel-side** endpoint. Not its ordinary address — that path is refused for the runner by a terminal DROP, and putting it here would produce a failure that looks like a broken store. |
+| `OPENBAO_INVENTORY_READER_TOKEN` | discovery | read only |
+| `OPENBAO_INVENTORY_WRITER_TOKEN` | mutation | read, CAS update, read-back |
+| `OBSERVABILITY_PRIVATE_INVENTORY_MOUNT` | always | KV mount |
+| `OBSERVABILITY_PRIVATE_INVENTORY_PATH` | always | path to the document |
+| `OBSERVABILITY_PRIVATE_INVENTORY_FIELD` | only where the shape is `field` | the field name |
+
+Every one is credential-custody layout or a resolved endpoint, therefore
+private under ADR-0004, which is why they are secrets rather than values
+written down here. Both workflows refuse if any required one is empty, and
+neither improvises a default.
+
+`OPENBAO_ADDR` deserves the extra sentence in that table. The runner reaches
+the store **through the tunnel and only through the tunnel**; the ordinary
+address is deliberately refused. A first run configured against the ordinary
+address would fail in a way that reads like a broken store rather than a
+misconfigured secret, and that misreading has already happened three times on
+this fleet in a single day (`observer-as-built.md` OBS-23).
 
 **4. Configure the `private-inventory` environment**: deployment branch
 restricted to `main`, **no wait timer**, required reviewer **`michaelayoade`**,

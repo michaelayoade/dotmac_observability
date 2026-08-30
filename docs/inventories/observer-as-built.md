@@ -482,6 +482,8 @@ delta this bundle has to carry.
 | --- | --- | --- |
 | OBS-20 | medium | **Grafana dashboards and the Loki/promtail configuration are outside both the census and the planned bundle.** The change had to edit dashboard JSON and a template variable that nothing owns, reviews or renders, so the stack has a second unversioned edit surface with the same properties OBS-01 describes. **Accepted 2026-08-29 as scope, not carried as a gap — see `docs/adr/0007-the-controller-owned-release-boundary.md`:** the first adopter brings ALL controller-owned deployment configuration under one release boundary, and the over-broad "every running byte" formulation is withdrawn in favour of *every controller-owned image and deployment-relevant configuration byte explained by an authorized digest*. |
 | OBS-21 | low | **promtail stamps a retired host label on surviving logs.** Logs from the `son_erp` workload still arrive labelled with the decommissioned CRM host's name, because the shipper's label was never updated when the workload was rehomed. It is a promtail configuration fact, so it belongs to this repository's scope, and it is a worked example of OBS-20: no gate reads that file. ADR-0007 brings that file inside the release boundary, which turns this from a curiosity nobody owns into a defect repairable through the promotion path rather than by hand. |
+| OBS-22 | info | **Observer's firewall chains are iptables, so the rendered interface match is `-i wg0`** — the nftables spelling would be wrong there. The `iif`-resolves-at-load boot hazard is **nftables-only and applies to the control runner, not Observer**; carrying that note across would send somebody hunting a boot problem that cannot occur on this host. Detail in §13. |
+| OBS-23 | medium | **A correctly-functioning deny-by-default control was read as a broken host, three times on 2026-08-29.** The tunnel's first probe failed with the ACL innocent: the prober's own egress policy permitted ICMP but not TCP, so ping succeeded while TCP was dropped. A successful ping is not reachability evidence for TCP when egress policy is protocol-scoped. Detail and the general prior in §13. |
 
 ### An inconsistency noticed while amending, and deliberately not repaired
 
@@ -490,3 +492,93 @@ which is 34. One of the two numbers is wrong and this amendment has no evidence
 for which. It is flagged rather than corrected, because guessing at a measured
 figure is how a census stops being evidence. The change above added two further
 backup files, so whichever figure is right is now two low.
+
+## 13. The control path to the secret store — 2026-08-30
+
+Recorded because it changes what governs privileged access to Observer's
+secret store, and because two findings from the apply are reusable well beyond
+it.
+
+Same provenance caveat as §12: **reported by the operator who made the change**,
+not independently measured by this repository. Addresses, ports and the tunnel's
+subnet are resolved material under ADR-0004 and appear nowhere below; this
+repository's own private-material scanner was run against a draft of this
+section carrying them and refused it, which is how the wording arrived at
+logical terms.
+
+### What changed
+
+A WireGuard tunnel now carries the control runner's access to the secret store:
+a point-to-point `/30`, Observer at one end and `dotmac-control-runner` at the
+other. Handshake established, round-trip latency approximately 146 ms.
+
+Verified in both directions, which is the part that matters:
+
+| Path | Result |
+| --- | --- |
+| Runner → the store's **tunnel-side** listener | reachable |
+| Runner → the store's **ordinary** address | **refused**, terminal DROP |
+
+Persisted, reloaded, controls repeated, rollback cancelled.
+
+The second row is the finding, not a footnote. The runner's access is bound to
+the **tunnel identity** and its ordinary address was never added to the
+plaintext listener's allowlist — so the containment holds on the path the
+runner does not use, while the path it does use is authenticated by how the
+channel was established rather than by what a packet claims about its source.
+
+### The ACL rows gained an interface field
+
+Rows are now `family|cidr|iface|enforced|label`, and every pre-existing row was
+written out with an explicit `any` rather than left empty. **An omission with
+an ambiguous meaning is not a default**, and the difference between "this rule
+deliberately matches any interface" and "somebody forgot the field" is exactly
+the kind of thing a later reader resolves in whichever direction suits them.
+
+`required.assert` now asserts the `cidr|iface` **tuple**. A CIDR-only assertion
+passes on a rule that has silently lost its `-i`, which would leave the
+assertion green while the property it exists to protect was gone — the same
+shape as the census's own inert IPv6 rules, and as the `SUPERSEDE-NO-CHANGE`
+check that compared the wrong digests.
+
+Under Observer's `rp_filter = 2`, that interface match is what makes tunnel
+identity **real rather than forgeable**. Without it the rule is a source claim,
+and a source claim is something a packet asserts about itself.
+
+### OBS-22 — the rendered firewall form is iptables, and one hazard does not travel
+
+Observer's `OB8200-*` chains are **iptables**, so the rendered match is
+`-i wg0`. The nftables spelling would have been wrong there.
+
+Related and more important, because it is the kind of note that causes wasted
+work: the **`iif`-resolves-at-load boot hazard is nftables-only, and applies to
+the runner, not to Observer.** Do not carry that hazard note across to
+Observer's rules. Doing so would send somebody hunting a boot problem that
+cannot occur on that host — a hazard recorded against the wrong system is worse
+than one not recorded at all, because it is acted on.
+
+### OBS-23 — a working deny-by-default control read as a broken host, three times in one day
+
+The first tunnel probe failed and **the ACL was innocent**. DNAT showed zero
+packets. The runner's own deny-by-default *egress* firewall was dropping the
+attempt: it permits ICMP but not TCP to unlisted addresses.
+
+Which is precisely why **ping succeeded and TCP did not**, and that asymmetry
+is the diagnostic signature worth remembering:
+
+> A successful ping is not reachability evidence for TCP when egress policy is
+> protocol-scoped. Before concluding a target is broken, check the **prober's
+> own egress**.
+
+This was the third time on 2026-08-29 that a correctly-functioning
+deny-by-default control was first read as a broken host — alongside the store's
+port being twice mis-called publicly reachable, and this repository's own
+coordinator briefly reading a closed inbound SSH port as an unprovisioned VM.
+The pattern is consistent enough to name: **in a fleet that has recently been
+contained, the prior for "unreachable" shifts from "it is broken" to "a control
+is working".**
+
+The repair went into the egress refresh script rather than only the live rule
+set, so it survives the refresh timer. A fix applied only to the running state
+is undone by the thing that regenerates it — the same lesson `AGENTS.md` rule 2
+states for `/opt/observability`.
