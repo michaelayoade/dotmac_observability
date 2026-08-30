@@ -269,50 +269,36 @@ jobs:
           logrotate --version | head -1
           rsyslogd -v | head -1
 
-      - name: Unconfine rsyslogd on this runner, and prove it
+      - name: Take an unconfined copy of rsyslogd
         run: |
           set -euo pipefail
-          # Ubuntu ships an AppArmor profile named `rsyslogd` that permits
-          # /var/log and /etc/rsyslog.d and little else. This job deliberately
-          # runs rsyslogd against an isolated tree, which the profile denies —
-          # and the denial arrives as "could not open config file: Permission
-          # denied" while running as ROOT, which reads as a bug in the proof
-          # rather than as confinement.
+          # Ubuntu confines /usr/sbin/rsyslogd to /var/log and /etc/rsyslog.d.
+          # This proof deliberately runs against an isolated tree elsewhere, and
+          # the denial then presents as "could not open config file: Permission
+          # denied" while running as ROOT — the exact sentence the production
+          # fault produces, which is the one thing this proof must never be
+          # confused with.
           #
-          # The profile is torn down on this disposable runner rather than the
-          # proof being moved into /var/log, because the whole point is that it
-          # never touches the host's real logging. Nothing about AppArmor is
-          # under test here.
-          sudo apt-get install -y -qq apparmor-utils
-
-          # SENSITIVITY FIRST. If rsyslogd is not confined to begin with, the
-          # "after" check below would pass without the teardown having done
-          # anything, and the step would report a property it never established.
-          if ! sudo aa-status | grep -q rsyslogd; then
-            echo "rsyslogd is not confined on this image, so the teardown below"
-            echo "would prove nothing. If that is now genuinely true, delete this"
-            echo "step rather than letting it pass vacuously."
-            exit 1
-          fi
-          echo "confined before teardown:"
-          sudo aa-status | grep rsyslogd
-
-          # `aa-teardown` unloads every profile. Blunter than removing one, and
-          # chosen after two narrower attempts failed for reasons worth
-          # recording: the profile FILE is `usr.sbin.rsyslogd` while the profile
-          # NAME is `rsyslogd`, so a file-path removal missed it; and writing
-          # the name to securityfs `.remove` left it loaded. A teardown has an
-          # unambiguous success condition, which is the property that matters
-          # more than surgical precision on a runner that is thrown away.
-          sudo aa-teardown
-
-          loaded=$(sudo aa-status | grep -oE '^[0-9]+ profiles are loaded' | grep -oE '^[0-9]+')
-          echo "profiles loaded after teardown: ${loaded}"
-          if [ "${loaded}" != "0" ]; then
-            echo "AppArmor still has ${loaded} profile(s) loaded:"
-            sudo aa-status | head -40
-            exit 1
-          fi
+          # AppArmor profiles are attached to a PATH, so a copy outside
+          # /usr/sbin matches no profile. Two narrower approaches were tried
+          # first and are recorded because each failed in a way that looked like
+          # success: removing the profile by file path missed it (the file is
+          # `usr.sbin.rsyslogd`, the profile is named `rsyslogd`), and
+          # `aa-teardown` was refused by the kernel with repeated
+          # `printf: I/O error` — this runner does not permit unloading profiles
+          # at all.
+          #
+          # The copy is not trusted either: the proof reads
+          # /proc/<pid>/attr/current at startup and refuses if the daemon is
+          # confined, so this step failing quietly cannot turn into a proof that
+          # reports the wrong thing.
+          work=/var/tmp/dotmac-rotation-proof
+          sudo rm -rf "$work"
+          sudo mkdir -p "$work"
+          sudo cp /usr/sbin/rsyslogd "$work/rsyslogd"
+          sudo chmod 0755 "$work/rsyslogd"
+          echo "confined profiles mentioning rsyslogd (for the record):"
+          sudo aa-status 2>/dev/null | grep -i rsyslog || echo "  none"
 
       - name: Render the reference bundle
         run: |
@@ -343,10 +329,10 @@ jobs:
           # outside its own working tree — asserted by
           # tests/architecture/test_ci_matches_the_makefile.py.
           work=/var/tmp/dotmac-rotation-proof
-          sudo rm -rf "$work"
           sudo python3 scripts/rotation_proof.py \
             --rendered "${RUNNER_TEMP}/rendered" \
-            --work "$work"
+            --work "$work" \
+            --rsyslogd "$work/rsyslogd"
 
   schemas:
     name: Contracts are valid JSON Schema 2020-12

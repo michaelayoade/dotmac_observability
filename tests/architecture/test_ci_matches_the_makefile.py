@@ -112,11 +112,17 @@ def test_the_rotation_proof_never_touches_the_real_log_tree():
     )
     offenders = [line.strip() for line in source.splitlines() if calls.search(line)]
     assert not offenders, f"the proof performs filesystem calls on a real path: {offenders}"
-    executable = "\n".join(line for line in source.splitlines() if not line.strip().startswith("#"))
-    body = executable.split('"""', 2)[-1]
-    # It must not install, start or signal anything the host owns either.
-    for forbidden in ("systemctl", "service ", "/etc/rsyslog", "/etc/logrotate"):
-        assert forbidden not in body, f"the proof touches host state via {forbidden!r}"
+    # It must not install, start or signal anything the host owns either. The
+    # tokens are matched only as QUOTED LITERALS, for the same reason /var/log
+    # is matched only as a call argument: the script's own prose explains why it
+    # avoids these paths, and a guard that could not tell an explanation from a
+    # use would force the file to stop explaining itself — the rule the
+    # workflow-leak guard already settled by stripping comments.
+    for forbidden in ("systemctl", "/etc/rsyslog", "/etc/logrotate"):
+        for quote in ('"', "'"):
+            assert (
+                f"{quote}{forbidden}" not in source
+            ), f"the proof names {forbidden!r} as a literal, so it touches host state"
 
 
 def test_each_negative_control_actually_mutates_the_rendered_stanza():

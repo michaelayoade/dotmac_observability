@@ -223,16 +223,49 @@ def _rsyslog_config(work: Path, rendered: Path, logs: Path, spool: Path, socket:
     return config
 
 
-def _start(config: Path, pidfile: Path) -> subprocess.Popen[bytes]:
+def _start(binary: str, config: Path, pidfile: Path) -> subprocess.Popen[bytes]:
     process = subprocess.Popen(
-        ["rsyslogd", "-n", "-f", str(config), "-i", str(pidfile)],
+        [binary, "-n", "-f", str(config), "-i", str(pidfile)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
     )
     time.sleep(2)
     if process.poll() is not None:
-        raise ProofFailure(f"rsyslogd exited immediately: {process.stderr.read()!r}")  # type: ignore[union-attr]
+        raise EnvironmentUnfit(
+            f"{binary} exited immediately: {process.stderr.read()!r}"  # type: ignore[union-attr]
+        )
+    _assert_unconfined(process.pid, binary)
     return process
+
+
+def _assert_unconfined(pid: int, binary: str) -> None:
+    """Prove the running daemon is not under a mandatory-access-control profile.
+
+    Ubuntu confines `/usr/sbin/rsyslogd` to /var/log and /etc/rsyslog.d, and
+    this proof deliberately runs against an isolated tree. Confinement then
+    presents as `open error: Permission denied` while running as root — the
+    EXACT sentence the production fault produces, which is the one thing this
+    proof must never be confused with.
+
+    AppArmor profiles are attached to a path, so the job runs a COPY of the
+    binary from outside `/usr/sbin`, which no profile matches. That is a claim
+    about the runner rather than about the contract, so it is checked here
+    against the kernel's own answer instead of assumed. `aa-teardown` was tried
+    first and the kernel refused to unload profiles at all.
+    """
+    attr = Path(f"/proc/{pid}/attr/current")
+    if not attr.exists():  # no LSM exposing this; nothing to check
+        return
+    try:
+        current = attr.read_text().strip("\x00 \n")
+    except OSError:  # pragma: no cover - unreadable on some kernels
+        return
+    if current and not current.startswith("unconfined"):
+        raise EnvironmentUnfit(
+            f"{binary} is running confined as {current!r}. Its isolated tree is outside what "
+            "the profile permits, and the denial is indistinguishable from the production "
+            "fault this proof detects"
+        )
 
 
 def _log(socket: Path, message: str) -> None:
@@ -300,7 +333,12 @@ def _expect_ownership(path: Path, contract: Contract) -> None:
         raise ProofFailure(f"{path} has mode {mode}, not {contract.mode}")
 
 
-def prove(rendered: Path, work: Path, stanza_text: str | None = None) -> None:
+def prove(
+    rendered: Path,
+    work: Path,
+    stanza_text: str | None = None,
+    binary: str = "rsyslogd",
+) -> None:
     """Run one full rotation cycle and assert every property.
 
     ``stanza_text`` overrides the rendered logrotate stanza, which is how the
@@ -315,7 +353,7 @@ def prove(rendered: Path, work: Path, stanza_text: str | None = None) -> None:
     pidfile = work / "rsyslogd.pid"
 
     config = _rsyslog_config(work, rendered, logs, spool, socket)
-    process = _start(config, pidfile)
+    process = _start(binary, config, pidfile)
 
     def drain() -> str:
         """Whatever rsyslogd has said so far, without blocking.
@@ -410,6 +448,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rendered", type=Path, required=True)
     parser.add_argument("--work", type=Path, required=True)
+    parser.add_argument(
+        "--rsyslogd",
+        default="rsyslogd",
+        help=(
+            "the rsyslogd to run. A COPY outside /usr/sbin is what the CI job passes, because "
+            "AppArmor profiles are attached to a path and the distribution's profile permits "
+            "only /var/log and /etc/rsyslog.d \u2014 which this proof deliberately does not use. "
+            "The copy is verified unconfined at startup rather than assumed."
+        ),
+    )
     arguments = parser.parse_args(argv)
 
     rendered: Path = arguments.rendered
@@ -418,7 +466,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print("positive control: the rendered contract")
     try:
-        prove(rendered, work / "positive")
+        prove(rendered, work / "positive", binary=arguments.rsyslogd)
     except EnvironmentUnfit as unfit:
         print(f"  the runner cannot host this proof: {unfit}")
         return 1
@@ -452,7 +500,12 @@ def main(argv: list[str] | None = None) -> int:
             continue
         print(f"negative control: {name}")
         try:
-            prove(rendered, work / f"negative{index}", stanza_text=stanza.replace(old, new, 1))
+            prove(
+                rendered,
+                work / f"negative{index}",
+                stanza_text=stanza.replace(old, new, 1),
+                binary=arguments.rsyslogd,
+            )
         except EnvironmentUnfit as unfit:
             # NOT counted as a refusal. A control that "failed" because the
             # machine could not host it proves nothing, and letting it pass is
