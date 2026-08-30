@@ -1,0 +1,13 @@
+# The control plane scraping itself. Logical only (ADR-0004).
+schema_version = "observability-target.v2"
+kind = "targets"
+product = "dotmac-observability"
+owner = "platform-operations"
+
+[[jobs]]
+job = "prometheus"
+target_id = "prometheus"
+scheme = "http"
+metrics_path = "/metrics"
+authenticated = false
+expected = 1

@@ -1,0 +1,21 @@
+# The shared Postgres and Redis exporters.
+schema_version = "observability-target.v2"
+kind = "targets"
+product = "shared-data-services"
+owner = "platform-operations"
+
+[[jobs]]
+job = "postgres-exporter"
+target_id = "postgres-exporter"
+scheme = "http"
+metrics_path = "/metrics"
+authenticated = false
+expected = 1
+
+[[jobs]]
+job = "redis-exporter"
+target_id = "redis-exporter"
+scheme = "http"
+metrics_path = "/metrics"
+authenticated = false
+expected = 1

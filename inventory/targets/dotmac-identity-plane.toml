@@ -1,0 +1,19 @@
+# The identity-plane probe. OBS-15/OBS-18 apply: the probe runs and is healthy,
+# but no repository in the fleet has been found that emits its metrics, so the
+# nine `dotmac_identity_plane` rules over it have no locatable producer. The
+# job is real; its source is not yet attributable.
+schema_version = "observability-target.v2"
+kind = "targets"
+product = "dotmac-identity-plane"
+owner = "platform-operations"
+
+# The only job carrying its own scrape_interval, at 30s rather than the global
+# 15s. Measured, not chosen.
+[[jobs]]
+job = "identity-probe"
+target_id = "identity-probe"
+scheme = "http"
+metrics_path = "/metrics"
+authenticated = false
+expected = 1
+scrape_interval = "30s"

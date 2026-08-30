@@ -1,0 +1,12 @@
+schema_version = "observability-target.v2"
+kind = "targets"
+product = "dotmac-academy"
+owner = "academy-platform"
+
+[[jobs]]
+job = "dotmac-academy-app"
+target_id = "dotmac-academy-app"
+scheme = "https"
+metrics_path = "/metrics"
+authenticated = true
+expected = 1

@@ -674,3 +674,84 @@ harmless.
   which was not retrievable under this session's access; the store's KV version
   and storage shape were confirmed, its contents were not read, and no target
   vocabulary is asserted anywhere in this repository as a result.
+
+## 15. The stored private inventory does not satisfy its own contract — 2026-08-30
+
+§10 records that the census's private inventory was preserved in the approved
+store as version 1 with digest `1ecd635b…`. Both facts are **confirmed**: the
+document was read back on 2026-08-30, its canonical form is **7,326 bytes**,
+and it hashes to exactly the digest §10 records. That digest is now
+independently recomputed rather than cited.
+
+What §10 did not say, because the contract did not exist when it was written,
+is that **the stored document is not an `observability-private-inventory.v1`
+document.** It declares
+`schema_version = "observability-private-inventory.v1 (PROPOSED)"` — the
+capture format the census produced in PR #2, three PRs before ADR-0006 accepted
+the contract in PR #9. Validated against
+`contracts/private-inventory.schema.json` it produces **68 errors**.
+
+Shape only below; no value from the document appears here.
+
+| | Contract (`.v1`) | Stored document (`.v1 (PROPOSED)`) |
+| --- | --- | --- |
+| Top level | `schema_version`, `document`, `version`, `environment`, `host`, `targets`, `federations`, `receivers` | `schema_version`, `version`, `environment`, `targets`, `receiver_bindings`, `alertmanager_endpoints`, `captured_at`, `captured_from`, `note` |
+| Missing | — | `document`, `host`, `federations`, `receivers` |
+| Extra (refused by `additionalProperties: false`) | — | `alertmanager_endpoints`, `captured_at`, `captured_from`, `note` |
+| A target entry | `target_id`, `endpoints`, `credential` | `target_id`, `resolved_endpoints`, `credential`, `metrics_path`, `params`, `scheme`, `static_labels`, `tls_config` |
+| A receiver entry | `credential_ref`, `credential`, `destination` | `receiver`, `credential_file`, `kind`, `destination` |
+| Federations | own array | folded into `targets`, so `targets` holds **16** entries including the federation |
+
+### Why this blocks the CRM supersession outright
+
+`inventory-digest` and `inventory-apply` both begin by loading the previous
+document through `load_private_inventory`, which validates it. The stored
+document does not validate, so **the supersession workflow fails at its first
+tool step** — before compare-and-set, before any write. The workflow's own
+precondition check tests only that `inventory/control-plane.toml` exists, so it
+passes that guard and then fails later, which is a worse failure shape than
+refusing up front.
+
+The repair is not a retirement. Bringing the document to the contract means
+adding `document` and a `host` binding — and `host` requires `identity` and
+`ssh_alias`, which are **resolved values**. That is provisioning, and
+`supersession-request.v1` deliberately has no field for it: "retiring needs a
+logical name while provisioning needs a resolved value that must not enter
+public Git or a CI input." So the migration is a **human operation against the
+private store**, and it must happen before any CRM retirement.
+
+**A supersession request must not be written against `1ecd635b…` today.** The
+migration rewrites the document, which changes its digest, and the digest is
+the compare-and-set precondition. A request naming the pre-migration digest
+would be refused after migration — correctly, but only after looking as though
+the work had been done.
+
+### Two contract gaps the comparison exposes, both material
+
+Populating `inventory/` surfaced two things the public contract cannot express,
+and the stored capture carries both — so these are omissions in the accepted
+contract rather than in the capture.
+
+- **`params`.** The live OpenBao job sends `format=prometheus`, without which
+  OpenBao emits its own JSON rather than Prometheus exposition.
+  `observability-target.v2` has no `params` field, so a render from the public
+  contract alone scrapes the wrong format. The stored document has `params`.
+- **`static_labels`.** The as-built assigns logical `instance` labels
+  (`dotmac-observe`, `dotmac-db-primary`, `dotmac-s3`, `seabone`) rather than
+  letting them default to the endpoint. Neither the public target contract nor
+  the private `target_binding` has anywhere to put them, so byte-parity with
+  the as-built is currently impossible for every job that carries one. The
+  stored document has `static_labels`.
+
+`tls_config` and `alertmanager_endpoints` are in the same position and need the
+same decision: carried into the contract, or consciously dropped with the
+consequence written down.
+
+### Provenance
+
+Independently measured on 2026-08-30 by a second party, read-only, by the
+method §14 describes. Only the document's **shape** was read out — key names,
+array lengths, error paths and keywords. No endpoint, credential binding,
+destination, host identity or store field name was printed, and nothing was
+written to disk. The digest and byte length above are the whole of what was
+derived from its contents.
