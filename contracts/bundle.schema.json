@@ -1,0 +1,624 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dotmac.io/schemas/observability/bundle.v1.json",
+  "title": "observability-bundle.v1",
+  "description": "Everything the control plane deploys that is NOT a scrape target, a route or a receiver: the log store and shipper, the dashboard provisioning, the Observer-owned syslog and rotation contract, the declared infrastructure timezone, the roster of every service and container this plane owns, the published-surface exposure policy, and the verification gates a promotion is accepted against.  One document, deliberately. The Observer host's actual failures were all seams between separately owned pieces: a syslog action suspended ten thousand times because nothing owned the file's mode, an Alertmanager gossiping with itself because nothing declared it a singleton, IPv6 firewall rules written in a chain IPv6 never traverses because nothing declared which chain a family terminates on. A bundle that renders only Prometheus and Alertmanager cannot fail any of those, which is why it did not.  NO TOPOLOGY AND NO CREDENTIALS. Like every other public document (ADR-0004) this one carries logical identity, capability and policy. A source set is NAMED and TYPED here; the interface or address behind it is bound from the private inventory at authorization time. Nothing here may hold a resolved address, a store path or a credential basename.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "timezone",
+    "loki",
+    "promtail",
+    "grafana",
+    "syslog",
+    "roster",
+    "exposure",
+    "verification",
+    "retired"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "observability-bundle.v1"
+    },
+    "timezone": {
+      "$ref": "#/$defs/timezone"
+    },
+    "loki": {
+      "$ref": "#/$defs/loki"
+    },
+    "promtail": {
+      "$ref": "#/$defs/promtail"
+    },
+    "grafana": {
+      "$ref": "#/$defs/grafana"
+    },
+    "syslog": {
+      "$ref": "#/$defs/syslog"
+    },
+    "roster": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/roster_entry"
+      },
+      "description": "Every service, container, network, image and volume this control plane owns, each with an owner. The roster is what makes an UNOWNED runtime resource a finding rather than a thing nobody looks at: a resource present on the host and absent here is unattributed, and deleting an unattributed resource is a decision, not a tidy-up."
+    },
+    "retired": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/retired_product"
+      },
+      "description": "Products whose monitoring has been retired, and which no rendered byte may mention again.  A one-time grep proves a tree was clean on the day somebody looked. It does not stop a scrape job, an alert group, a route, a datasource or a dashboard provider reappearing under the same name six weeks later, and 'absence' is the one finding that looks identical whether the sweep worked or silently read nothing.  Declaring the retirement makes it a standing property: the gate reads the RENDERED tree, so it sees every surface the bundle produces rather than the subset a person thought to search, and it fails the build rather than a review. The list only ever grows, and an entry is removed only if the product comes back."
+    },
+    "exposure": {
+      "$ref": "#/$defs/exposure"
+    },
+    "verification": {
+      "$ref": "#/$defs/verification"
+    }
+  },
+  "$defs": {
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$"
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$"
+    },
+    "mode": {
+      "type": "string",
+      "pattern": "^0[0-7]{3}$",
+      "description": "An octal file mode, spelled with its leading zero. A string rather than an integer because TOML would read 0640 as decimal 640 and the difference is invisible until a log file is world-readable."
+    },
+    "unix_name": {
+      "type": "string",
+      "pattern": "^[a-z_][a-z0-9_-]*$"
+    },
+    "absolute_path": {
+      "type": "string",
+      "pattern": "^/[^\\s]*[^/\\s]$"
+    },
+    "label": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "value"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "image",
+        "digest",
+        "listen"
+      ],
+      "properties": {
+        "image": {
+          "type": "string",
+          "minLength": 1
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "listen": {
+          "type": "string",
+          "pattern": "^[0-9.]+:[0-9]{1,5}$",
+          "description": "Public only while the address is loopback, exactly as in observability-control-plane.v2, and refused otherwise by the same LISTEN-NOT-LOOPBACK gate."
+        }
+      }
+    },
+    "timezone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "infrastructure",
+        "rationale"
+      ],
+      "properties": {
+        "infrastructure": {
+          "const": "UTC",
+          "description": "The only value this contract accepts, and a `const` rather than a gate so the refusal is structural. Every timestamp an operator correlates across the fleet -- a scrape, a rotation, a rule evaluation, a receipt -- is written by infrastructure, and a local zone makes two hosts in different zones disagree about the order of events with nothing in either log saying so. Observer was found running Europe/Berlin, which is neither UTC nor the zone anybody here reads."
+        },
+        "presentation": {
+          "type": "string",
+          "minLength": 1,
+          "description": "An IANA zone user-facing dashboards may render in. It reaches Grafana's provisioning and NOTHING else: no evaluator, no log file, no receipt. Rendering a local zone for a reader is presentation; storing one is a data model."
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 40
+        }
+      }
+    },
+    "loki": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime",
+        "retention",
+        "reject_older_than",
+        "ingestion_rate_mb",
+        "ingestion_burst_mb"
+      ],
+      "properties": {
+        "runtime": {
+          "$ref": "#/$defs/image"
+        },
+        "retention": {
+          "$ref": "#/$defs/duration"
+        },
+        "reject_older_than": {
+          "$ref": "#/$defs/duration"
+        },
+        "ingestion_rate_mb": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "ingestion_burst_mb": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "promtail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime",
+        "jobs"
+      ],
+      "properties": {
+        "runtime": {
+          "$ref": "#/$defs/image"
+        },
+        "jobs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "path_glob",
+              "labels"
+            ],
+            "properties": {
+              "name": {
+                "$ref": "#/$defs/slug"
+              },
+              "path_glob": {
+                "type": "string",
+                "pattern": "^/[^\\s]*$"
+              },
+              "labels": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "$ref": "#/$defs/label"
+                }
+              },
+              "decode_docker_json": {
+                "type": "boolean",
+                "description": "Whether the source files are Docker's json-file driver output and the `log` field should be unwrapped."
+              }
+            }
+          }
+        }
+      }
+    },
+    "grafana": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime",
+        "datasources",
+        "dashboard_providers"
+      ],
+      "properties": {
+        "runtime": {
+          "$ref": "#/$defs/image"
+        },
+        "datasources": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "kind",
+              "service",
+              "default"
+            ],
+            "properties": {
+              "name": {
+                "$ref": "#/$defs/slug"
+              },
+              "kind": {
+                "enum": [
+                  "prometheus",
+                  "loki",
+                  "alertmanager"
+                ]
+              },
+              "service": {
+                "$ref": "#/$defs/slug",
+                "description": "A roster entry of kind `service`. The URL is derived from that entry's declared listen port on the compose network, so a datasource can never point somewhere the bundle does not also deploy."
+              },
+              "default": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "dashboard_providers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "folder"
+            ],
+            "properties": {
+              "name": {
+                "$ref": "#/$defs/slug"
+              },
+              "folder": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "syslog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "directory",
+        "files",
+        "rotation"
+      ],
+      "description": "The Observer-owned rsyslog and logrotate contract. It exists because the host's own default did not state one: /var/log is root:syslog 0755, rsyslog drops privilege to the syslog user, and the file it was told to write did not exist -- so it could not create it, suspended, resumed, and suspended again ten thousand times over thirty days while the mail facility went to nowhere at all.  The repair is not a wider directory. It is that SOMETHING OTHER THAN RSYSLOG creates the file, with a stated owner, group and mode, before rsyslog is asked to open it, and again after every rotation.",
+      "properties": {
+        "directory": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "owner",
+            "group",
+            "mode"
+          ],
+          "description": "The directory contract. Declared rather than assumed: the whole failure is that nobody wrote down who owns this directory or what a privilege-dropped writer may do inside it.",
+          "properties": {
+            "path": {
+              "$ref": "#/$defs/absolute_path"
+            },
+            "owner": {
+              "$ref": "#/$defs/unix_name"
+            },
+            "group": {
+              "$ref": "#/$defs/unix_name"
+            },
+            "mode": {
+              "$ref": "#/$defs/mode"
+            }
+          }
+        },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "facility",
+              "path",
+              "owner",
+              "group",
+              "mode"
+            ],
+            "properties": {
+              "facility": {
+                "type": "string",
+                "pattern": "^[a-z]+(?:\\.[a-z*]+)?$",
+                "description": "An rsyslog facility selector such as `mail.*` or `mail.err`."
+              },
+              "path": {
+                "$ref": "#/$defs/absolute_path"
+              },
+              "owner": {
+                "$ref": "#/$defs/unix_name"
+              },
+              "group": {
+                "$ref": "#/$defs/unix_name"
+              },
+              "mode": {
+                "$ref": "#/$defs/mode"
+              },
+              "synchronous": {
+                "type": "boolean",
+                "description": "Whether rsyslog fsyncs after every write. Default false, rendered as the `-` prefix."
+              }
+            }
+          }
+        },
+        "rotation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "frequency",
+            "keep",
+            "compress"
+          ],
+          "properties": {
+            "frequency": {
+              "enum": [
+                "daily",
+                "weekly",
+                "monthly"
+              ]
+            },
+            "keep": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "compress": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "roster_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind",
+        "owner"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "service",
+            "network",
+            "volume"
+          ]
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Accountable team or system. `unowned` is not a value: a resource with no owner is not rostered, and a resource that is not rostered is a finding."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "The port this service listens on INSIDE the compose network. Required for a `service` a datasource names."
+        }
+      }
+    },
+    "exposure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_sets",
+        "surfaces"
+      ],
+      "description": "Foundation's IngressPolicy.v1 vocabulary (AGENTS.md rule 19), applied to the Observer host. Two things this contract insists on that the host got wrong:  A SOURCE IS A NAMED SET, never a literal. A bare `-s <prefix>` in a rule is a fact about one estate written into a control plane that is supposed to be reusable, and it is unreviewable -- nobody can tell from the rule whether that range is the management network or a stale lease. (The prefix is not spelled out here, and the private-material scan is why: it refused the first draft of this sentence, correctly, because an address in a tracked file is an address in public Git whichever field it sits in.) The set is named and typed here and bound from the private inventory.  A FAMILY DECLARES WHICH CHAIN IT TERMINATES ON. On this host an IPv4 container publish traverses FORWARD and therefore DOCKER-USER, while IPv6 terminates on INPUT -- so the seven IPv6 DROP rules found sitting in DOCKER-USER are dead, and every one of the ports they name is open on IPv6. Deriving the chain from the surface kind and the family, rather than letting an author choose, is what makes that mistake unrepresentable.",
+      "properties": {
+        "source_sets": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "name": {
+                "$ref": "#/$defs/slug"
+              },
+              "kind": {
+                "enum": [
+                  "tunnel_interface",
+                  "address_set"
+                ],
+                "description": "`tunnel_interface` binds to an interface name and renders as an interface match, which is what a WireGuard peer set is: membership is cryptographic, not addressed. `address_set` binds to a list of prefixes and renders as source matches. Both are bound privately; neither may be written down here."
+              }
+            }
+          }
+        },
+        "surfaces": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "kind",
+              "port",
+              "protocol",
+              "family",
+              "exposure"
+            ],
+            "properties": {
+              "name": {
+                "$ref": "#/$defs/slug"
+              },
+              "kind": {
+                "enum": [
+                  "host_service",
+                  "container_published"
+                ],
+                "description": "Which packet path reaches it, and therefore which chain a rule about it has to be written in. A host service is reached on INPUT in both families. A container publish is reached on FORWARD -- and therefore DOCKER-USER -- for IPv4 and on INPUT for IPv6."
+              },
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              },
+              "protocol": {
+                "enum": [
+                  "tcp",
+                  "udp"
+                ]
+              },
+              "family": {
+                "enum": [
+                  "ipv4",
+                  "ipv6",
+                  "dual_stack"
+                ]
+              },
+              "exposure": {
+                "enum": [
+                  "none",
+                  "loopback",
+                  "ingress",
+                  "public"
+                ]
+              },
+              "allow_from": {
+                "$ref": "#/$defs/slug",
+                "description": "The named source set permitted to reach this surface. Required for `ingress`; refused for `loopback` and `none`, which are not reached from a source at all."
+              },
+              "authenticated": {
+                "type": "boolean",
+                "description": "Whether the surface authenticates its callers. A `public` surface that does not is refused (rule 19)."
+              },
+              "rationale": {
+                "type": "string",
+                "minLength": 40,
+                "description": "Required for `public`. Why this surface is deliberately reachable from anywhere."
+              }
+            }
+          }
+        }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gates"
+      ],
+      "description": "What a promotion is ACCEPTED against, expressed so that the two facts Observer conflated cannot be conflated again.  A target reporting `up == 1` says the scrape completed. It says nothing about whether the samples it returned were stored, and on this host 1.8 million samples were rejected while every one of eighteen targets read green. Target health and ingestion integrity are separate facts, so a gate carries a predicate for each and the renderer emits their conjunction. A gate with only a health predicate is not accepted by this contract.",
+      "properties": {
+        "gates": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "health",
+              "integrity",
+              "window"
+            ],
+            "properties": {
+              "name": {
+                "$ref": "#/$defs/slug"
+              },
+              "health": {
+                "type": "string",
+                "minLength": 1,
+                "description": "A PromQL predicate over target health. Control-plane meta only: this repository never authors a product's alert expression (AGENTS.md rule 5), and a gate over `up` or an evaluator's own series is a thing no product can observe."
+              },
+              "integrity": {
+                "type": "string",
+                "minLength": 1,
+                "description": "A PromQL predicate over ingestion integrity -- rejected, dropped or duplicated samples. Separate from `health` and required alongside it."
+              },
+              "window": {
+                "$ref": "#/$defs/duration",
+                "description": "How long the conjunction must hold before the promotion is accepted."
+              }
+            }
+          }
+        }
+      }
+    },
+    "retired_product": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "tokens",
+        "decommissioned",
+        "rationale"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/slug"
+        },
+        "tokens": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 3
+          },
+          "description": "Every spelling the product was ever known by in a configuration file. Listed rather than derived from `name`, because the spellings genuinely differ across surfaces -- a job name, a container name, a Loki label and a folder title are written by different tools with different conventions -- and a gate searching only the canonical name would pass over the ones that actually appear. Minimum length 3 so a token cannot be short enough to match unrelated words."
+        },
+        "decommissioned": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "description": "The date the product was decommissioned, recorded so a receipt citing this bundle can be compared with the decommission evidence."
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 40
+        },
+        "residual_data": {
+          "type": "string",
+          "minLength": 40,
+          "description": "What still carries the product's labels in RETAINED data, as against in configuration. The distinction is the one most easily mis-reported: a time series or a log stream recorded before the retirement is history and ages out with retention, while a scrape job or a route is a live dependency. Saying which is which here stops the next reader concluding either that the retirement is incomplete or that the retained data has already gone."
+        }
+      }
+    }
+  }
+}

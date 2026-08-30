@@ -11,7 +11,9 @@
   "targets": [
     {
       "target_id": "erp-production",
-      "endpoints": ["erp.invalid:443"],
+      "endpoints": [
+        "erp.invalid:443"
+      ],
       "credential": {
         "openbao_path": "secret/fixture/erp-scrape",
         "file_name": "erp-scrape.token"
@@ -19,7 +21,10 @@
     },
     {
       "target_id": "erp-workers",
-      "endpoints": ["erp-worker-1.invalid:443", "erp-worker-2.invalid:443"]
+      "endpoints": [
+        "erp-worker-1.invalid:443",
+        "erp-worker-2.invalid:443"
+      ]
     }
   ],
   "federations": [
@@ -48,6 +53,12 @@
         "file_name": "smtp.password"
       },
       "destination": "platform@dotmac.invalid"
+    }
+  ],
+  "source_sets": [
+    {
+      "name": "management",
+      "interface": "wg0"
     }
   ]
 }

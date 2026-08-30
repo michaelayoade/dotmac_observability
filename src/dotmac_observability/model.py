@@ -45,31 +45,51 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 __all__ = [
+    "Bundle",
     "ControlPlane",
     "DesiredState",
+    "DirectoryContract",
     "Evaluator",
+    "Exposure",
     "Federation",
     "FederationBinding",
     "FederationSource",
+    "Grafana",
+    "GrafanaDashboardProvider",
+    "GrafanaDatasource",
     "Host",
     "HostBinding",
     "Inhibition",
     "Integration",
     "Label",
+    "Loki",
     "PrivateInventory",
+    "Promtail",
+    "PromtailJob",
     "Publication",
     "Receiver",
     "ReceiverBinding",
     "Resolution",
     "ResolvedEndpoint",
     "ResolvedReceiver",
+    "RetiredProduct",
+    "RosterEntry",
+    "Rotation",
     "Route",
     "RouteDefaults",
+    "Runtime",
     "ScrapeJob",
     "SecretFile",
     "Smtp",
+    "SourceSet",
+    "SourceSetBinding",
+    "Surface",
+    "Syslog",
+    "SyslogFile",
     "TargetBinding",
     "TargetSet",
+    "Timezone",
+    "VerificationGate",
 ]
 
 
@@ -215,6 +235,33 @@ class ScrapeJob:
     metrics_path: str
     authenticated: bool
     labels: tuple[Label, ...]
+    static_labels: tuple[Label, ...]
+    """Labels identifying the TARGET, as against ``labels``, which describe the product.
+
+    Two tuples rather than one because they answer different questions and a
+    reviewer needs to see which is which — ``product = dotmac-erp`` is a fact
+    about the software, ``instance = dotmac-db-primary`` is a fact about the
+    thing being scraped. They render onto the same static config, in this
+    order, so a job carrying both produces one block rather than two.
+
+    Added by ADR-0008 because the running configuration assigns instance labels
+    and the contract had nowhere to put them, which made byte-parity with the
+    as-built impossible for every job that carries one — and an unrepresentable
+    difference is indistinguishable from a real one in a drift comparison.
+    """
+    params: tuple[tuple[str, tuple[str, ...]], ...]
+    """URL query parameters, as ordered pairs of name to values.
+
+    A tuple of pairs rather than a mapping for the reason :class:`Label` is a
+    pair: rendering never has to sort a dict to be deterministic, and a
+    duplicate name is a visible duplicate row instead of a silently overwritten
+    key.
+
+    Added by ADR-0008 because a live target needs one. The OpenBao job sends
+    ``format=prometheus``; without it OpenBao answers with its own JSON, which
+    Prometheus accepts as a successful scrape and stores nothing from — a
+    target that reads green and delivers no series.
+    """
     scrape_interval: str | None
     scrape_timeout: str | None
     publication: Publication | None
@@ -341,6 +388,15 @@ class DesiredState:
     """
 
     control_plane: ControlPlane
+    bundle: Bundle
+    """Everything deployed that is not a target, a route or a receiver.
+
+    Part of the SAME desired state rather than a second one, because a
+    promotion that can activate the evaluators without the log store, the
+    rotation contract and the exposure policy is a promotion that can leave the
+    host in a combination nobody described. One value, one digest, one
+    activation.
+    """
     targets: tuple[TargetSet, ...]
     federations: tuple[Federation, ...]
     receivers: tuple[Receiver, ...]
@@ -416,6 +472,15 @@ class PrivateInventory:
     targets: tuple[TargetBinding, ...]
     federations: tuple[FederationBinding, ...]
     receivers: tuple[ReceiverBinding, ...]
+    source_sets: tuple[SourceSetBinding, ...]
+    """What each named exposure source set resolves to.
+
+    Private for the same reason an endpoint is: a management prefix is a map of
+    where the operators are, and a tunnel interface name is one hop from it.
+    Empty is legitimate — a bundle whose surfaces are all loopback names no
+    source set — and resolution refuses in both directions, so a set nobody
+    allows from is a finding just as an unresolved ``allow_from`` is.
+    """
 
 
 # ── The join ────────────────────────────────────────────────────────────────
@@ -453,3 +518,266 @@ class Resolution:
     jobs: Mapping[str, ResolvedEndpoint]
     federations: Mapping[str, ResolvedEndpoint]
     integrations: Mapping[str, ResolvedReceiver]
+    source_sets: Mapping[str, SourceSetBinding]
+
+
+# ── The bundle (ADR-0008) ───────────────────────────────────────────────────
+#
+# Everything the control plane deploys that is not a scrape target, a route or
+# a receiver. It lives in the same DesiredState for one reason: a promotion
+# that can activate the evaluators without the log store, the rotation
+# contract and the exposure policy is a promotion that can leave the host in a
+# combination nobody described. One bundle, one digest, one activation.
+
+
+@dataclass(frozen=True, slots=True)
+class Runtime:
+    """A pinned image and where it listens — the same shape as :class:`Evaluator`.
+
+    Kept as its own record rather than reusing ``Evaluator`` because the two
+    are governed by different documents: an evaluator is named by
+    ``observability-control-plane.v2`` and a runtime by
+    ``observability-bundle.v1``. Sharing the type would make a change to one
+    contract silently a change to the other.
+    """
+
+    image: str
+    digest: str
+    version: str | None
+    listen: str
+
+
+@dataclass(frozen=True, slots=True)
+class Timezone:
+    """UTC for infrastructure, optionally something else for a reader.
+
+    ``infrastructure`` is a constant in the contract rather than a gate here,
+    so a non-UTC value is not a shape this repository can hold. ``presentation``
+    reaches Grafana's provisioning and nothing else — no evaluator, no log
+    file, no receipt — because rendering a local zone for a reader is
+    presentation while storing one is a data model.
+    """
+
+    infrastructure: str
+    presentation: str | None
+    rationale: str
+
+
+@dataclass(frozen=True, slots=True)
+class Loki:
+    runtime: Runtime
+    retention: str
+    reject_older_than: str
+    ingestion_rate_mb: int
+    ingestion_burst_mb: int
+
+
+@dataclass(frozen=True, slots=True)
+class PromtailJob:
+    name: str
+    path_glob: str
+    labels: tuple[Label, ...]
+    decode_docker_json: bool
+
+
+@dataclass(frozen=True, slots=True)
+class Promtail:
+    runtime: Runtime
+    jobs: tuple[PromtailJob, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class GrafanaDatasource:
+    name: str
+    kind: str
+    service: str
+    default: bool
+
+
+@dataclass(frozen=True, slots=True)
+class GrafanaDashboardProvider:
+    name: str
+    folder: str
+
+
+@dataclass(frozen=True, slots=True)
+class Grafana:
+    runtime: Runtime
+    datasources: tuple[GrafanaDatasource, ...]
+    dashboard_providers: tuple[GrafanaDashboardProvider, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DirectoryContract:
+    path: str
+    owner: str
+    group: str
+    mode: str
+
+
+@dataclass(frozen=True, slots=True)
+class SyslogFile:
+    """One facility routed to one file, with the file's ownership stated.
+
+    The ownership is the whole record. rsyslog on the Observer host runs
+    privilege-dropped and was told to write a file it could not create, so it
+    suspended the action, resumed it, and suspended it again — ten thousand
+    times in thirty days, with the mail facility going nowhere throughout. The
+    repair is that something other than rsyslog creates the file, with this
+    owner, this group and this mode, before rsyslog opens it and again after
+    every rotation.
+    """
+
+    facility: str
+    path: str
+    owner: str
+    group: str
+    mode: str
+    synchronous: bool
+
+
+@dataclass(frozen=True, slots=True)
+class Rotation:
+    frequency: str
+    keep: int
+    compress: bool
+
+
+@dataclass(frozen=True, slots=True)
+class Syslog:
+    directory: DirectoryContract
+    files: tuple[SyslogFile, ...]
+    rotation: Rotation
+
+
+@dataclass(frozen=True, slots=True)
+class RosterEntry:
+    """One owned runtime resource.
+
+    The roster is what makes an unattributed resource a finding. A container,
+    network or volume present on the host and absent here is owned by nobody,
+    and deleting something owned by nobody is a decision that needs a manifest
+    and an approval — not a `docker prune`, which decides it for you and leaves
+    no record of what it decided.
+    """
+
+    name: str
+    kind: str
+    owner: str
+    port: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class RetiredProduct:
+    """A product whose monitoring is gone, and must stay gone.
+
+    A grep proves a tree was clean on the day somebody ran it. This is the
+    standing version: the tokens are checked against every rendered byte, so a
+    scrape job, alert group, route, datasource or dashboard provider that
+    reappears under the same name fails the build rather than a review.
+
+    ``residual_data`` records what still carries the product's labels in
+    RETAINED data, which is the distinction most easily mis-reported. A series
+    or log stream recorded before the retirement is history and ages out with
+    retention; a scrape job is a live dependency. Saying which is which stops
+    the next reader concluding either that the retirement is incomplete or that
+    the data has already gone.
+    """
+
+    name: str
+    tokens: tuple[str, ...]
+    decommissioned: str
+    rationale: str
+    residual_data: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SourceSet:
+    """A named, typed set of permitted sources — never a literal.
+
+    ``kind`` decides how it renders. ``tunnel_interface`` becomes an interface
+    match, which is what a WireGuard peer set actually is: membership is
+    cryptographic rather than addressed, so matching the interface is both
+    simpler and stricter than matching a prefix. ``address_set`` becomes source
+    matches. Neither the interface name nor the prefixes are held here; they
+    are bound from the private inventory.
+    """
+
+    name: str
+    kind: str
+
+
+@dataclass(frozen=True, slots=True)
+class Surface:
+    """One published surface, and which packet path reaches it.
+
+    ``kind`` is load-bearing and is why this record exists rather than a pair
+    of strings. On this host an IPv4 container publish traverses ``FORWARD``
+    and therefore ``DOCKER-USER``, while IPv6 terminates on ``INPUT``. Seven
+    IPv6 DROP rules were found sitting in ``DOCKER-USER``, where no IPv6 packet
+    to a published port ever arrives, so every port they name is open. Deriving
+    the chain from ``kind`` and the family — rather than letting an author pick
+    one — makes that unrepresentable.
+    """
+
+    name: str
+    kind: str
+    port: int
+    protocol: str
+    family: str
+    exposure: str
+    allow_from: str | None
+    authenticated: bool
+    rationale: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class Exposure:
+    source_sets: tuple[SourceSet, ...]
+    surfaces: tuple[Surface, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationGate:
+    """Target health and ingestion integrity, as two predicates that must both hold.
+
+    Eighteen of eighteen targets read ``up == 1`` on the Observer host while
+    1.8 million samples were rejected at ingestion. A gate carrying only a
+    health predicate would have passed that, which is why this record cannot
+    be constructed with one: the contract requires both fields and the renderer
+    emits their conjunction.
+    """
+
+    name: str
+    health: str
+    integrity: str
+    window: str
+
+
+@dataclass(frozen=True, slots=True)
+class Bundle:
+    timezone: Timezone
+    loki: Loki
+    promtail: Promtail
+    grafana: Grafana
+    syslog: Syslog
+    roster: tuple[RosterEntry, ...]
+    retired: tuple[RetiredProduct, ...]
+    exposure: Exposure
+    gates: tuple[VerificationGate, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SourceSetBinding:
+    """What a named source set resolves to. PRIVATE.
+
+    ``interface`` for a ``tunnel_interface`` set, ``prefixes`` for an
+    ``address_set``. Exactly one is present, and resolution refuses the other
+    combination in both directions — a set typed as an interface with prefixes
+    behind it renders a rule that matches the wrong thing while validating
+    cleanly.
+    """
+
+    name: str
+    interface: str | None
+    prefixes: tuple[str, ...]

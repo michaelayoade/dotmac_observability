@@ -1,0 +1,585 @@
+#!/usr/bin/env python3
+"""Prove the rendered rotation contract survives a real rotation.
+
+Run by CI, never on a workstation, and never against a live host: everything
+happens inside one directory under ``$RUNNER_TEMP``, with an rsyslogd started
+in the foreground on its own socket and killed at the end. ``/var/log`` is
+never touched and no unit is installed.
+
+WHAT IS BEING PROVED, and why a unit test could not.
+
+The Observer host's mail facility went nowhere for a month. ``/var/log`` is
+``root:syslog 0755``; rsyslog drops privilege to the ``syslog`` user; the file
+it was told to write did not exist; a privilege-dropped writer cannot create a
+file in a directory it has no write bit on. The action suspended, resumed and
+suspended again — 10,161 times in thirty days — and every message routed to it
+was discarded.
+
+The rendered contract fixes that by having something ELSE create the file:
+systemd-tmpfiles at boot, logrotate after every rotation, both as root, both
+with the owner, group and mode stated. A Python test can assert the rendered
+bytes contain ``create 0640 syslog adm``. It cannot assert that logrotate
+accepts the stanza, that the file it creates is one rsyslog can open, or that a
+message written to the mail facility comes out the other side. Those are
+properties of three programs agreeing, and only running them settles it.
+
+THE NEGATIVE CONTROLS ARE THE POINT. A proof that has never been observed to
+fail is a proof that might be checking nothing — the rotation could "succeed"
+because the checker looked at the wrong file, or because the assertion was
+written inverted. So the same proof runs three more times against deliberately
+broken configurations, and each of those runs MUST fail:
+
+* the owner is removed from ``create`` — the file comes back owned by root and
+  the privilege-dropped writer cannot append to it, which is the original
+  failure exactly;
+* the mode is removed — the file comes back with logrotate's default, which is
+  not the declared one;
+* the ``postrotate`` reopen is removed — rsyslog keeps writing into the renamed
+  inode and the new file stays empty, which is the failure that looks like
+  success because rotation itself worked.
+"""
+
+from __future__ import annotations
+
+import argparse
+import grp
+import os
+import pwd
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+CANARY_BEFORE = "dotmac-rotation-canary-before"
+CANARY_AFTER = "dotmac-rotation-canary-after"
+
+
+class ProofFailure(Exception):
+    """A property the proof asserts did not hold."""
+
+
+class EnvironmentUnfit(Exception):
+    """The runner cannot host the proof, which is not the same as a failed proof.
+
+    Kept distinct on purpose. "The contract is broken" and "this machine cannot
+    let a privilege-dropped writer reach the isolated tree" produce the same
+    symptom — an empty file — and treating the second as the first is how a
+    green-or-red signal starts meaning neither. A negative control that failed
+    for THIS reason would also count as a pass, which is worse.
+    """
+
+
+@dataclass(frozen=True)
+class Contract:
+    """The owner, group and mode the rendered tmpfiles line declares.
+
+    Parsed out of the RENDERED artefact rather than hardcoded here, so this
+    script cannot pass by checking values the renderer no longer emits.
+    """
+
+    path: Path
+    owner: str
+    group: str
+    mode: str
+
+
+def _run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, capture_output=True, text=True, **kwargs)  # type: ignore[arg-type]
+
+
+def _parse_tmpfiles(rendered: Path, target: str) -> Contract:
+    line = None
+    for candidate in (
+        (rendered / "host" / "tmpfiles.d" / "observability.conf").read_text().splitlines()
+    ):
+        if candidate.startswith(f"f {target} "):
+            line = candidate
+            break
+    if line is None:
+        raise ProofFailure(f"the rendered tmpfiles config declares no file entry for {target}")
+    _, path, mode, owner, group, *_ = line.split()
+    return Contract(path=Path(path), owner=owner, group=group, mode=mode)
+
+
+def _ensure_account(name: str) -> None:
+    try:
+        pwd.getpwnam(name)
+    except KeyError:
+        _run(["useradd", "--system", "--no-create-home", "--shell", "/usr/sbin/nologin", name])
+    try:
+        grp.getgrnam(name)
+    except KeyError:
+        _run(["groupadd", "--system", name])
+
+
+def _prepare(
+    work: Path, rendered: Path, contract: Contract, sabotage: str | None = None
+) -> tuple[Path, Path, Path]:
+    """Build an isolated /var/log analogue with the declared ownership.
+
+    The DIRECTORY is created with the same mode the rendered contract declares
+    for the real one — 0755, owned by root — precisely so the proof is run
+    against the permission situation that broke, rather than against a
+    convenient one. If the repair depended on widening the directory, it would
+    fail here.
+    """
+    shutil.rmtree(work, ignore_errors=True)
+    logs = work / "log"
+    logs.mkdir(parents=True)
+    directory_line = next(
+        line
+        for line in (rendered / "host" / "tmpfiles.d" / "observability.conf")
+        .read_text()
+        .splitlines()
+        if line.startswith("d ")
+    )
+    _, _, dir_mode, dir_owner, dir_group, *_ = directory_line.split()
+    os.chmod(logs, int(dir_mode, 8))
+    shutil.chown(logs, dir_owner, dir_group)
+
+    target = logs / contract.path.name
+    # tmpfiles' job, done by hand because systemd-tmpfiles refuses a relocated
+    # tree: create as root, with the declared owner, group and mode. This is
+    # the step whose ABSENCE is the whole fault, which is why `no-tmpfiles`
+    # below is a control rather than a hypothetical.
+    if sabotage == "no-tmpfiles":
+        # The production state exactly: /var/log/mail.log does not exist, the
+        # directory is not group-writable, and rsyslog is expected to create it.
+        pass
+    else:
+        target.touch()
+        if sabotage == "wrong-owner":
+            # Created, but by something that did not know who would write it —
+            # the shape a `create` with no owner produces when the original file
+            # is gone.
+            shutil.chown(target, "root", "root")
+        else:
+            shutil.chown(target, contract.owner, contract.group)
+        if sabotage == "wrong-mode":
+            # Owner read-only. The action opens for append and cannot.
+            os.chmod(target, 0o440)
+        else:
+            os.chmod(target, int(contract.mode, 8))
+
+    spool = work / "spool"
+    spool.mkdir()
+    shutil.chown(spool, contract.owner, contract.owner)
+    return logs, target, spool
+
+
+def _assert_writer_can_open(target: Path, owner: str) -> None:
+    """Prove the privilege-dropped writer can open the file, before rsyslog tries.
+
+    The precondition rsyslog itself reports as `open error: Permission denied`,
+    which is indistinguishable from the production fault this proof exists to
+    detect. Checking it separately is what keeps the two apart: every ancestor
+    of the isolated tree has to be traversable by the writer, and on a runner
+    the tree may sit under a home directory that is not.
+
+    Attempted AS the writer, not inferred from a mode. A stat-and-reason check
+    would have to reimplement the kernel's decision, and it is the kernel's
+    decision that matters.
+    """
+    probe = (
+        "import sys\n"
+        "try:\n"
+        f"    handle = open({str(target)!r}, 'a')\n"
+        "except OSError as error:\n"
+        "    sys.exit(str(error))\n"
+        "handle.close()\n"
+    )
+    result = _run(["runuser", "-u", owner, "--", sys.executable, "-c", probe])
+    if result.returncode != 0:
+        raise EnvironmentUnfit(
+            f"user {owner!r} cannot open {target} for append on this runner "
+            f"({(result.stdout + result.stderr).strip()}). Every ancestor has to be "
+            "traversable by the writer; move --work somewhere it is"
+        )
+
+
+def _rsyslog_config(work: Path, rendered: Path, logs: Path, spool: Path, socket: Path) -> Path:
+    """The rendered rsyslog drop-in, retargeted at the isolated tree.
+
+    Only the PATHS are rewritten. The `$FileOwner`, `$FileGroup`,
+    `$FileCreateMode` and facility lines are the rendered bytes, unmodified —
+    rewriting those would be proving a config this repository does not produce.
+    """
+    body = (rendered / "host" / "rsyslog.d" / "40-observability.conf").read_text()
+    body = body.replace("/var/log", str(logs))
+    config = work / "rsyslog.conf"
+    config.write_text(
+        "\n".join(
+            [
+                # The system socket is turned OFF and an explicit input is
+                # declared instead. `SysSock.Name` looked like it should work
+                # and did not: the file was created and stayed at zero bytes,
+                # because this instance was listening on the host's /dev/log
+                # while `logger -u` wrote to a socket nothing was reading.
+                #
+                # Turning the system socket off is also the better isolation.
+                # With it on, this instance competes with whatever else on the
+                # runner holds /dev/log, and the proof's result would depend on
+                # which of them won.
+                'module(load="imuxsock" SysSock.Use="off")',
+                f'input(type="imuxsock" Socket="{socket}" CreatePath="on")',
+                "$WorkDirectory " + str(spool),
+                "$PrivDropToUser syslog",
+                "$PrivDropToGroup syslog",
+                # Off, because rsyslog's default collapses a repeated message
+                # into "last message repeated N times" — and this proof writes
+                # the same canary before and after a rotation.
+                "$RepeatedMsgReduction off",
+                body,
+                "",
+            ]
+        )
+    )
+    return config
+
+
+def _start(binary: str, config: Path, pidfile: Path) -> subprocess.Popen[bytes]:
+    process = subprocess.Popen(
+        [binary, "-n", "-f", str(config), "-i", str(pidfile)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    time.sleep(2)
+    if process.poll() is not None:
+        raise EnvironmentUnfit(
+            f"{binary} exited immediately: {process.stderr.read()!r}"  # type: ignore[union-attr]
+        )
+    _assert_unconfined(process.pid, binary)
+    return process
+
+
+def _assert_unconfined(pid: int, binary: str) -> None:
+    """Prove the running daemon is not under a mandatory-access-control profile.
+
+    Ubuntu confines `/usr/sbin/rsyslogd` to /var/log and /etc/rsyslog.d, and
+    this proof deliberately runs against an isolated tree. Confinement then
+    presents as `open error: Permission denied` while running as root — the
+    EXACT sentence the production fault produces, which is the one thing this
+    proof must never be confused with.
+
+    AppArmor profiles are attached to a path, so the job runs a COPY of the
+    binary from outside `/usr/sbin`, which no profile matches. That is a claim
+    about the runner rather than about the contract, so it is checked here
+    against the kernel's own answer instead of assumed. `aa-teardown` was tried
+    first and the kernel refused to unload profiles at all.
+    """
+    attr = Path(f"/proc/{pid}/attr/current")
+    if not attr.exists():  # no LSM exposing this; nothing to check
+        return
+    try:
+        current = attr.read_text().strip("\x00 \n")
+    except OSError:  # pragma: no cover - unreadable on some kernels
+        return
+    if current and not current.startswith("unconfined"):
+        raise EnvironmentUnfit(
+            f"{binary} is running confined as {current!r}. Its isolated tree is outside what "
+            "the profile permits, and the denial is indistinguishable from the production "
+            "fault this proof detects"
+        )
+
+
+def _log(socket: Path, message: str) -> None:
+    """Write a controlled MAIL-facility message.
+
+    `-p mail.info` is the point: the facility whose file could not be created
+    is the facility the canary uses, so a repair that fixed some other file
+    would not pass.
+    """
+    result = _run(["logger", "-u", str(socket), "-p", "mail.info", "-t", "rotation-proof", message])
+    if result.returncode != 0:
+        raise ProofFailure(f"logger refused the message: {result.stderr}")
+
+
+def _expect_contains(path: Path, needle: str, *, deadline: float = 15.0) -> None:
+    """Wait for ``needle`` to appear, rather than sleeping a fixed interval.
+
+    The rendered action carries the `-` prefix, which is rsyslog's spelling for
+    "do not fsync after every write" — the correct setting for a busy log and
+    the reason a fixed one-second sleep is not a reliable wait. Polling to a
+    deadline turns a flaky proof into a slow one, which is the right trade for
+    something whose failure has to mean what it says.
+
+    The deadline is generous and the loop exits on the first success, so the
+    normal case costs a fraction of a second.
+    """
+    started = time.monotonic()
+    while True:
+        if path.is_file() and needle in path.read_text(errors="replace"):
+            return
+        if time.monotonic() - started > deadline:
+            break
+        time.sleep(0.25)
+    if not path.is_file():
+        raise ProofFailure(f"{path} does not exist after {deadline:.0f}s")
+    raise ProofFailure(
+        f"{path} does not contain {needle!r} after {deadline:.0f}s; it holds "
+        f"{len(path.read_text(errors='replace'))} byte(s)"
+    )
+
+
+def _expect_absent(path: Path, needle: str, *, settle: float = 3.0) -> None:
+    """Assert ``needle`` does NOT appear, after giving it time to.
+
+    The asymmetric case, and the one an impatient check gets wrong: asserting
+    absence immediately proves only that the write had not landed YET. The
+    post-rotation message must not appear in the ROTATED file, and it takes a
+    moment to appear anywhere at all.
+    """
+    time.sleep(settle)
+    if path.is_file() and needle in path.read_text(errors="replace"):
+        raise ProofFailure(f"{path} contains {needle!r} and must not")
+
+
+def _expect_ownership(path: Path, contract: Contract) -> None:
+    info = path.stat()
+    owner = pwd.getpwuid(info.st_uid).pw_name
+    group = grp.getgrgid(info.st_gid).gr_name
+    mode = oct(info.st_mode & 0o7777)[2:].rjust(4, "0")
+    if owner != contract.owner:
+        raise ProofFailure(f"{path} is owned by {owner!r}, not {contract.owner!r}")
+    if group != contract.group:
+        raise ProofFailure(f"{path} has group {group!r}, not {contract.group!r}")
+    if mode != contract.mode:
+        raise ProofFailure(f"{path} has mode {mode}, not {contract.mode}")
+
+
+def prove(
+    rendered: Path,
+    work: Path,
+    stanza_text: str | None = None,
+    binary: str = "rsyslogd",
+    sabotage: str | None = None,
+) -> None:
+    """Run one full rotation cycle and assert every property.
+
+    ``stanza_text`` overrides the rendered logrotate stanza, which is how the
+    negative controls are run: same code, broken input, and the run must raise.
+    """
+    contract = _parse_tmpfiles(rendered, "/var/log/mail.log")
+    _ensure_account(contract.owner)
+    _ensure_account(contract.group)
+    logs, target, spool = _prepare(work, rendered, contract, sabotage)
+    if sabotage is None:
+        # Only on the positive path. Under sabotage the writer is SUPPOSED to be
+        # unable to open the file, and asserting otherwise would turn the
+        # control's intended failure into an EnvironmentUnfit that does not
+        # count as a refusal.
+        _assert_writer_can_open(target, contract.owner)
+    socket = work / "log.sock"
+    pidfile = work / "rsyslogd.pid"
+
+    config = _rsyslog_config(work, rendered, logs, spool, socket)
+    process = _start(binary, config, pidfile)
+
+    def drain() -> str:
+        """Whatever rsyslogd has said so far, without blocking.
+
+        Attached to every failure raised below. A proof that reports "the file
+        is empty" and discards the daemon's own explanation makes the next
+        person reproduce the run to learn something the run already knew.
+        """
+        if process.stderr is None:
+            return ""
+        os.set_blocking(process.stderr.fileno(), False)
+        return (process.stderr.read() or b"").decode(errors="replace")
+
+    try:
+        # The socket has to exist before anything is written to it. rsyslogd
+        # creates it during startup, and a `logger` that runs first fails with
+        # a message about the socket rather than about the contract.
+        waited = 0.0
+        while not socket.exists() and waited < 10.0:
+            time.sleep(0.25)
+            waited += 0.25
+        if not socket.exists():
+            raise ProofFailure(f"rsyslogd did not create its socket at {socket} within 10s")
+        _log(socket, CANARY_BEFORE)
+        _expect_contains(target, CANARY_BEFORE)
+        _expect_ownership(target, contract)
+
+        stanza = stanza_text
+        if stanza is None:
+            stanza = (rendered / "host" / "logrotate.d" / "observability").read_text()
+        stanza = stanza.replace("/var/log", str(logs))
+        # The rendered postrotate calls the distribution's own helper, which
+        # signals the SYSTEM rsyslog. This instance has its own pidfile, so the
+        # helper is replaced by the same signal aimed at the right process —
+        # the property under test is "the writer is told to reopen", not which
+        # script does the telling.
+        stanza = stanza.replace("/usr/lib/rsyslog/rsyslog-rotate", f"kill -HUP $(cat {pidfile})")
+        stanza_path = work / "logrotate.conf"
+        stanza_path.write_text(stanza)
+
+        state = work / "logrotate.state"
+        result = _run(
+            ["logrotate", "--force", "--state", str(state), "--verbose", str(stanza_path)]
+        )
+        if result.returncode != 0:
+            raise ProofFailure(f"logrotate refused the rendered stanza: {result.stderr}")
+        time.sleep(2)
+
+        rotated = Path(str(target) + ".1")
+        if not rotated.exists():
+            raise ProofFailure("rotation did not move the previous file aside")
+        _expect_contains(rotated, CANARY_BEFORE, deadline=5.0)
+
+        # The three properties the negative controls each break.
+        waited = 0.0
+        while not target.exists() and waited < 10.0:
+            time.sleep(0.25)
+            waited += 0.25
+        if not target.exists():
+            raise ProofFailure("rotation did not recreate the file")
+        _expect_ownership(target, contract)
+        _log(socket, CANARY_AFTER)
+        _expect_contains(target, CANARY_AFTER)
+        try:
+            _expect_absent(rotated, CANARY_AFTER)
+        except ProofFailure as error:
+            raise ProofFailure(
+                "the post-rotation message landed in the ROTATED file, so the writer was "
+                f"never told to reopen and is still holding the old descriptor ({error})"
+            ) from error
+
+        # And the failure the host actually had: an action that suspended.
+        suspensions = len(re.findall(r"suspended", drain()))
+        if suspensions:
+            raise ProofFailure(f"rsyslog suspended an action {suspensions} time(s) during the run")
+    except ProofFailure as error:
+        said = drain().strip()
+        listing = ", ".join(sorted(entry.name for entry in logs.iterdir()))
+        raise ProofFailure(
+            f"{error}\n    rsyslogd said: {said or '(nothing)'}"
+            f"\n    log directory holds: {listing or '(empty)'}"
+        ) from error
+    finally:
+        process.send_signal(signal.SIGTERM)
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:  # pragma: no cover - defensive
+            process.kill()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--rendered", type=Path, required=True)
+    parser.add_argument("--work", type=Path, required=True)
+    parser.add_argument(
+        "--rsyslogd",
+        default="rsyslogd",
+        help=(
+            "the rsyslogd to run. A COPY outside /usr/sbin is what the CI job passes, because "
+            "AppArmor profiles are attached to a path and the distribution's profile permits "
+            "only /var/log and /etc/rsyslog.d \u2014 which this proof deliberately does not use. "
+            "The copy is verified unconfined at startup rather than assumed."
+        ),
+    )
+    arguments = parser.parse_args(argv)
+
+    rendered: Path = arguments.rendered
+    work: Path = arguments.work
+    stanza = (rendered / "host" / "logrotate.d" / "observability").read_text()
+
+    print("positive control: the rendered contract")
+    try:
+        prove(rendered, work / "positive", binary=arguments.rsyslogd)
+    except EnvironmentUnfit as unfit:
+        print(f"  the runner cannot host this proof: {unfit}")
+        return 1
+    print("  ok")
+
+    # Each control removes ONE declared property, and each removal is a thing
+    # somebody would plausibly leave out.
+    #
+    # THE FIRST TWO ATTEMPTS AT THIS LIST WERE VACUOUS, and the reason is worth
+    # recording because it is not obvious. Weakening `create 0640 syslog adm` to
+    # a bare `create` changes nothing while the original file exists: logrotate
+    # falls back to the ORIGINAL file's owner and mode, so the recreated file
+    # comes back correct anyway. Both controls passed, and the run reported that
+    # a broken contract was fine — which is precisely the failure a sensitivity
+    # proof exists to make visible, caught here by the proof's own reporting.
+    #
+    # `create`'s arguments matter only when the original is GONE, which is the
+    # production state: /var/log/mail.log did not exist, `missingok` skipped the
+    # stanza, and rsyslog was left to create a file it cannot create. So the
+    # controls now break the ENVIRONMENT the contract describes rather than the
+    # stanza's spelling, because that is where the properties actually live.
+    controls: list[tuple[str, str, str | None, tuple[str, str] | None]] = [
+        (
+            "no tmpfiles pre-creation — the production fault verbatim",
+            "The file does not exist and the directory is not group-writable, so the "
+            "privilege-dropped writer cannot create it. This is what ran for a month.",
+            "no-tmpfiles",
+            None,
+        ),
+        (
+            "the file exists but is owned by root",
+            "What a `create` with no owner produces once the original is gone. The action "
+            "opens for append as `syslog` and cannot.",
+            "wrong-owner",
+            None,
+        ),
+        (
+            "the file exists, owned correctly, with no owner write bit",
+            "Mode 0440 instead of the declared 0640.",
+            "wrong-mode",
+            None,
+        ),
+        (
+            "no postrotate reopen",
+            "rsyslog keeps writing into the renamed inode and the new file stays empty — "
+            "the failure that looks like success, because rotation itself worked.",
+            None,
+            ("    postrotate\n        /usr/lib/rsyslog/rsyslog-rotate\n    endscript", ""),
+        ),
+    ]
+    failed = False
+    for index, (name, why, sabotage, edit) in enumerate(controls):
+        stanza_text = None
+        if edit is not None:
+            search, replace = edit
+            if search not in stanza:
+                print(f"negative control {name!r}: the rendered stanza no longer contains it")
+                print("  the control mutates nothing, so it would pass for the wrong reason")
+                failed = True
+                continue
+            stanza_text = stanza.replace(search, replace, 1)
+        print(f"negative control: {name}")
+        print(f"  ({why})")
+        try:
+            prove(
+                rendered,
+                work / f"negative{index}",
+                stanza_text=stanza_text,
+                binary=arguments.rsyslogd,
+                sabotage=sabotage,
+            )
+        except EnvironmentUnfit as unfit:
+            # NOT counted as a refusal. A control that "failed" because the
+            # machine could not host it proves nothing, and letting it pass is
+            # how a sensitivity proof quietly stops being one.
+            print(f"  the runner cannot host this control: {unfit}")
+            failed = True
+        except ProofFailure as error:
+            print(f"  ok, refused: {error}")
+        else:
+            print("  THE PROOF PASSED WITH A BROKEN CONTRACT, so it is checking nothing")
+            failed = True
+
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except ProofFailure as failure:  # pragma: no cover - the positive control failing
+        print(f"the rendered rotation contract does not hold: {failure}", file=sys.stderr)
+        raise SystemExit(1) from failure

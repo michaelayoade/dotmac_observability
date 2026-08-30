@@ -45,48 +45,77 @@ from typing import TypeAlias, cast
 import jsonschema
 
 from .model import (
+    Bundle,
     ControlPlane,
     DesiredState,
+    DirectoryContract,
     Evaluator,
+    Exposure,
     Federation,
     FederationBinding,
     FederationSource,
+    Grafana,
+    GrafanaDashboardProvider,
+    GrafanaDatasource,
     Host,
     HostBinding,
     Inhibition,
     Integration,
     Label,
+    Loki,
     PrivateInventory,
+    Promtail,
+    PromtailJob,
     Publication,
     Receiver,
     ReceiverBinding,
     Resolution,
     ResolvedEndpoint,
     ResolvedReceiver,
+    RetiredProduct,
+    RosterEntry,
+    Rotation,
     Route,
     RouteDefaults,
+    Runtime,
     ScrapeJob,
     SecretFile,
     Smtp,
+    SourceSet,
+    SourceSetBinding,
+    Surface,
+    Syslog,
+    SyslogFile,
     TargetBinding,
     TargetSet,
+    Timezone,
+    VerificationGate,
 )
 
 __all__ = [
+    "ACCEPTED_SCHEMA_VERSION",
+    "CAPTURE_SCHEMA_VERSION",
     "PRIVATE_SCAN_EXCLUSIONS",
     "SECRET_SCAN_EXCLUSIONS",
+    "CaptureInventory",
     "Finding",
     "InventoryError",
+    "MigrationPlan",
     "SupersedeSummary",
     "SupersessionRequest",
     "apply_supersession",
     "canonical_bytes",
     "canonical_digest",
+    "classify_stored_inventory",
     "load",
+    "load_capture_inventory",
     "load_private_inventory",
     "load_supersession_request",
+    "migrate_capture",
+    "migration_findings",
     "resolution_findings",
     "resolve",
+    "retirement_findings",
     "scan_for_private_material",
     "scan_for_secret_material",
     "semantic_findings",
@@ -124,6 +153,25 @@ _LOOPBACK_PREFIX = "127."
 
 
 _INTEGER = re.compile(r"^-?[0-9]+$")
+
+# What an INGESTION predicate has to be about. A closed vocabulary rather than
+# a free-text field, because the gate this list defends is the one Observer did
+# not have: eighteen targets reporting `up == 1` while 1,858,942 samples were
+# refused at append. Every token below names a counter that only moves when a
+# sample the scrape returned was NOT stored, so a predicate mentioning none of
+# them is a predicate about something other than whether the data arrived.
+_INGESTION_TOKENS = frozenset(
+    {
+        "duplicate_timestamp",
+        "out_of_order",
+        "out_of_bounds",
+        "sample_limit",
+        "exemplar_out_of_order",
+        "samples_post_metric_relabeling",
+        "invalid_series",
+        "too_old",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,6 +332,8 @@ def _target_set(document: Document) -> TargetSet:
                 metrics_path=str(job["metrics_path"]),
                 authenticated=bool(job["authenticated"]),
                 labels=_labels(job.get("labels")),
+                static_labels=_labels(job.get("static_labels")),
+                params=_params(job.get("params")),
                 scrape_interval=str(job["scrape_interval"]) if "scrape_interval" in job else None,
                 scrape_timeout=str(job["scrape_timeout"]) if "scrape_timeout" in job else None,
                 publication=_publication(job.get("publication")),
@@ -378,7 +428,161 @@ def _inhibitions(document: Document) -> tuple[Inhibition, ...]:
     )
 
 
-def _inventory_files(root: Path) -> tuple[Path, Path, tuple[Path, ...], tuple[Path, ...]]:
+# ── The bundle (ADR-0008) ───────────────────────────────────────────────────
+
+
+def _runtime(raw: Mapping[str, object]) -> Runtime:
+    return Runtime(
+        image=str(raw["image"]),
+        digest=str(raw["digest"]),
+        version=str(raw["version"]) if "version" in raw else None,
+        listen=str(raw["listen"]),
+    )
+
+
+def _params(raw: object) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Ordered pairs, in the order TOML declared them.
+
+    ``tomllib`` preserves table order, so this is deterministic without
+    sorting — which matters, because sorting here would silently reorder a
+    rendered scrape config and make a byte diff say something the author did
+    not do.
+    """
+    if raw is None:
+        return ()
+    table = _mapping(raw)
+    return tuple((name, _strings(values)) for name, values in table.items())
+
+
+def _bundle(document: Document) -> Bundle:
+    timezone = _mapping(document["timezone"])
+    loki = _mapping(document["loki"])
+    promtail = _mapping(document["promtail"])
+    grafana = _mapping(document["grafana"])
+    syslog = _mapping(document["syslog"])
+    directory = _mapping(syslog["directory"])
+    rotation = _mapping(syslog["rotation"])
+    exposure = _mapping(document["exposure"])
+    verification = _mapping(document["verification"])
+    return Bundle(
+        timezone=Timezone(
+            infrastructure=str(timezone["infrastructure"]),
+            presentation=(str(timezone["presentation"]) if "presentation" in timezone else None),
+            rationale=str(timezone["rationale"]),
+        ),
+        loki=Loki(
+            runtime=_runtime(_mapping(loki["runtime"])),
+            retention=str(loki["retention"]),
+            reject_older_than=str(loki["reject_older_than"]),
+            ingestion_rate_mb=int(cast(int, loki["ingestion_rate_mb"])),
+            ingestion_burst_mb=int(cast(int, loki["ingestion_burst_mb"])),
+        ),
+        promtail=Promtail(
+            runtime=_runtime(_mapping(promtail["runtime"])),
+            jobs=tuple(
+                PromtailJob(
+                    name=str(job["name"]),
+                    path_glob=str(job["path_glob"]),
+                    labels=_labels(job["labels"]),
+                    decode_docker_json=bool(job.get("decode_docker_json", False)),
+                )
+                for job in _rows(promtail["jobs"])
+            ),
+        ),
+        grafana=Grafana(
+            runtime=_runtime(_mapping(grafana["runtime"])),
+            datasources=tuple(
+                GrafanaDatasource(
+                    name=str(row["name"]),
+                    kind=str(row["kind"]),
+                    service=str(row["service"]),
+                    default=bool(row["default"]),
+                )
+                for row in _rows(grafana["datasources"])
+            ),
+            dashboard_providers=tuple(
+                GrafanaDashboardProvider(name=str(row["name"]), folder=str(row["folder"]))
+                for row in _rows(grafana["dashboard_providers"])
+            ),
+        ),
+        syslog=Syslog(
+            directory=DirectoryContract(
+                path=str(directory["path"]),
+                owner=str(directory["owner"]),
+                group=str(directory["group"]),
+                mode=str(directory["mode"]),
+            ),
+            files=tuple(
+                SyslogFile(
+                    facility=str(row["facility"]),
+                    path=str(row["path"]),
+                    owner=str(row["owner"]),
+                    group=str(row["group"]),
+                    mode=str(row["mode"]),
+                    synchronous=bool(row.get("synchronous", False)),
+                )
+                for row in _rows(syslog["files"])
+            ),
+            rotation=Rotation(
+                frequency=str(rotation["frequency"]),
+                keep=int(cast(int, rotation["keep"])),
+                compress=bool(rotation["compress"]),
+            ),
+        ),
+        roster=tuple(
+            RosterEntry(
+                name=str(row["name"]),
+                kind=str(row["kind"]),
+                owner=str(row["owner"]),
+                port=int(cast(int, row["port"])) if "port" in row else None,
+            )
+            for row in _rows(document["roster"])
+        ),
+        retired=tuple(
+            RetiredProduct(
+                name=str(row["name"]),
+                tokens=_strings(row["tokens"]),
+                decommissioned=str(row["decommissioned"]),
+                rationale=str(row["rationale"]),
+                residual_data=(str(row["residual_data"]) if "residual_data" in row else None),
+            )
+            for row in _rows(document["retired"])
+        ),
+        exposure=Exposure(
+            source_sets=tuple(
+                SourceSet(name=str(row["name"]), kind=str(row["kind"]))
+                for row in _rows(exposure["source_sets"])
+            ),
+            surfaces=tuple(
+                Surface(
+                    name=str(row["name"]),
+                    kind=str(row["kind"]),
+                    port=int(cast(int, row["port"])),
+                    protocol=str(row["protocol"]),
+                    family=str(row["family"]),
+                    exposure=str(row["exposure"]),
+                    allow_from=str(row["allow_from"]) if "allow_from" in row else None,
+                    authenticated=bool(row.get("authenticated", False)),
+                    rationale=str(row["rationale"]) if "rationale" in row else None,
+                )
+                for row in _rows(exposure["surfaces"])
+            ),
+        ),
+        gates=tuple(
+            VerificationGate(
+                name=str(row["name"]),
+                health=str(row["health"]),
+                integrity=str(row["integrity"]),
+                window=str(row["window"]),
+            )
+            for row in _rows(verification["gates"])
+        ),
+    )
+
+
+def _inventory_files(
+    root: Path,
+) -> tuple[Path, Path, Path, tuple[Path, ...], tuple[Path, ...]]:
     """Locate every input, in a fixed order.
 
     ``sorted`` on the directory listings is what makes rendering reproducible
@@ -387,6 +591,7 @@ def _inventory_files(root: Path) -> tuple[Path, Path, tuple[Path, ...], tuple[Pa
     """
     return (
         root / "inventory" / "control-plane.toml",
+        root / "inventory" / "bundle.toml",
         root / "routing",
         tuple(sorted((root / "inventory" / "targets").glob("*.toml"))),
         tuple(sorted((root / "inventory" / "federations").glob("*.toml"))),
@@ -405,11 +610,14 @@ def load(root: Path, *, contracts: Path | None = None) -> DesiredState:
     missing or malformed.
     """
     schema_root = contracts if contracts is not None else root / "contracts"
-    control_plane_path, routing_dir, target_paths, federation_paths = _inventory_files(root)
+    control_plane_path, bundle_path, routing_dir, target_paths, federation_paths = _inventory_files(
+        root
+    )
     findings: list[Finding] = []
 
     required = {
         "control-plane": control_plane_path,
+        "bundle": bundle_path,
         "receivers": routing_dir / "receivers.toml",
         "policies": routing_dir / "policies.toml",
         "inhibition": routing_dir / "inhibition.toml",
@@ -428,6 +636,9 @@ def load(root: Path, *, contracts: Path | None = None) -> DesiredState:
     findings += _validate_document(
         schema_root, "control-plane", control_plane_doc, "inventory/control-plane.toml"
     )
+
+    bundle_doc = _read_toml(bundle_path)
+    findings += _validate_document(schema_root, "bundle", bundle_doc, "inventory/bundle.toml")
 
     target_docs: list[tuple[str, Document]] = []
     for path in target_paths:
@@ -475,6 +686,7 @@ def load(root: Path, *, contracts: Path | None = None) -> DesiredState:
     defaults, routes = _policies(routing_docs["policies"])
     return DesiredState(
         control_plane=_control_plane(control_plane_doc),
+        bundle=_bundle(bundle_doc),
         targets=tuple(_target_set(document) for _, document in target_docs),
         federations=tuple(_federation(document) for _, document in federation_docs),
         receivers=_receivers(routing_docs["receivers"]),
@@ -699,6 +911,233 @@ def _control_plane_findings(state: DesiredState) -> list[Finding]:
     return findings
 
 
+def _bundle_findings(state: DesiredState) -> list[Finding]:
+    """The gates that need the bundle and the rest of the public inventory together.
+
+    Every one of them exists because the corresponding thing was actually wrong
+    on the Observer host, and every one of them is a question no single
+    document could answer.
+    """
+    findings: list[Finding] = []
+    bundle = state.bundle
+
+    # ── runtimes bind loopback, exactly as the evaluators must ──────────────
+    for name, runtime in (
+        ("loki", bundle.loki.runtime),
+        ("promtail", bundle.promtail.runtime),
+        ("grafana", bundle.grafana.runtime),
+    ):
+        address = runtime.listen.rsplit(":", 1)[0]
+        if not address.startswith(_LOOPBACK_PREFIX):
+            findings.append(
+                Finding(
+                    "LISTEN-NOT-LOOPBACK",
+                    f"inventory/bundle.toml#{name}",
+                    f"listen address {address!r} is not a loopback address; the rule is the "
+                    "same for a runtime as for an evaluator, because the reason is the same "
+                    "(ADR-0006 section 5)",
+                )
+            )
+
+    # ── the roster owns every service the bundle deploys ────────────────────
+    services = {entry.name: entry for entry in bundle.roster if entry.kind == "service"}
+    deployed = ("prometheus", "alertmanager", "loki", "promtail", "grafana")
+    for name in deployed:
+        if name not in services:
+            findings.append(
+                Finding(
+                    "ROSTER-INCOMPLETE",
+                    f"inventory/bundle.toml#roster/{name}",
+                    f"the bundle deploys {name} and the roster does not own it; an unrostered "
+                    "resource is unattributed, and the whole point of the roster is that "
+                    "deleting something unattributed is a decision rather than a tidy-up",
+                )
+            )
+    for entry in bundle.roster:
+        if entry.owner.strip().lower() in {"unowned", "unknown", "none", "tbd"}:
+            findings.append(
+                Finding(
+                    "ROSTER-UNOWNED",
+                    f"inventory/bundle.toml#roster/{entry.name}",
+                    f"owner {entry.owner!r} names nobody; a placeholder owner is worse than an "
+                    "absent entry, because it reads as attributed",
+                )
+            )
+
+    # ── a datasource points at a service the bundle actually deploys ────────
+    defaults = [source for source in bundle.grafana.datasources if source.default]
+    if len(defaults) != 1:
+        findings.append(
+            Finding(
+                "DATASOURCE-DEFAULT",
+                "inventory/bundle.toml#grafana",
+                f"{len(defaults)} datasources are marked default; Grafana silently picks one "
+                "when several claim it, so a dashboard's queries then depend on load order",
+            )
+        )
+    for source in bundle.grafana.datasources:
+        rostered = services.get(source.service)
+        if rostered is None:
+            findings.append(
+                Finding(
+                    "DATASOURCE-UNROSTERED",
+                    f"inventory/bundle.toml#grafana/{source.name}",
+                    f"datasource points at service {source.service!r}, which the roster does "
+                    "not own; a datasource URL is derived from the rostered port, so this one "
+                    "could only be rendered by inventing an address",
+                )
+            )
+        elif rostered.port is None:
+            findings.append(
+                Finding(
+                    "DATASOURCE-NO-PORT",
+                    f"inventory/bundle.toml#roster/{source.service}",
+                    "a service a datasource names must declare the port it listens on inside "
+                    "the compose network",
+                )
+            )
+
+    # ── the syslog contract can actually be satisfied ───────────────────────
+    directory = bundle.syslog.directory
+    for logfile in bundle.syslog.files:
+        parent = logfile.path.rsplit("/", 1)[0] or "/"
+        if parent != directory.path:
+            findings.append(
+                Finding(
+                    "SYSLOG-OUTSIDE-CONTRACT",
+                    f"inventory/bundle.toml#syslog/{logfile.facility}",
+                    f"{logfile.path} is not inside the declared directory {directory.path}; a "
+                    "file whose parent has no stated owner and mode is the exact shape of the "
+                    "failure this section exists to prevent",
+                )
+            )
+        # The OWNER digit, and the write bit inside it. Spelled as a mask rather
+        # than a membership test in a string of digits: the string form was
+        # written inverted the first time and passed a mode of 0440, which is
+        # precisely the mode that suspends the action.
+        if not int(logfile.mode[1]) & 0o2:
+            findings.append(
+                Finding(
+                    "SYSLOG-OWNER-WRITE",
+                    f"inventory/bundle.toml#syslog/{logfile.facility}",
+                    f"mode {logfile.mode} does not grant the owner write; rsyslog appends to this "
+                    "file as its own user, and a mode that forbids it suspends the action",
+                )
+            )
+        if int(logfile.mode[3]) != 0:
+            findings.append(
+                Finding(
+                    "SYSLOG-WORLD-READABLE",
+                    f"inventory/bundle.toml#syslog/{logfile.facility}",
+                    f"mode {logfile.mode} grants other; a log file carries message contents and "
+                    "is readable through its group, which is what `adm` is for",
+                )
+            )
+    duplicate_paths = [
+        entry.path
+        for entry in bundle.syslog.files
+        if sum(1 for other in bundle.syslog.files if other.path == entry.path) > 1
+    ]
+    for path in sorted(set(duplicate_paths)):
+        findings.append(
+            Finding(
+                "SYSLOG-PATH-DUPLICATE",
+                f"inventory/bundle.toml#syslog{path}",
+                "two facilities write the same file with independently declared ownership; "
+                "whichever tmpfiles line is applied last silently wins",
+            )
+        )
+
+    # ── exposure ────────────────────────────────────────────────────────────
+    declared_sets = {source.name for source in bundle.exposure.source_sets}
+    used_sets: set[str] = set()
+    for surface in bundle.exposure.surfaces:
+        location = f"inventory/bundle.toml#exposure/{surface.name}"
+        if surface.exposure == "ingress":
+            if surface.allow_from is None:
+                findings.append(
+                    Finding(
+                        "SURFACE-NO-SOURCE",
+                        location,
+                        "an ingress surface must name the source set permitted to reach it; "
+                        "without one the rendered rule would permit everybody, which is "
+                        "`public` wearing `ingress`'s name",
+                    )
+                )
+            elif surface.allow_from not in declared_sets:
+                findings.append(
+                    Finding(
+                        "SURFACE-UNDECLARED-SOURCE",
+                        location,
+                        f"allow_from names {surface.allow_from!r}, which no source set declares",
+                    )
+                )
+            else:
+                used_sets.add(surface.allow_from)
+        elif surface.allow_from is not None:
+            findings.append(
+                Finding(
+                    "SURFACE-SOURCE-IGNORED",
+                    location,
+                    f"a {surface.exposure!r} surface is not reached from a source, so naming "
+                    f"{surface.allow_from!r} describes a rule that will never be rendered",
+                )
+            )
+        if surface.exposure == "public":
+            if not surface.authenticated:
+                findings.append(
+                    Finding(
+                        "SURFACE-PUBLIC-UNAUTHENTICATED",
+                        location,
+                        "an unauthenticated public surface is refused (AGENTS.md rule 19)",
+                    )
+                )
+            if surface.rationale is None:
+                findings.append(
+                    Finding(
+                        "SURFACE-PUBLIC-UNEXPLAINED",
+                        location,
+                        "a public surface states why it is deliberately reachable from anywhere",
+                    )
+                )
+    for name in sorted(declared_sets - used_sets):
+        findings.append(
+            Finding(
+                "SOURCE-SET-UNUSED",
+                f"inventory/bundle.toml#exposure/{name}",
+                "no surface allows from this set; an unused set is a binding that will be "
+                "resolved, carried into a receipt and never consulted, which is the same "
+                "stale-binding shape resolution refuses in the other direction",
+            )
+        )
+
+    # ── verification conflates nothing ──────────────────────────────────────
+    for gate in bundle.gates:
+        location = f"inventory/bundle.toml#verification/{gate.name}"
+        if gate.health.strip() == gate.integrity.strip():
+            findings.append(
+                Finding(
+                    "GATE-CONFLATED",
+                    location,
+                    "the health and integrity predicates are the same expression, so the gate "
+                    "asserts one fact twice; eighteen targets read up == 1 on this host while "
+                    "1.8 million samples were rejected, which is precisely the pair of facts a "
+                    "single predicate cannot separate",
+                )
+            )
+        if not any(token in gate.integrity for token in _INGESTION_TOKENS):
+            findings.append(
+                Finding(
+                    "GATE-INTEGRITY-NOT-INGESTION",
+                    location,
+                    "the integrity predicate mentions none of "
+                    f"{', '.join(sorted(_INGESTION_TOKENS))}; a gate whose second predicate is "
+                    "not about ingestion is a gate with one predicate and a longer name",
+                )
+            )
+    return findings
+
+
 def semantic_findings(state: DesiredState) -> tuple[Finding, ...]:
     """Every check that needs more than one PUBLIC document to answer.
 
@@ -707,7 +1146,10 @@ def semantic_findings(state: DesiredState) -> tuple[Finding, ...]:
     checks that need resolution are :func:`resolution_findings`.
     """
     return tuple(
-        _control_plane_findings(state) + _routing_findings(state) + _target_findings(state)
+        _control_plane_findings(state)
+        + _routing_findings(state)
+        + _target_findings(state)
+        + _bundle_findings(state)
     )
 
 
@@ -814,6 +1256,14 @@ def load_private_inventory(path: Path, *, contracts: Path) -> PrivateInventory:
                 destination=str(row["destination"]) if "destination" in row else None,
             )
             for row in _rows(document["receivers"])
+        ),
+        source_sets=tuple(
+            SourceSetBinding(
+                name=str(row["name"]),
+                interface=str(row["interface"]) if "interface" in row else None,
+                prefixes=_strings(row["prefixes"]) if "prefixes" in row else (),
+            )
+            for row in _rows(document.get("source_sets", []))
         ),
     )
 
@@ -1020,6 +1470,82 @@ def resolution_findings(state: DesiredState, inventory: PrivateInventory) -> tup
                 "nobody will think to revoke",
             )
         )
+
+    # ── exposure source sets, in both directions and with the kind checked ──
+    #
+    # The kind check is the interesting one. A set declared `tunnel_interface`
+    # and bound to prefixes renders a source match where an interface match was
+    # intended: strictly weaker, silently different, and valid under both
+    # schemas on its own. Only the join can see it.
+    bindings = {binding.name: binding for binding in inventory.source_sets}
+    declared_sets = {source.name: source for source in state.bundle.exposure.source_sets}
+    used_sets = {
+        surface.allow_from
+        for surface in state.bundle.exposure.surfaces
+        if surface.allow_from is not None
+    }
+    for name in sorted(used_sets):
+        source = declared_sets.get(name)
+        if source is None:
+            # Already reported by the public gate; not repeated here.
+            continue
+        bound = bindings.get(name)
+        if bound is None:
+            findings.append(
+                Finding(
+                    "RESOLUTION-UNRESOLVED",
+                    f"{inventory.document}#source_sets/{name}",
+                    "no binding resolves this source set; the surface that allows from it "
+                    "cannot be rendered without inventing a source",
+                )
+            )
+            continue
+        if source.kind == "tunnel_interface":
+            if bound.interface is None:
+                findings.append(
+                    Finding(
+                        "SOURCE-SET-KIND",
+                        f"{inventory.document}#source_sets/{name}",
+                        "the set is declared tunnel_interface and its binding carries no "
+                        "interface",
+                    )
+                )
+            if bound.prefixes:
+                findings.append(
+                    Finding(
+                        "SOURCE-SET-KIND",
+                        f"{inventory.document}#source_sets/{name}",
+                        "the set is declared tunnel_interface and its binding carries "
+                        "prefixes; a prefix match is not an interface match, and the "
+                        "difference is invisible in the rendered rule",
+                    )
+                )
+        elif source.kind == "address_set":
+            if not bound.prefixes:
+                findings.append(
+                    Finding(
+                        "SOURCE-SET-KIND",
+                        f"{inventory.document}#source_sets/{name}",
+                        "the set is declared address_set and its binding carries no prefixes",
+                    )
+                )
+            if bound.interface is not None:
+                findings.append(
+                    Finding(
+                        "SOURCE-SET-KIND",
+                        f"{inventory.document}#source_sets/{name}",
+                        "the set is declared address_set and its binding carries an interface",
+                    )
+                )
+    for unused in sorted(set(bindings) - used_sets):
+        findings.append(
+            Finding(
+                "RESOLUTION-UNUSED",
+                f"{inventory.document}#source_sets/{unused}",
+                "no surface allows from this set; a bound source nothing consults is a stale "
+                "permission that survives every review because nothing reads it",
+            )
+        )
     return tuple(findings)
 
 
@@ -1068,11 +1594,13 @@ def resolve(state: DesiredState, inventory: PrivateInventory) -> Resolution:
         for receiver in state.receivers
         for integration in receiver.integrations
     }
+    source_sets = {binding.name: binding for binding in inventory.source_sets}
     return Resolution(
         inventory=inventory,
         jobs=MappingProxyType(jobs),
         federations=MappingProxyType(resolved_federations),
         integrations=MappingProxyType(integrations),
+        source_sets=MappingProxyType(source_sets),
     )
 
 
@@ -1432,16 +1960,43 @@ def supersede_summary(previous: PrivateInventory, following: PrivateInventory) -
 
 
 @dataclass(frozen=True, slots=True)
-class SupersessionRequest:
-    """A reviewed, PUBLIC instruction to retire logical entries.
+class MigrationPlan:
+    """The logical facts a capture-format migration needs and the capture lacks.
 
-    Retirement only. Removing an entry needs its logical name, which ADR-0004
-    already publishes; adding one needs a resolved endpoint or credential
-    binding, which must never pass through public Git or a CI input. So the
-    request contract has no field for provisioning, and that is a boundary
-    rather than an unfinished first cut.
+    Every field is a NAME. Not one is a resolved value, which is what lets the
+    whole plan sit in public Git and be reviewed before anything reads the
+    store. The one resolved value a migration needs — the host binding — is not
+    here and cannot be: it arrives as a file on the runner, from a configured
+    private source, and is shredded with the store credential.
     """
 
+    document: str
+    host_target_id: str
+    federations: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SupersessionRequest:
+    """A reviewed, PUBLIC instruction to change a private inventory.
+
+    Two kinds, and the boundary between them is the same one ADR-0006 drew.
+
+    ``retire`` removes entries, which needs only their logical names — already
+    public under ADR-0004.
+
+    ``migrate-capture`` rewrites a document written against the PRE-CONTRACT
+    capture format into the accepted one. It carries no resolved value either:
+    every byte of the result comes from the store, and the single field the
+    capture does not hold (the host binding) is supplied to the tool as a file
+    from a configured private source rather than through this document.
+
+    What still has no field anywhere is ADDING a target, which genuinely needs
+    a resolved endpoint. That boundary is unchanged.
+    """
+
+    kind: str
+    previous_format: str
+    migrate: MigrationPlan | None
     document: str
     previous_version: int
     previous_digest: str
@@ -1469,13 +2024,26 @@ def load_supersession_request(path: Path, *, contracts: Path) -> SupersessionReq
         raise InventoryError(findings)
     previous = _mapping(document["previous"])
     storage = _mapping(document["storage"])
-    retire = _mapping(document["retire"])
+    retire = _mapping(document.get("retire", {}))
 
     def group(name: str) -> tuple[str, ...]:
         raw = retire.get(name)
         return () if raw is None else _strings(raw)
 
+    migrate_raw = document.get("migrate")
+    migrate = None
+    if migrate_raw is not None:
+        plan = _mapping(migrate_raw)
+        migrate = MigrationPlan(
+            document=str(plan["document"]),
+            host_target_id=str(plan["host_target_id"]),
+            federations=_strings(plan["federations"]),
+        )
+
     return SupersessionRequest(
+        kind=str(document["kind"]),
+        previous_format=str(previous["format"]),
+        migrate=migrate,
         document=str(document["document"]),
         previous_version=int(cast(int, previous["version"])),
         previous_digest=str(previous["sha256"]),
@@ -1500,6 +2068,18 @@ def apply_supersession(
     collateral of a retirement.
     """
     findings: list[Finding] = []
+    if request.kind != "retire":
+        # A migration is applied by `migrate_capture`, which reads the previous
+        # version through the CAPTURE contract. Letting it reach here would mean
+        # loading a capture-format document through the accepted one, which is
+        # the failure this whole path exists to remove.
+        return {}, (
+            Finding(
+                "REQUEST-KIND",
+                request.document,
+                f"apply_supersession applies a retirement; this request is {request.kind!r}",
+            ),
+        )
     if request.document != previous.document:
         findings.append(
             Finding(
@@ -1559,3 +2139,413 @@ def apply_supersession(
     if findings:
         return {}, tuple(findings)
     return following, ()
+
+
+# ── The capture format, and migrating out of it (ADR-0008) ──────────────────
+#
+# The production private inventory is stored in the shape the 2026-08-29 census
+# produced, three PRs before the contract existed. Both supersession tools load
+# the previous version through `load_private_inventory`, which validates it, so
+# the workflow fails at its FIRST tool step with 68 schema errors — after
+# passing its own precondition guard, which only checks that public inventory
+# exists. That is the worst available failure shape: it looks like a corrupt
+# document rather than a document in a known older format.
+#
+# Three functions fix that. `classify_stored_inventory` says WHICH format the
+# store holds, before anything tries to load it. `load_capture_inventory` reads
+# the old shape. `migrate_capture` rewrites it into the accepted contract using
+# only values the store already held, plus a host binding supplied privately —
+# which is provisioning without disclosure, and the only way to add
+# `host.identity` and `host.ssh_alias` without a resolved value passing through
+# public Git or a CI input.
+
+CAPTURE_SCHEMA_VERSION = "observability-private-inventory.v1 (PROPOSED)"
+ACCEPTED_SCHEMA_VERSION = "observability-private-inventory.v1"
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureInventory:
+    """A stored document in the PRE-CONTRACT capture format.
+
+    Deliberately not a :class:`PrivateInventory`. It has no ``document`` name,
+    no host binding and no federations array, so constructing one would mean
+    inventing three things — and a type that can be constructed from a document
+    that does not contain the values is a type that will be.
+
+    ``raw`` is kept because the migration writes the STORED document forward
+    rather than a re-serialisation of this record. A model-shaped rewrite drops
+    every key the loader does not read, which for a document nobody has fully
+    enumerated is an unbounded loss.
+    """
+
+    version: int
+    environment: str
+    digest: str
+    raw: Mapping[str, object]
+
+
+def classify_stored_inventory(document: Mapping[str, object]) -> str:
+    """Which contract a stored document is written against, from its own claim.
+
+    Reads ``schema_version`` and nothing else. Deliberately not a heuristic
+    over the key set: a document that has drifted into a third shape must
+    present as unrecognised rather than be sorted into whichever known format
+    it resembles most, because the two known formats are migrated by different
+    code and being wrong about which one is holding a production estate.
+
+    Returns the declared version string, or ``"unrecognised"``.
+    """
+    declared = document.get("schema_version")
+    if declared in (CAPTURE_SCHEMA_VERSION, ACCEPTED_SCHEMA_VERSION):
+        return str(declared)
+    return "unrecognised"
+
+
+def load_capture_inventory(path: Path, *, contracts: Path) -> CaptureInventory:
+    """Read and validate one document in the capture format.
+
+    The contract it validates against is strict about KEYS and permissive about
+    leaf types, because the census read out the key set and never read out the
+    types. A contract that invented them would be asserting something nobody
+    measured; the migration closes the gap the honest way, by refusing and
+    naming the key when a leaf is not a shape it can map.
+    """
+    if not path.is_file():
+        raise InventoryError(
+            [Finding("MISSING", str(path), "the stored inventory document is absent")]
+        )
+    try:
+        with path.open("rb") as handle:
+            document: Document = json.load(handle)
+    except json.JSONDecodeError as error:
+        raise InventoryError(
+            [
+                Finding(
+                    "MALFORMED",
+                    f"{path}:{error.lineno}",
+                    f"the document is not valid JSON ({error.msg})",
+                )
+            ]
+        ) from error
+    findings = _validate_document(contracts, "private-inventory-capture", document, str(path))
+    if findings:
+        raise InventoryError(findings)
+    return CaptureInventory(
+        version=int(cast(int, document["version"])),
+        environment=str(document["environment"]),
+        digest=canonical_digest(document),
+        raw=document,
+    )
+
+
+def _capture_credential(raw: object) -> Mapping[str, object] | None:
+    """Accept only the shape the accepted contract requires, or nothing.
+
+    Returning ``None`` for an unmappable leaf rather than guessing is the whole
+    discipline here: the caller turns it into a finding that names the entry,
+    and a guess never reaches the store.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        return None
+    if "openbao_path" not in raw or "file_name" not in raw:
+        return None
+    return {"openbao_path": str(raw["openbao_path"]), "file_name": str(raw["file_name"])}
+
+
+def migrate_capture(
+    capture: CaptureInventory,
+    request: SupersessionRequest,
+    host_binding: Mapping[str, object],
+    federation_ids: Iterable[str],
+) -> tuple[Mapping[str, object], tuple[Finding, ...]]:
+    """Rewrite a capture-format document into the accepted contract.
+
+    Every value in the result comes from ``capture`` except the host binding,
+    which the capture does not hold at all and which is supplied privately by
+    the caller. ``federation_ids`` is the PUBLIC inventory's own list of
+    federation target ids, cross-checked against the request's declaration —
+    the split between scrape targets and federations is declared and verified,
+    never inferred from a name, because a name-shaped heuristic moves a scrape
+    target into the federation array the first time somebody calls one
+    ``something-federation``.
+
+    Two fields the capture carries move OUT of the private half rather than
+    across it: ``params`` and ``static_labels`` are scrape protocol and logical
+    labelling, both public under ADR-0006 section 5's reasoning, and both now
+    have a home in ``observability-target.v2``. The migration therefore drops
+    them from the private document and reports what it dropped, so a reviewer
+    can see that the public inventory has to carry them before a render is
+    correct.
+    """
+    findings: list[Finding] = []
+    location = request.document
+
+    if request.migrate is None:  # pragma: no cover - the contract branch forbids it
+        return {}, (Finding("REQUEST-KIND", location, "a migration needs a [migrate] block"),)
+    plan = request.migrate
+
+    if request.previous_format != CAPTURE_SCHEMA_VERSION:
+        findings.append(
+            Finding(
+                "REQUEST-FORMAT",
+                location,
+                f"the request declares the stored version is {request.previous_format!r} but "
+                "this is a capture-format migration",
+            )
+        )
+    if request.previous_version != capture.version:
+        findings.append(
+            Finding(
+                "REQUEST-VERSION",
+                location,
+                f"the request migrates version {request.previous_version} but the store holds "
+                f"version {capture.version}",
+            )
+        )
+    if request.previous_digest != capture.digest:
+        findings.append(
+            Finding(
+                "REQUEST-PREVIOUS-DIGEST",
+                location,
+                "the stored document does not hash to the digest this request names. If the "
+                "migration has already run, the store now holds an accepted-contract document "
+                "and this request has been applied; `inventory-classify` says which it is "
+                "without reading a value",
+            )
+        )
+    if plan.host_target_id != str(host_binding.get("target_id", "")):
+        findings.append(
+            Finding(
+                "MIGRATE-HOST-TARGET",
+                location,
+                "the supplied host binding is for a different logical host than the request "
+                "declares; a binding written under the wrong target_id resolves cleanly and "
+                "points a promotion at the wrong estate",
+            )
+        )
+    for key in ("target_id", "identity", "ssh_alias"):
+        if not str(host_binding.get(key, "")):
+            findings.append(
+                Finding(
+                    "MIGRATE-HOST-INCOMPLETE",
+                    location,
+                    f"the supplied host binding has no {key}; the accepted contract requires "
+                    "all three, and the capture format holds none of them",
+                )
+            )
+
+    declared_federations = set(plan.federations)
+    public_federations = set(federation_ids)
+    if declared_federations != public_federations:
+        findings.append(
+            Finding(
+                "MIGRATE-FEDERATION-SPLIT",
+                location,
+                f"the request declares federations {sorted(declared_federations)} and the "
+                f"public inventory declares {sorted(public_federations)}; the split has to be "
+                "the same on both sides or one array ends up holding an entry the renderer "
+                "looks for in the other",
+            )
+        )
+
+    if "alertmanager_endpoints" in capture.raw:
+        findings.append(
+            Finding(
+                "MIGRATE-UNCARRIED",
+                f"{location}#alertmanager_endpoints",
+                "the capture holds alertmanager_endpoints, which the accepted contract has no "
+                "field for. It is not silently dropped: the rendered compose file already "
+                "names the alertmanager service, so the value is redundant rather than lost — "
+                "confirm that in the request's rationale and remove this key from the store in "
+                "the same migration",
+            )
+        )
+
+    targets: list[Mapping[str, object]] = []
+    federations: list[Mapping[str, object]] = []
+    moved_to_public: list[str] = []
+    for row in _rows(capture.raw["targets"]):
+        target_id = str(row["target_id"])
+        endpoints = _strings(row["resolved_endpoints"])
+        if "tls_config" in row:
+            findings.append(
+                Finding(
+                    "MIGRATE-TLS-CONFIG",
+                    f"{location}#targets/{target_id}",
+                    "this target carries a tls_config, which the accepted contract has no field "
+                    "for. Refusing rather than dropping it: a TLS server-identity binding "
+                    "changes how the target is verified, and losing it silently weakens a live "
+                    "scrape",
+                )
+            )
+        for public_key in ("params", "static_labels"):
+            if public_key in row:
+                moved_to_public.append(f"{target_id}.{public_key}")
+        credential = None
+        if "credential" in row:
+            credential = _capture_credential(row["credential"])
+            if credential is None:
+                findings.append(
+                    Finding(
+                        "MIGRATE-CREDENTIAL-SHAPE",
+                        f"{location}#targets/{target_id}",
+                        "the stored credential is not an object carrying openbao_path and "
+                        "file_name, and the migration will not guess one; complete the entry "
+                        "in the store's own shape first",
+                    )
+                )
+        if target_id in declared_federations:
+            if len(endpoints) != 1:
+                findings.append(
+                    Finding(
+                        "MIGRATE-FEDERATION-ENDPOINTS",
+                        f"{location}#federations/{target_id}",
+                        f"a federation binding holds exactly one endpoint and this one holds "
+                        f"{len(endpoints)}",
+                    )
+                )
+                continue
+            entry: dict[str, object] = {"target_id": target_id, "endpoint": endpoints[0]}
+            if credential is not None:
+                entry["credential"] = credential
+            federations.append(entry)
+        else:
+            target: dict[str, object] = {"target_id": target_id, "endpoints": list(endpoints)}
+            if credential is not None:
+                target["credential"] = credential
+            targets.append(target)
+
+    receivers: list[Mapping[str, object]] = []
+    for row in _rows(cast(Sequence[object], capture.raw.get("receiver_bindings", []))):
+        name = str(row["receiver"])
+        credential = _capture_credential(row.get("credential_file"))
+        if credential is None:
+            findings.append(
+                Finding(
+                    "MIGRATE-RECEIVER-CREDENTIAL",
+                    f"{location}#receivers/{name}",
+                    "the capture holds only a credential FILE and the accepted contract needs "
+                    "the store path with it. The migration cannot invent a path: complete this "
+                    "binding in the store's own shape before migrating",
+                )
+            )
+            continue
+        receiver: dict[str, object] = {"credential_ref": name, "credential": credential}
+        if "destination" in row:
+            receiver["destination"] = str(row["destination"])
+        receivers.append(receiver)
+
+    if findings:
+        return {}, tuple(findings)
+
+    produced: dict[str, object] = {
+        "schema_version": ACCEPTED_SCHEMA_VERSION,
+        "document": plan.document,
+        "version": capture.version + 1,
+        "environment": capture.environment,
+        "host": {
+            "target_id": str(host_binding["target_id"]),
+            "identity": str(host_binding["identity"]),
+            "ssh_alias": str(host_binding["ssh_alias"]),
+        },
+        "targets": targets,
+        "federations": federations,
+        "receivers": receivers,
+    }
+    return produced, ()
+
+
+def migration_findings(
+    capture: CaptureInventory, produced: PrivateInventory, *, expect_previous_digest: str
+) -> tuple[Finding, ...]:
+    """Prove a migrated document legitimately replaces the capture it came from.
+
+    The analogue of :func:`supersede_findings` for a previous version that
+    cannot be loaded as a :class:`PrivateInventory` — which is the whole reason
+    the migration exists. The three properties it can still check are the three
+    that matter: the compare-and-set precondition still holds, the version
+    advances by exactly one, and the environment does not move.
+
+    It deliberately does NOT check "something changed". A migration changes the
+    schema version and adds a host binding by construction, so the check would
+    be vacuous here in a way it is not for a retirement.
+    """
+    findings: list[Finding] = []
+    if capture.digest != expect_previous_digest:
+        findings.append(
+            Finding(
+                "SUPERSEDE-PRECONDITION",
+                produced.document,
+                "the capture does not hash to the digest the caller expected to be replacing",
+            )
+        )
+    if produced.version != capture.version + 1:
+        findings.append(
+            Finding(
+                "SUPERSEDE-VERSION",
+                produced.document,
+                f"version {produced.version} does not follow {capture.version}",
+            )
+        )
+    if produced.environment != capture.environment:
+        findings.append(
+            Finding(
+                "SUPERSEDE-ENVIRONMENT",
+                produced.document,
+                "the migration changed the environment; a format migration moves no estate",
+            )
+        )
+    if produced.digest == capture.digest:  # pragma: no cover - unreachable in practice
+        findings.append(
+            Finding(
+                "SUPERSEDE-UNCHANGED",
+                produced.document,
+                "the migrated document is byte-identical to the capture",
+            )
+        )
+    return tuple(findings)
+
+
+def retirement_findings(
+    state: DesiredState, tree: Sequence[tuple[str, str]]
+) -> tuple[Finding, ...]:
+    """Refuse a rendered tree that mentions a product whose monitoring was retired.
+
+    Reads the RENDERED bytes rather than the inventory, and that is the whole
+    reason it is worth having. An inventory scan sees the documents somebody
+    remembered to look in; the rendered tree is every surface the bundle
+    actually produces — the scrape configs, the meta rules, the Alertmanager
+    routes and receivers, the Grafana datasources and dashboard providers, the
+    promtail jobs, the compose file and the host artefacts. A retired product
+    reappearing in any of them fails here.
+
+    It is also the answer to a specific reporting problem. "No CRM references"
+    over a config tree the sweep failed to load looks exactly like "no CRM
+    references" over a clean one, and an item recorded as unknown twice starts
+    reading as absent. A gate over bytes the renderer just produced cannot read
+    nothing: if the tree were empty the render itself would have failed.
+
+    Matching is case-insensitive and substring, deliberately loose. A false
+    positive here costs one review comment and a token that is too specific
+    costs a missed reference — and the tokens are declared per product rather
+    than derived, because the spellings genuinely differ across surfaces.
+    """
+    findings: list[Finding] = []
+    for product in state.bundle.retired:
+        for token in product.tokens:
+            needle = token.lower()
+            for path, text in tree:
+                if needle in text.lower():
+                    findings.append(
+                        Finding(
+                            "RETIRED-PRODUCT-REFERENCED",
+                            f"{path}#{product.name}",
+                            f"the rendered tree mentions {token!r}, and {product.name!r} was "
+                            f"decommissioned on {product.decommissioned}. A monitoring binding "
+                            "pointed at a retired transport keeps the dependency alive in this "
+                            "plane's view of the world after the writer is gone",
+                        )
+                    )
+    return tuple(findings)

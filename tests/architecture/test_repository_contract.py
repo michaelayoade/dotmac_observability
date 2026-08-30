@@ -17,7 +17,18 @@ import pytest
 from dotmac_observability.render import (
     ALERTMANAGER_CONFIG,
     COMPOSE_FILE,
+    EXPOSURE_IPV4,
+    EXPOSURE_IPV6,
+    GRAFANA_DASHBOARDS,
+    GRAFANA_DATASOURCES,
+    LOGROTATE_CONFIG,
+    LOKI_CONFIG,
+    META_RULES,
     PROMETHEUS_CONFIG,
+    PROMTAIL_CONFIG,
+    RSYSLOG_CONFIG,
+    TIMEZONE_FILE,
+    TMPFILES_CONFIG,
     render_control_plane,
 )
 from dotmac_observability.validate import load
@@ -40,6 +51,15 @@ def test_the_declared_contracts_are_all_present():
         # disagree with the split.
         "private-inventory.schema.json",
         "supersession-request.schema.json",
+        # The bundle (ADR-0008): everything deployed that is not a target, a
+        # route or a receiver. Public and topology-free like the rest.
+        "bundle.schema.json",
+        # The PRE-CONTRACT capture format, written down so a document already
+        # stored in it can be read and migrated rather than hand-edited. Not a
+        # second private-inventory contract: nothing new may be written against
+        # it, and the only tool that reads it produces an accepted-contract
+        # document.
+        "private-inventory-capture.schema.json",
     }
     # `deployment-authorization.schema.json` is deliberately ABSENT. Defining
     # one here would make an adopter into a second deployment control plane;
@@ -180,7 +200,22 @@ def test_the_renderer_produces_exactly_its_declared_files():
             load(REFERENCE, contracts=CONTRACTS), resolved(REFERENCE)
         )
     }
-    assert produced == {PROMETHEUS_CONFIG, ALERTMANAGER_CONFIG, COMPOSE_FILE}
+    assert produced == {
+        PROMETHEUS_CONFIG,
+        META_RULES,
+        ALERTMANAGER_CONFIG,
+        LOKI_CONFIG,
+        PROMTAIL_CONFIG,
+        GRAFANA_DATASOURCES,
+        GRAFANA_DASHBOARDS,
+        RSYSLOG_CONFIG,
+        LOGROTATE_CONFIG,
+        TMPFILES_CONFIG,
+        TIMEZONE_FILE,
+        EXPOSURE_IPV4,
+        EXPOSURE_IPV6,
+        COMPOSE_FILE,
+    }
 
 
 def test_the_build_tool_is_pinned_exactly():
@@ -221,3 +256,43 @@ def test_the_host_and_container_secret_directories_stay_distinct():
     container = {_PROMETHEUS_SECRETS, _ALERTMANAGER_SECRETS}
     assert len(container) == 2, "the two evaluators must read from distinct container paths"
     assert DEFAULT_SECRETS_DIR not in container
+
+
+@pytest.mark.parametrize("path", CONTRACT_FILES, ids=lambda p: p.name)
+def test_every_internal_reference_in_a_contract_resolves(path):
+    """A dangling `$ref` is invisible to `check_schema` and fatal at validation.
+
+    `jsonschema.Draft202012Validator.check_schema` — which CI's `schemas` job
+    runs, and which is the only structural check these files had — does NOT
+    resolve references. A `$ref` pointing at a `$defs` entry that does not exist
+    passes it cleanly and then raises `PointerToNowhere` the first time a real
+    document is validated against that branch.
+
+    This is not hypothetical: adding a `kind` discriminator to the supersession
+    request introduced exactly that, the schema job would have stayed green, and
+    the failure surfaced only because a test happened to exercise the new branch.
+    A branch nobody exercised would have shipped.
+    """
+    schema = json.loads(path.read_text(encoding="utf-8"))
+    defined = set(schema.get("$defs", {}))
+
+    def walk(node, where):
+        if isinstance(node, dict):
+            reference = node.get("$ref")
+            if isinstance(reference, str):
+                assert reference.startswith("#/$defs/"), (
+                    f"{path.name}{where}: only internal $defs references are used here, "
+                    f"and {reference!r} is not one"
+                )
+                name = reference.removeprefix("#/$defs/")
+                assert name in defined, (
+                    f"{path.name}{where}: $ref points at {reference!r}, which this contract "
+                    f"does not define. check_schema does not catch this"
+                )
+            for key, value in node.items():
+                walk(value, f"{where}/{key}")
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, f"{where}/{index}")
+
+    walk(schema, "")

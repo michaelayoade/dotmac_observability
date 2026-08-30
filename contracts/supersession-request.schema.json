@@ -2,20 +2,27 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://dotmac.io/schemas/observability/supersession-request.v1.json",
   "title": "observability-supersession-request.v1",
-  "description": "A reviewed request to retire logical entries from a private inventory, producing its next version.  This document is PUBLIC and is the reason the supersession workflow can be trusted: the change is expressed entirely in logical vocabulary that ADR-0004 already publishes — target ids and credential-ref names — so it is diffable, reviewable and merged onto protected main before anything reads the private store. The alternative, typing target names into a workflow_dispatch box at run time, is an unversioned unreviewed change, which is the gesture this whole programme exists to remove.  RETIREMENT ONLY, and that is a boundary rather than a first cut. Removing an entry needs only its logical name. ADDING one needs a resolved endpoint or credential binding, which must never pass through public Git or a CI input, so provisioning stays a human operation against the private store and this contract has no field for it.  Single-use by construction: `previous.sha256` names the version being replaced, so re-running an applied request refuses — the stored document no longer hashes to it.",
+  "description": "A reviewed request to retire logical entries from a private inventory, producing its next version.  This document is PUBLIC and is the reason the supersession workflow can be trusted: the change is expressed entirely in logical vocabulary that ADR-0004 already publishes \u2014 target ids and credential-ref names \u2014 so it is diffable, reviewable and merged onto protected main before anything reads the private store. The alternative, typing target names into a workflow_dispatch box at run time, is an unversioned unreviewed change, which is the gesture this whole programme exists to remove.  RETIREMENT ONLY, and that is a boundary rather than a first cut. Removing an entry needs only its logical name. ADDING one needs a resolved endpoint or credential binding, which must never pass through public Git or a CI input, so provisioning stays a human operation against the private store and this contract has no field for it.  Single-use by construction: `previous.sha256` names the version being replaced, so re-running an applied request refuses \u2014 the stored document no longer hashes to it.  Amended 2026-08-30 (ADR-0008) with a second `kind`. Retirement is still the only change expressible in logical vocabulary, and it is still the only one this contract carries values for. `migrate-capture` adds no value at all: it declares that the stored version is in the PRE-CONTRACT capture format and asks for it to be rewritten into the accepted one, and every byte of the result comes from the store. That is provisioning without disclosure, and it is the only reason the boundary above can hold while the production document is still unmigrated -- the alternative was a human editing OpenBao by hand, which is the unversioned unreviewable write this workflow exists to remove.  The ONE value a migration needs that the capture does not hold is the host binding: the accepted contract requires `host.identity` and `host.ssh_alias`, and the capture has no `host` key. It does not come from here. It is supplied to the tool as a file, materialised on the runner from a configured private source in the same step as the store credential, and shredded with it -- a repository secret is neither public Git nor a CI input, which is exactly the distinction the boundary above draws.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema_version",
+    "kind",
     "document",
     "previous",
     "storage",
-    "rationale",
-    "retire"
+    "rationale"
   ],
   "properties": {
     "schema_version": {
       "const": "observability-supersession-request.v1"
+    },
+    "kind": {
+      "enum": [
+        "retire",
+        "migrate-capture"
+      ],
+      "description": "What this request does. Defaulting is deliberately not offered: a request whose kind is inferred from which optional block happens to be present is a request whose meaning changes when somebody adds a block."
     },
     "document": {
       "type": "string",
@@ -27,7 +34,8 @@
       "additionalProperties": false,
       "required": [
         "version",
-        "sha256"
+        "sha256",
+        "format"
       ],
       "properties": {
         "version": {
@@ -38,6 +46,13 @@
           "type": "string",
           "pattern": "^[0-9a-f]{64}$",
           "description": "The compare-and-set half, and the reason this request cannot be applied twice or applied to a document somebody else has since changed. Read it with `inventory-digest`; it discloses nothing."
+        },
+        "format": {
+          "enum": [
+            "observability-private-inventory.v1",
+            "observability-private-inventory.v1 (PROPOSED)"
+          ],
+          "description": "Which contract the stored version is written against. Declared rather than sniffed: the tool refuses when the store disagrees, which is what turns 'the document does not validate' -- 68 schema errors that read like corruption -- into 'the store holds the capture format and this request expected the accepted one'. The same confirmation-not-discovery rule the storage shape already follows."
         }
       }
     },
@@ -47,7 +62,7 @@
       "required": [
         "shape"
       ],
-      "description": "The CONFIRMED storage shape, carried here so the mutation workflow verifies rather than discovers. An earlier draft detected the shape at run time and then wrote immediately, which is detection rather than confirmation — the same defect as a probe whose result nobody reviews before acting on it. The discovery workflow reports the shape and stops; a human puts it here; the mutation refuses if the store disagrees.  The shape is a choice between two code paths and is not sensitive. Where the shape is `field`, the field NAME is storage layout at a private path and stays a secret rather than appearing here.",
+      "description": "The CONFIRMED storage shape, carried here so the mutation workflow verifies rather than discovers. An earlier draft detected the shape at run time and then wrote immediately, which is detection rather than confirmation \u2014 the same defect as a probe whose result nobody reviews before acting on it. The discovery workflow reports the shape and stops; a human puts it here; the mutation refuses if the store disagrees.  The shape is a choice between two code paths and is not sensitive. Where the shape is `field`, the field NAME is storage layout at a private path and stays a secret rather than appearing here.",
       "properties": {
         "shape": {
           "enum": [
@@ -67,7 +82,7 @@
       "type": "object",
       "additionalProperties": false,
       "minProperties": 1,
-      "description": "At least one group must be named. An empty request would produce a version bump that changed nothing, which the supersession gate refuses anyway — refusing it here says so at the point a reviewer is reading.",
+      "description": "At least one group must be named. An empty request would produce a version bump that changed nothing, which the supersession gate refuses anyway \u2014 refusing it here says so at the point a reviewer is reading.  Required when `kind` is `retire` and refused otherwise, which is enforced by the branch below rather than left to a reader.",
       "properties": {
         "targets": {
           "$ref": "#/$defs/slug_list",
@@ -81,9 +96,42 @@
           "description": "Logical credential-ref names."
         }
       }
+    },
+    "migrate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "document",
+        "host_target_id",
+        "federations"
+      ],
+      "description": "The logical facts the capture format does not record and the accepted contract requires. Every one of them is a NAME, which is what makes them reviewable in public Git; not one is a resolved value.",
+      "properties": {
+        "document": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The stable document name. The capture has no `document` key at all, so this is the one field a reviewer chooses rather than the migration carrying across; every receipt that ever names this inventory will name it by this string."
+        },
+        "host_target_id": {
+          "$ref": "#/$defs/slug",
+          "description": "Must equal the public control plane's `host.target_id`. Checked, not trusted: a migration that produced a host binding under the wrong logical id would resolve cleanly and point a promotion at the wrong estate."
+        },
+        "federations": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/slug"
+          },
+          "description": "Which of the capture's folded-in target entries are federations. The capture holds one flat `targets` array; the accepted contract holds two. The split is declared here and cross-checked against the PUBLIC inventory, never guessed from a name -- a name-shaped heuristic would move a scrape target into the federation array the first time somebody called one `something-federation`."
+        }
+      }
     }
   },
   "$defs": {
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$"
+    },
     "slug_list": {
       "type": "array",
       "minItems": 1,
@@ -93,5 +141,51 @@
         "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$"
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "retire"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "required": [
+          "retire"
+        ],
+        "not": {
+          "required": [
+            "migrate"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "migrate-capture"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "required": [
+          "migrate"
+        ],
+        "not": {
+          "required": [
+            "retire"
+          ]
+        }
+      }
+    }
+  ]
 }

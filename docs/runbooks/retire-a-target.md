@@ -196,11 +196,16 @@ load and validate the previous version before doing anything else, so the
 workflow **fails at its first tool step**, before compare-and-set and before
 any write.
 
-It is not a retirement, so it cannot be done by this runbook. Reaching the
-contract means supplying `document` and a `host` binding, and `host` requires
-`identity` and `ssh_alias` — resolved values, which a supersession request
-deliberately has no field for. A human migrates the document against the
-private store; only then does a retirement become expressible.
+It is not a retirement, so it cannot be done by this runbook.
+
+**ADR-0008 gives it a path that is not a hand-edit.** `migrate-capture` is a
+second request kind, applied by `inventory-migrate` through the same reviewed,
+compare-and-set workflow: every byte of the result comes from the store, and
+the one field the capture lacks — the host binding, which needs `identity` and
+`ssh_alias` — arrives as a repository secret in the single step that uses it,
+which is neither public Git nor a CI input. See
+`docs/runbooks/migrate-the-capture-format.md`. Only after it runs does a
+retirement become expressible.
 
 And **do not pre-write the request**: migration rewrites the document, which
 changes its digest, and that digest is the compare-and-set precondition. A
@@ -211,6 +216,12 @@ but only after looking as though the work had been done.
 that `inventory/control-plane.toml` exists, but the `validate` step it later
 runs loads `routing/` as well. With `routing/` absent the guard passes and the
 run fails further in, which is a worse failure shape than refusing up front.
+
+**A sibling of row 1b, closed by ADR-0008.** The same precondition passed while
+the stored document was unloadable, and the run then failed inside a tool whose
+job is to print a digest. The workflow now runs `inventory-classify --expect`
+against the store BEFORE anything loads it, so a format the reviewed request
+did not declare is refused up front and legibly.
 
 Rows 2 and 3 were met in the form row 3 was **rewritten** to, which is the
 check worth making rather than assuming: access is bound to a tunnel identity,

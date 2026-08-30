@@ -231,6 +231,109 @@ jobs:
           OBSERVABILITY_SECRETS="${work}/secrets" \
             docker compose -f "${work}/docker-compose.yml" config --quiet
 
+  rotation-proof:
+    name: The rendered rotation contract survives a real rotation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The renderer's unit tests prove the rotation stanza SAYS the right thing.
+    # They cannot prove logrotate agrees, that rsyslog can open what logrotate
+    # creates, or that a mail-facility message actually lands — and the fault
+    # this contract exists to fix was exactly that gap: a stanza that read
+    # correctly, a directory whose permissions nobody had written down, and one
+    # action suspended 10,161 times in thirty days while the mail facility went
+    # nowhere at all.
+    #
+    # So this job runs the real tools on an ISOLATED tree under $RUNNER_TEMP.
+    # It never touches /var/log, never installs a unit, and never runs
+    # anything as a service: rsyslogd runs in the foreground with its own
+    # config, its own socket and its own working directory, and is killed at
+    # the end. Nothing here needs the host's logging to work, and nothing here
+    # can break it.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: ./.github/actions/setup-poetry
+      - run: poetry install
+
+      - name: Install rsyslog and logrotate
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rsyslog logrotate
+          # Whatever the image starts by default is stopped: this job must
+          # exercise ITS instance, and a second daemon holding the same socket
+          # would make the result depend on which one won.
+          sudo systemctl stop rsyslog 2>/dev/null || true
+          logrotate --version | head -1
+          rsyslogd -v | head -1
+
+      - name: Take an unconfined copy of rsyslogd
+        run: |
+          set -euo pipefail
+          # Ubuntu confines /usr/sbin/rsyslogd to /var/log and /etc/rsyslog.d.
+          # This proof deliberately runs against an isolated tree elsewhere, and
+          # the denial then presents as "could not open config file: Permission
+          # denied" while running as ROOT — the exact sentence the production
+          # fault produces, which is the one thing this proof must never be
+          # confused with.
+          #
+          # AppArmor profiles are attached to a PATH, so a copy outside
+          # /usr/sbin matches no profile. Two narrower approaches were tried
+          # first and are recorded because each failed in a way that looked like
+          # success: removing the profile by file path missed it (the file is
+          # `usr.sbin.rsyslogd`, the profile is named `rsyslogd`), and
+          # `aa-teardown` was refused by the kernel with repeated
+          # `printf: I/O error` — this runner does not permit unloading profiles
+          # at all.
+          #
+          # The copy is not trusted either: the proof reads
+          # /proc/<pid>/attr/current at startup and refuses if the daemon is
+          # confined, so this step failing quietly cannot turn into a proof that
+          # reports the wrong thing.
+          work=/var/tmp/dotmac-rotation-proof
+          sudo rm -rf "$work"
+          sudo mkdir -p "$work"
+          sudo cp /usr/sbin/rsyslogd "$work/rsyslogd"
+          sudo chmod 0755 "$work/rsyslogd"
+          echo "confined profiles mentioning rsyslogd (for the record):"
+          sudo aa-status 2>/dev/null | grep -i rsyslog || echo "  none"
+
+      - name: Render the reference bundle
+        run: |
+          set -euo pipefail
+          rm -rf "${RUNNER_TEMP}/rendered"
+          poetry run dotmac-observability \
+            --root tests/fixtures/reference \
+            --contracts contracts \
+            render \
+            --private-inventory tests/fixtures/reference/private/inventory.json \
+            --output "${RUNNER_TEMP}/rendered"
+
+      - name: Rotate an isolated real file and prove the mail facility survives it
+        run: |
+          set -euo pipefail
+          # The proof is a SCRIPT rather than inline steps because it runs
+          # twice: once against the rendered artefacts, and then again against
+          # deliberately broken copies, which must FAIL. A check that has never
+          # been observed to fail is not evidence.
+          # Under /var/tmp rather than $RUNNER_TEMP. rsyslog drops privilege to
+          # the `syslog` user, and every ancestor of the isolated tree has to be
+          # traversable by it; $RUNNER_TEMP sits under a home directory that is
+          # not, and the resulting `open error: Permission denied` is
+          # indistinguishable from the production fault this proof detects.
+          # /var/tmp is 1777, world-traversable, and equally disposable.
+          #
+          # The path is an ARGUMENT, so the script itself holds no absolute path
+          # outside its own working tree — asserted by
+          # tests/architecture/test_ci_matches_the_makefile.py.
+          work=/var/tmp/dotmac-rotation-proof
+          sudo python3 scripts/rotation_proof.py \
+            --rendered "${RUNNER_TEMP}/rendered" \
+            --work "$work" \
+            --rsyslogd "$work/rsyslogd"
+
   schemas:
     name: Contracts are valid JSON Schema 2020-12
     runs-on: ubuntu-latest

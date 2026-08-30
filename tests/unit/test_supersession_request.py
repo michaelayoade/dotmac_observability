@@ -25,12 +25,14 @@ from dotmac_observability.validate import (
 from tests.conftest import CONTRACTS, REFERENCE_PRIVATE
 
 REQUEST = """schema_version = "observability-supersession-request.v1"
+kind = "retire"
 document = "reference-private-inventory"
 rationale = "Decommissioned on a named host; its credential file was shredded."
 
 [previous]
 version = 1
 sha256 = "{digest}"
+format = "observability-private-inventory.v1"
 
 [storage]
 shape = "data-object"

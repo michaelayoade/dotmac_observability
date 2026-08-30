@@ -439,3 +439,121 @@ def test_adding_a_push_trigger_is_caught():
         _text(SUPERSEDE).replace("on:\n  workflow_dispatch:", "on:\n  push:\n  workflow_dispatch:")
     )
     assert "  push:" in planted and "  push:" not in _code(SUPERSEDE)
+
+
+# ── The host binding a migration needs (ADR-0008) ───────────────────────────
+#
+# A migration is the one change that carries a resolved value the store does
+# not already hold: the accepted contract requires `host.identity` and
+# `host.ssh_alias`, and the capture format has no `host` key at all. It arrives
+# as a repository SECRET — neither public Git nor a CI input, which is the
+# distinction rule 21 draws — and the properties below are what keep that true.
+
+HOST_BINDING_SECRET = "OBSERVABILITY_HOST_BINDING"
+
+
+def test_the_host_binding_is_a_secret_and_never_a_dispatch_input():
+    """An input is echoed into the run's own record; a secret is not.
+
+    `workflow_dispatch` inputs appear in the run summary, in the API and in
+    `github.event.inputs` for every later step. A host identity typed into one
+    is published to everybody who can read the run.
+    """
+    text = _text(SUPERSEDE)
+    assert HOST_BINDING_SECRET in text
+    inputs = text[text.index("    inputs:") : text.index("permissions:")]
+    for forbidden in ("identity", "ssh_alias", "host_binding", HOST_BINDING_SECRET):
+        assert forbidden not in inputs, (
+            f"{forbidden!r} appears among the dispatch inputs. Dispatch inputs are recorded "
+            "with the run; the host binding is a secret for exactly that reason"
+        )
+
+
+def test_the_host_binding_is_injected_into_exactly_one_step():
+    """The INJECTION is counted, not every mention of the name.
+
+    The step also names the secret in the message it prints when the secret is
+    unset, which is the one place naming it is useful — an operator reading
+    "not configured" needs to know what to configure. What must stay singular
+    is `secrets.<name>`, which is the expression that actually puts the value
+    into an environment.
+    """
+    code = _code(SUPERSEDE)
+    assert code.count(f"secrets.{HOST_BINDING_SECRET}") == 1, (
+        "the host binding is injected into more than one step. Like the writer credential it "
+        "lives only where it is used; a second injection is a second place it can be read from"
+    )
+
+
+def test_the_host_binding_is_shredded_in_its_own_step_and_not_only_at_the_end():
+    """Shredded twice, and the first one is the one that matters.
+
+    The `always()` step removes the whole working directory, which covers the
+    failure path. But the host binding is needed for one command and the job
+    continues afterwards — writing to the store, reading back, resolving — so
+    leaving it on disk for the rest of the run widens its exposure for no
+    reason at all.
+    """
+    code = _code(SUPERSEDE)
+    apply_step = code[code.index(HOST_BINDING_SECRET) :]
+    apply_step = apply_step[: apply_step.index("      - name:")]
+    assert (
+        "shred -u" in apply_step or "rm -f" in apply_step
+    ), "the host binding file survives the step that used it"
+
+
+def test_the_host_binding_lands_under_runner_temp_with_a_restrictive_umask():
+    code = _code(SUPERSEDE)
+    assert 'printf \'%s\' "${HOST_BINDING}" > "$work/host.json"' in code
+    assert "umask 077" in code
+
+
+def test_planting_the_host_binding_as_a_dispatch_input_is_caught():
+    planted = _text(SUPERSEDE).replace(
+        "      request:\n", "      host_binding:\n        type: string\n      request:\n"
+    )
+    inputs = planted[planted.index("    inputs:") : planted.index("permissions:")]
+    assert "host_binding" in inputs
+    original = _text(SUPERSEDE)
+    assert (
+        "host_binding"
+        not in original[original.index("    inputs:") : original.index("permissions:")]
+    )
+
+
+# ── Classification before loading ───────────────────────────────────────────
+
+
+def test_the_store_is_classified_before_anything_loads_it():
+    """The step whose absence produced 68 schema errors in a digest tool.
+
+    `inventory-digest` and `inventory-apply` both load the previous version
+    through the ACCEPTED contract as their first act. On a store holding the
+    pre-contract capture format that fails with a schema error list which reads
+    as corruption — after the precondition guard has passed, because the guard
+    only checks that public inventory exists.
+    """
+    code = _code(SUPERSEDE)
+    assert "inventory-classify" in code, "the stored format is not classified before loading"
+    assert code.index("inventory-classify") < code.index("inventory-digest"), (
+        "the digest tool runs before the classifier, which is the ordering that produced the "
+        "illegible failure in the first place"
+    )
+    assert "--expect" in code, "the classifier is reporting rather than gating"
+
+
+def test_the_declared_previous_format_comes_from_the_reviewed_request():
+    code = _code(SUPERSEDE)
+    assert "previous_format" in code
+    assert "load_supersession_request" in code, (
+        "the kind and format are being read by something other than the contract's own parser; "
+        "a second reader of the same document drifts from the contract"
+    )
+
+
+def test_a_migration_and_a_retirement_take_different_tools():
+    code = _code(SUPERSEDE)
+    assert "inventory-migrate" in code and "inventory-apply" in code
+    assert (
+        'if [ "${KIND}" = "migrate-capture" ]; then' in code
+    ), "the branch is not on the reviewed request's kind"

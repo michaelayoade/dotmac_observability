@@ -1,0 +1,330 @@
+# The production observability bundle.
+#
+# LOGICAL ONLY (ADR-0004), exactly like every other document in `inventory/`.
+# Nothing here says where anything is: the one source set is named and typed,
+# and what it resolves to lives in the private inventory.
+#
+# Measured on 2026-08-30 by census §14's method, and every DELIBERATE DELTA
+# from the as-built is marked. A delta is a reviewable decision; a
+# transcription slip is not, and the difference has to be visible in the diff.
+
+schema_version = "observability-bundle.v1"
+
+# DELIBERATE DELTA. The host runs Europe/Berlin — neither UTC nor the zone
+# anybody here reads, which is the worst of the three options: every rotation
+# boundary, rule evaluation and receipt timestamp is written in a zone that
+# matches no operator and no other host. Declaring UTC does not apply it; the
+# host's zone changes at promotion.
+[timezone]
+infrastructure = "UTC"
+presentation = "Africa/Lagos"
+rationale = """
+Infrastructure writes UTC so two hosts in different zones cannot disagree \
+about the order of events with nothing in either log saying so, and so that a \
+rotation boundary is the same instant everywhere; dashboards render WAT, \
+which is where the people reading them are.\
+"""
+
+# Digest-pinned by MEASUREMENT. Every one of these tags floats on `:latest` on
+# the host today (census §2, OBS-02), so what ran yesterday and what runs after
+# the next restart are two deployments with one description. The digest is the
+# identity; the version is evidence.
+[loki]
+retention = "720h"
+reject_older_than = "168h"
+ingestion_rate_mb = 16
+ingestion_burst_mb = 24
+
+  [loki.runtime]
+  image = "docker.io/grafana/loki"
+  digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  # PLACEHOLDER DIGEST, and deliberately an obviously invalid one rather than a
+  # plausible wrong one. The three runtimes below are on `:latest` and their
+  # running digests were not measured in the pass that produced this document.
+  # A promotion resolves and pins them; until then this file must FAIL to
+  # promote rather than promote something. An all-zero digest matches no image,
+  # so the failure is at pull time and unmistakable.
+  listen = "127.0.0.1:3100"
+
+[promtail]
+
+  [promtail.runtime]
+  image = "docker.io/grafana/promtail"
+  digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  listen = "127.0.0.1:9080"
+
+  # DELIBERATE DELTA. The as-built ships `/var/log/*.log` and the container
+  # json logs, which is what this keeps. What it adds is nothing: widening the
+  # shipper's reach is a separate decision from making the current reach
+  # reproducible.
+  [[promtail.jobs]]
+  name = "varlogs"
+  path_glob = "/var/log/*.log"
+
+    [[promtail.jobs.labels]]
+    name = "job"
+    value = "varlogs"
+
+    [[promtail.jobs.labels]]
+    name = "host"
+    value = "dotmac-observe"
+
+  [[promtail.jobs]]
+  name = "containers"
+  path_glob = "/var/lib/docker/containers/*/*-json.log"
+  decode_docker_json = true
+
+    [[promtail.jobs.labels]]
+    name = "job"
+    value = "containers"
+
+    [[promtail.jobs.labels]]
+    name = "host"
+    value = "dotmac-observe"
+
+[grafana]
+
+  [grafana.runtime]
+  image = "docker.io/grafana/grafana"
+  digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  listen = "127.0.0.1:3000"
+
+  [[grafana.datasources]]
+  name = "metrics"
+  kind = "prometheus"
+  service = "prometheus"
+  default = true
+
+  [[grafana.datasources]]
+  name = "logs"
+  kind = "loki"
+  service = "loki"
+  default = false
+
+  # DELIBERATE DELTA, and the largest one in this document. The host's
+  # dashboards live in `grafana/data/grafana.db` — a SQLite file that no
+  # release describes, no review has seen and no rollback can restore to a
+  # known state. This declares the provisioning surface; it does NOT claim the
+  # existing dashboards are in the bundle. They have to be exported into
+  # `grafana/dashboards/` before the database stops being authoritative, and
+  # until they are, a promotion that replaces the database would lose them.
+  # That is why the volume below is rostered and why this comment is here
+  # rather than in a ticket.
+  [[grafana.dashboard_providers]]
+  name = "control-plane"
+  folder = "Control plane"
+
+# The Observer-owned syslog contract. `/var/log` is `root:syslog 0755` and
+# rsyslog runs privilege-dropped as `syslog`, so it can append to a file it
+# owns and cannot CREATE one. `/var/log/mail.log` did not exist, rsyslog was
+# told to write it, and action-5 suspended and resumed 10,161 times in thirty
+# days while every mail-facility message went nowhere.
+#
+# The repair is not a wider directory: the directory stays 0755 and
+# systemd-tmpfiles creates the files as root with the owner and mode below,
+# with logrotate recreating them the same way after every rotation.
+[syslog]
+
+  [syslog.directory]
+  path = "/var/log"
+  owner = "root"
+  group = "syslog"
+  mode = "0755"
+
+  [[syslog.files]]
+  facility = "mail.*"
+  path = "/var/log/mail.log"
+  owner = "syslog"
+  group = "adm"
+  mode = "0640"
+
+  [[syslog.files]]
+  facility = "mail.err"
+  path = "/var/log/mail.err"
+  owner = "syslog"
+  group = "adm"
+  mode = "0640"
+
+  # DELIBERATE DELTA. The host rotates these weekly through the distribution's
+  # own stanza, which is what let a broken action run for a week between
+  # reopens. Daily rotation bounds that window; `keep` preserves the same
+  # retention in days that four weekly rotations gave in weeks, near enough,
+  # and the number is a knob rather than a habit.
+  [syslog.rotation]
+  frequency = "daily"
+  keep = 14
+  compress = true
+
+# Every resource this control plane owns. A resource running on the host and
+# absent here is UNATTRIBUTED — which is a finding, not a candidate for
+# deletion: `docker prune` decides for you and records nothing about what it
+# decided. See docs/inventories/observer-as-built.md §16 for the deletion
+# manifest of what is currently unattributed on this host.
+[[roster]]
+name = "prometheus"
+kind = "service"
+owner = "observability-control-plane"
+port = 9090
+
+[[roster]]
+name = "alertmanager"
+kind = "service"
+owner = "observability-control-plane"
+port = 9093
+
+[[roster]]
+name = "loki"
+kind = "service"
+owner = "observability-control-plane"
+port = 3100
+
+[[roster]]
+name = "promtail"
+kind = "service"
+owner = "observability-control-plane"
+port = 9080
+
+[[roster]]
+name = "grafana"
+kind = "service"
+owner = "observability-control-plane"
+port = 3000
+
+[[roster]]
+name = "observability_observability"
+kind = "network"
+owner = "observability-control-plane"
+
+[[roster]]
+name = "prometheus_data"
+kind = "volume"
+owner = "observability-control-plane"
+
+[[roster]]
+name = "alertmanager_data"
+kind = "volume"
+owner = "observability-control-plane"
+
+[[roster]]
+name = "loki_data"
+kind = "volume"
+owner = "observability-control-plane"
+
+[[roster]]
+name = "promtail_data"
+kind = "volume"
+owner = "observability-control-plane"
+
+[[roster]]
+name = "grafana_data"
+kind = "volume"
+owner = "observability-control-plane"
+
+# Products whose monitoring is retired, and which no rendered byte may mention
+# again. The list only ever grows.
+#
+# This is the standing form of a check that was previously a grep. A sweep over
+# a config tree reports "no references" identically whether it read the tree or
+# read nothing, and an item recorded as UNKNOWN twice starts being read as
+# absent — which is exactly what happened to the Grafana half of this one. The
+# gate below reads the RENDERED tree, so it covers every surface the bundle
+# produces rather than the subset somebody thought to search, and it cannot
+# read nothing: an empty tree would have failed the render first.
+[[retired]]
+name = "dotmac-crm"
+tokens = ["dotmac-crm", "dotmac_crm", "crm"]
+decommissioned = "2026-08-29"
+rationale = """
+Decommissioned 2026-08-29. Observer's scrape job, alert group and dashboard were removed that day and its credential shredded; a 2026-08-30 sweep of the live host confirmed no CRM reference survives in the Prometheus config, the alert rules, Alertmanager, Loki's or Promtail's configuration, the compose file, or Grafana's database — and Sub holds no monitoring configuration for it at all, so this surface is Observer's alone to close."""
+residual_data = """
+RETAINED DATA ONLY, which is history rather than a dependency. Prometheus still holds series labelled job="dotmac-crm-app" and instance="dotmac-crm", and Loki still holds streams labelled app/project="dotmac_crm" and host="crm", both recorded before the retirement and both ageing out with their stores' retention. Nothing scrapes, ships, routes or alerts on any of it: the active target list is eighteen jobs and none is CRM's."""
+
+[exposure]
+
+  # A WireGuard peer set. Membership is CRYPTOGRAPHIC, so the rendered rule
+  # matches the interface rather than a prefix — stricter as well as simpler,
+  # and it means no `/22` and no address is written down in a reusable
+  # artefact. What `management` resolves to is in the private inventory.
+  [[exposure.source_sets]]
+  name = "management"
+  kind = "tunnel_interface"
+
+  # DELIBERATE DELTA, and the one that must not be applied casually. sshd
+  # currently listens on 0.0.0.0:22 and [::]:22 with an ACCEPT policy in front
+  # of it. This declares the intended posture; applying it is a Foundation
+  # promotion with a positive control in the same pass, never a hand-run
+  # command — a firewall change to port 22 that is wrong is a change nobody can
+  # get back in to undo.
+  [[exposure.surfaces]]
+  name = "ssh"
+  kind = "host_service"
+  port = 22
+  protocol = "tcp"
+  family = "dual_stack"
+  exposure = "ingress"
+  allow_from = "management"
+  authenticated = true
+
+  # Container publishes. IPv4 reaches these through FORWARD and therefore
+  # DOCKER-USER; IPv6 terminates on INPUT. The host has seven IPv6 DROP rules
+  # sitting in DOCKER-USER, where no such packet ever arrives, so every port
+  # they name reads as closed and is open. The renderer derives the chain from
+  # `kind` and the family, which is what makes that mistake unrepresentable.
+  [[exposure.surfaces]]
+  name = "prometheus"
+  kind = "container_published"
+  port = 9090
+  protocol = "tcp"
+  family = "dual_stack"
+  exposure = "loopback"
+  authenticated = false
+
+  [[exposure.surfaces]]
+  name = "alertmanager"
+  kind = "container_published"
+  port = 9093
+  protocol = "tcp"
+  family = "dual_stack"
+  exposure = "loopback"
+  authenticated = false
+
+  [[exposure.surfaces]]
+  name = "loki"
+  kind = "container_published"
+  port = 3100
+  protocol = "tcp"
+  family = "dual_stack"
+  exposure = "loopback"
+  authenticated = false
+
+  [[exposure.surfaces]]
+  name = "grafana"
+  kind = "container_published"
+  port = 3000
+  protocol = "tcp"
+  family = "dual_stack"
+  exposure = "loopback"
+  authenticated = false
+
+[verification]
+
+  # Eighteen of eighteen targets reported `up == 1` on this host while
+  # 1,858,942 samples were rejected for carrying a duplicate timestamp. Target
+  # health and ingestion integrity are separate facts; a gate that reads only
+  # the first reports green while data is being dropped, which is exactly what
+  # happened. The contract requires both predicates and the renderer emits
+  # their conjunction, so there is no way to declare the health half alone.
+  [[verification.gates]]
+  name = "ingestion-integrity"
+  health = "min(up) == 1"
+  integrity = "increase(prometheus_target_scrapes_sample_duplicate_timestamp_total[15m]) == 0"
+  window = "30m"
+
+  # The other half of the same idea, one layer down: a scrape can also lose
+  # samples to the target's own limit and to out-of-order appends, neither of
+  # which moves `up`.
+  [[verification.gates]]
+  name = "append-integrity"
+  health = "min(up) == 1"
+  integrity = "increase(prometheus_target_scrapes_exceeded_sample_limit_total[15m]) == 0"
+  window = "30m"

@@ -19,6 +19,8 @@ services:
       - "${OBSERVABILITY_RELEASE:?release directory is required}/prometheus:/etc/prometheus:ro"
       - "${OBSERVABILITY_SECRETS:-/opt/observability/secrets}:/etc/prometheus/secrets:ro"
       - "prometheus_data:/prometheus"
+    environment:
+      TZ: UTC
   alertmanager:
     image: "docker.io/prom/alertmanager@sha256:2222222222222222222222222222222222222222222222222222222222222222"
     restart: "${OBSERVABILITY_RESTART:-unless-stopped}"
@@ -27,12 +29,67 @@ services:
       - "--config.file=/etc/alertmanager/alertmanager.yml"
       - "--storage.path=/alertmanager"
       - "--web.listen-address=0.0.0.0:9093"
+      - "--cluster.listen-address="
     ports:
       - "${ALERTMANAGER_LISTEN:-127.0.0.1:9093}:9093"
     volumes:
       - "${OBSERVABILITY_RELEASE:?release directory is required}/alertmanager:/etc/alertmanager:ro"
       - "${OBSERVABILITY_SECRETS:-/opt/observability/secrets}:/etc/alertmanager/secrets:ro"
       - "alertmanager_data:/alertmanager"
+    environment:
+      TZ: UTC
+  loki:
+    image: "docker.io/grafana/loki@sha256:3333333333333333333333333333333333333333333333333333333333333333"
+    restart: "${OBSERVABILITY_RESTART:-unless-stopped}"
+    user: "${LOKI_USER:-10001:10001}"
+    command:
+      - "-config.file=/etc/loki/loki.yml"
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - "${OBSERVABILITY_RELEASE:?release directory is required}/loki:/etc/loki:ro"
+      - "loki_data:/loki"
+    environment:
+      TZ: UTC
+  promtail:
+    image: "docker.io/grafana/promtail@sha256:4444444444444444444444444444444444444444444444444444444444444444"
+    restart: "${OBSERVABILITY_RESTART:-unless-stopped}"
+    user: "${PROMTAIL_USER:-0:0}"
+    command:
+      - "-config.file=/etc/promtail/promtail.yml"
+    ports:
+      - "127.0.0.1:9080:9080"
+    volumes:
+      - "${OBSERVABILITY_RELEASE:?release directory is required}/promtail:/etc/promtail:ro"
+      - "${OBSERVABILITY_HOST_LOGS:-/var/log}:/var/log:ro"
+      - "${OBSERVABILITY_CONTAINER_LOGS:-/var/lib/docker/containers}:/var/lib/docker/containers:ro"
+      - "promtail_data:/promtail"
+    environment:
+      TZ: UTC
+    depends_on:
+      - loki
+  grafana:
+    image: "docker.io/grafana/grafana@sha256:5555555555555555555555555555555555555555555555555555555555555555"
+    restart: "${OBSERVABILITY_RESTART:-unless-stopped}"
+    user: "${GRAFANA_USER:-472:472}"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - "${OBSERVABILITY_RELEASE:?release directory is required}/grafana/provisioning:/etc/grafana/provisioning:ro"
+      - "${OBSERVABILITY_RELEASE:?release directory is required}/grafana/dashboards:/etc/grafana/dashboards:ro"
+      - "grafana_data:/var/lib/grafana"
+    environment:
+      TZ: UTC
+      GF_DATE_FORMATS_DEFAULT_TIMEZONE: "Africa/Lagos"
+      GF_USERS_DEFAULT_THEME: "${GRAFANA_THEME:-dark}"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SECURITY_ADMIN_PASSWORD__FILE: "${GRAFANA_ADMIN_PASSWORD_FILE:-/run/secrets/grafana_admin_password}"
+    depends_on:
+      - prometheus
+      - loki
 volumes:
   prometheus_data: {}
   alertmanager_data: {}
+  loki_data: {}
+  promtail_data: {}
+  grafana_data: {}

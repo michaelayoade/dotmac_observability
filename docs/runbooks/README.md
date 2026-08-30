@@ -1,10 +1,13 @@
 # Runbooks
 
-**One runbook is written**, and every other one listed below is still owed.
+**Two runbooks are written**, and every other one listed below is still owed.
 
 `retire-a-target.md` landed in the same change as the capability it describes,
-`dotmac-observability inventory-supersede`. That is the rule below working as
-intended rather than an exception to it.
+`dotmac-observability inventory-supersede`.
+`migrate-the-capture-format.md` landed in the same change as
+`inventory-classify`, `inventory-migrate` and the `migrate-capture` branch of
+the supersession workflow (ADR-0008). Both are the rule below working as
+intended rather than exceptions to it.
 
 The rest stay unwritten because the capabilities they describe do not exist. A
 runbook for a capability that does not exist is untested prose that an operator

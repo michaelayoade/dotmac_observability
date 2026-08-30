@@ -755,3 +755,274 @@ array lengths, error paths and keywords. No endpoint, credential binding,
 destination, host identity or store field name was printed, and nothing was
 written to disk. The digest and byte length above are the whole of what was
 derived from its contents.
+
+## 16. Four measured faults, the federation's origin, and the unattributed estate — 2026-08-30
+
+Measured read-only on the named host, by §14's method. Every figure below is a
+command's output rather than a recollection, and where a claim is an absence it
+carries the positive control that proves the probe read something.
+
+### 16.1 The mail facility has been dead for a month
+
+`journalctl -u rsyslog --since -30d | grep -ci suspend` returns **10,161**.
+The reason is in the same journal, twice: `file '/var/log/mail.log': open
+error: Permission denied`, at 01:40 on 23 August and 01:02 on 30 August — the
+two weekly logrotate runs, which HUP rsyslog and make it try the open again.
+
+The mechanism, which is entirely ordinary and entirely undeclared:
+
+| Fact | Measured |
+| --- | --- |
+| `/var/log` | `root:syslog`, mode `755` |
+| rsyslog's identity after privilege drop | `$PrivDropToUser syslog`, `$PrivDropToGroup syslog` |
+| `/var/log/mail.log` | absent — `ls: cannot access '/var/log/mail*'` |
+| The action | `mail.* -/var/log/mail.log` in `50-default.conf` |
+| Its number | `action-5-builtin:omfile`, the sixth omfile action in include order |
+| The facility's writer | `postfix@-.service`, active |
+
+A privilege-dropped writer cannot create a file in a directory with no group
+write bit. It is not a permissions bug in rsyslog; it is that nobody had
+written down who creates that file. Every mail-facility message for at least
+thirty days was discarded.
+
+`logrotate.d/rsyslog` lists `/var/log/mail.log` and inherits the global
+`create` — with **no arguments**, which reuses the *original* file's owner and
+mode and does nothing when the original does not exist. `missingok` then skips
+the stanza silently.
+
+**Fixed by ADR-0008, in the bundle rather than on the host.** The directory
+stays `0755`; systemd-tmpfiles creates the file as root with the declared
+owner, group and mode, and logrotate recreates it the same way with an explicit
+`create 0640 syslog adm`, `su`, `delaycompress` and a `postrotate` reopen. CI's
+`rotation-proof` job rotates an isolated real file, writes a controlled
+`mail.info` message through a real rsyslogd, and runs three negative controls
+that must each fail.
+
+### 16.2 Alertmanager is gossiping with itself
+
+`/api/v2/status` reports a `peers` array of **length one**, whose single entry's
+`name` equals the cluster's own `name` — it is peered with itself. The peer's
+address is its container address on the compose network and is redacted here;
+the private-material scan refused the first draft of this line, correctly, and
+the fact that matters is the length and the identity rather than the address. The log carries, every fifteen minutes for
+weeks: `dropping messages because too many are queued  current=4097 limit=4096`.
+
+Alertmanager clusters by default and binds its gossip port whether or not a
+peer exists. Nothing had declared this deployment a singleton, and an omission
+is not a declaration. The bundle renders `--cluster.listen-address=`, which
+disables clustering outright; routing, receivers, inhibition and templates are
+byte-identical afterwards, asserted by comparison rather than claimed.
+
+### 16.3 Eighteen of eighteen targets green, 1,858,942 samples rejected
+
+`/api/v1/targets?state=active` returns **18 active targets, all `up`**.
+`prometheus_target_scrapes_sample_duplicate_timestamp_total` at the same
+instant: **1,858,942**.
+
+Target health and ingestion integrity are separate facts and every check the
+fleet had read only the first. ADR-0008's verification gate emits
+`(health) unless (integrity)`, which fires exactly in the state a scrape-health
+check reports as green.
+
+### 16.4 The federation collision originates in SUB, not in Observer
+
+`scrape_pool=dotmac-sub-federation`, bursts of two to four consecutive 15-second
+scrapes with a constant `num_dropped` (68, 69, 84, 102, 105, 196, 387 observed),
+then nothing for minutes.
+
+**Observer's side is clean, and the checks are non-vacuous.** 312 real
+`/federate` payloads were captured (41 at 15 s, 271 at 5 s), each 8,900–13,900
+sample lines:
+
+- zero duplicate label sets within any payload, with labels normalised and
+  sorted rather than compared as strings;
+- zero post-relabel collisions after applying Observer's own
+  `^(up|scrape_.+)$ → federated_$1` rename, which is injective on names;
+- zero series already named `federated_*` upstream, so the rename cannot
+  collide with an existing name;
+- `honor_labels: true` target-label injection simulated for the 5,252–5,428
+  samples per payload that carry no `job`/`instance`: still zero collisions.
+
+**Sub's side is where the duplication is, with the exact series.** Two bursts
+were captured in flight (16:01:43–16:01:58 Z and 16:11:28–16:11:58 Z). Across
+snapshots inside those windows, **171 (series, timestamp) pairs returned more
+than one value**, all from four metric families and all under one identity:
+
+| Metric family | Pairs |
+| --- | --- |
+| `http_requests_created` | 64 |
+| `http_request_duration_seconds_created` | 58 |
+| `http_request_duration_seconds_sum` | 48 |
+| `redis_operations_created` | 1 |
+
+All carry `job="dotmac-app", instance="dotmac-app"`. A representative case, at
+a fixed federate timestamp `1788105665856`:
+
+```
+http_request_duration_seconds_created{job="dotmac-app",instance="dotmac-app",
+  method="GET",path="/admin/customers/person/…/billing/ledger",status="200"}
+    1788104955.665218   returned at 16:01:07 and 16:01:12
+    1788104955.6652184  returned at 16:01:18, 16:01:23, 16:01:28, 16:01:34, 16:01:39
+```
+
+Same series, same timestamp, two values differing in the last significant
+digit — a float64 round-trip difference, which is the signature of **two
+samples stored for one identity** rather than of a value that changed.
+
+The mechanism is confirmed from Sub's own store. `-dedup.minScrapeInterval` is
+**set to `1ms`** on that VictoriaMetrics, and its counters read
+`vm_deduplicated_samples_total{type="merge"} 1546135` and
+`{type="select"} 67827`. Deduplication only counts when more than one sample
+exists for one series in one interval; select-time and merge-time dedup resolve
+independently, so the value returned for a given (series, timestamp) can change
+between two `/federate` calls until the affected block is merged. That is
+exactly the bursty, self-clearing behaviour Prometheus reports.
+
+The colliding timestamps are 600,000 ms apart and the bursts are ten minutes
+apart, which matches a ten-minute write cadence for these series.
+
+**Disposition: hand to the Sub lane.** Observer imports the fault and must not
+mask it. `honor_timestamps: false`, a broad drop and arbitrary deduplication
+were each considered and rejected in ADR-0008: all three make the symptom
+invisible rather than absent, and the samples would still be wrong upstream
+with nothing ever saying so again. Observer's change is the ingestion-integrity
+gate, which makes the rejection visible.
+
+### 16.5 The IPv6 rules are in a chain IPv6 does not traverse
+
+`ip6tables -S DOCKER-USER` carries DROP rules for **8200, 9090, 9093, 3100,
+8080, 8000 and 9100**. `ip6tables -S INPUT` carries one rule, for 8200.
+
+An IPv4 container publish is forwarded and traverses `DOCKER-USER`; an IPv6 one
+terminates on `INPUT`. Every port those seven rules name reads as closed and is
+open on IPv6 — and `docker ps` confirms all seven publish on `[::]`.
+
+sshd is `0.0.0.0:22` and `[::]:22` with `permitrootlogin without-password` and
+an iptables INPUT policy of ACCEPT.
+
+**Declared, not applied.** `inventory/bundle.toml` declares the intended
+posture and the renderer derives the chain from the surface kind and the
+address family, so the rule cannot be written into the wrong one. Applying it
+is a Foundation promotion with a positive control in the same pass — a firewall
+change to port 22 that is wrong is a change nobody can get back in to undo, and
+applying it by hand would also be using a manual command as evidence that the
+controller works.
+
+### 16.6 `systemd-networkd-wait-online` — diagnosed before anything was cleared
+
+Not cleared. `systemctl reset-failed` would destroy the evidence and change
+nothing, because the cause is still present and the unit will fail again at the
+next boot.
+
+| Fact | Measured |
+| --- | --- |
+| Failed since | 2026-05-10 17:01:47 CEST, under the pre-rename hostname `vmi3291425` |
+| Uptime | 112 days — it has not re-run since that boot |
+| Failure | `Timeout occurred while waiting for network connectivity`, after 37.6 s |
+| The wait | netplan drop-in: `systemd-networkd-wait-online -i eth0:degraded` |
+| eth0 | `State: routable (configuring)`, `Online state: online` |
+
+The link is online and routable; networkd's SETUP state never advances past
+`configuring`, and `-i eth0:degraded` waits for `configured`. Nothing depends on
+the unit succeeding: every consumer of `network-online.target` — docker, nginx,
+postfix, `wg-quick@wg0`, cloud-init — started anyway, and has been up 112 days.
+
+`cloud-init.service` is failed from the same boot for the same reason.
+
+**Disposition: a stale boot-time artefact with a live cause.** Clearing it
+without changing either the drop-in or the netplan configuration would hide a
+condition that recurs on every boot.
+
+### 16.7 cAdvisor CPU, over a representative window
+
+A single 52% sample had been treated as a sustained fact. Over real windows it
+is not:
+
+| Window | `rate(container_cpu_usage_seconds_total{name="cadvisor"}[5m])` |
+| --- | --- |
+| 24 h mean | **12.71%** of one core |
+| 24 h p95 | 14.11% |
+| 24 h max | 16.42% |
+| 7 d mean | 13.45% |
+
+The host has 8 cores, so the 7-day mean is about **1.7% of the machine**. No
+action; the earlier figure was one scrape.
+
+### 16.8 The unattributed estate, and a signed deletion manifest
+
+**Nothing was deleted, and `docker prune` was not run.** Prune decides for you
+and records nothing about what it decided, which is the opposite of a manifest.
+
+Measured: **86 containers**, 16 networks, and a volume list far longer than the
+rostered set. `inventory/bundle.toml`'s roster owns 5 services, 1 network and 5
+volumes. Everything below is present on the host and owned by nobody in that
+roster.
+
+Disk is at **85%** (326 G used of 387 G, 61 G free), so this is worth doing —
+but as a decision, with an owner attributed to each row, not as a sweep.
+
+| Group | Count | Evidence of purpose | Attributed owner | Proposed disposition |
+| --- | --- | --- | --- | --- |
+| `sla-pr2-*` (exited/created) | 39 | Named for `dotmac_sub` PR 2's SLA validation; image `dotmac-sub-validation-deps:sla-pr2-hypothesis-6.165.0`; all exited ≥ 3 weeks | Sub lane | DELETE after target-level approval |
+| `*-full`, `subtest` (exited) | 8 | Image `dotmac-sub-validation-deps:rebased-ueu52p`; all exited ≥ 3 weeks | Sub lane | DELETE after target-level approval |
+| `dotmac-positive-admission-pg-*` | 2 | Running Postgres for an admission experiment; 3 weeks old | Sub lane | CONFIRM then delete — running, may hold state |
+| `dotmac_sub_party_collision_pg`, `subscriber-retirement-pg-20260819`, `sla-pr2-postgres` | 3 | Running experiment databases | Sub lane | CONFIRM then delete — running, may hold state |
+| `pq1-*`, `pq2-*`, `netrecon-5459-*`, `dotmac_billing_test_20260817-*`, `vendor_billing_adoption_test-*` | 5 | Named test compose projects, running | Unattributed — needs an owner named | HOLD pending attribution |
+| `cloudpg`, `subpg`, `sp-pg`, `erp-pg` | 4 | Running, published on host ports | Unattributed — needs an owner named | HOLD pending attribution |
+| `glitchtip`, `glitchtip-worker` | 2 | Running error tracker, published `0.0.0.0:8000` | Unattributed — needs an owner named | HOLD; roster it or retire it |
+| `claude_knowledge-*` | 4 | The Knowledge MCP server; a rostered scrape target already | Knowledge lane | ROSTER, do not delete |
+| `node-exporter`, `cadvisor`, `openbao` | 3 | Rostered scrape targets, not bundle services | Platform operations | ROSTER as external services |
+| Networks `sla-pr2-validation`, `dotmac-positive-admission-*`, `lifecycle-authority-net-20260804`, `netrecon-5459_default`, `pq1_default`, `pq2_default`, `dotmac_billing_test_*`, `vendor_billing_adoption_test_*` | 8 | Created by the container groups above | As their containers | DELETE with their containers |
+| `docker-compose.yml.bak.*` (3) and `prometheus/alerts.yml.bak*` / `prometheus.yml.bak*` (19) under `/opt/observability` | 22 | Hand-edit residue — AGENTS.md rule 2 | Observability control plane | DELETE at the first promotion, which replaces the tree with an immutable release |
+
+**This manifest is not an authorization.** Under AGENTS.md rule 17 a live change
+needs a human to name the target, and under ADR-0008 an unrostered resource is a
+finding rather than a candidate. Two rows need an owner named before they can be
+dispositioned at all, and every DELETE row needs explicit target-level approval.
+Deletion, when approved, is snapshot → apply → re-observe → rollback evidence
+like any other live change.
+
+### 16.9 CRM residue: no live binding survives; retained data does
+
+Swept 2026-08-30 with a positive control on every probe, because "no
+references" over a tree the sweep failed to read is indistinguishable from "no
+references" over a clean one.
+
+| Surface | Positive control | CRM references |
+| --- | --- | --- |
+| `prometheus.yml` | 4,243 bytes, 13 known-token hits | **0** |
+| `alerts.yml` | 31,166 bytes, 8 hits, 0 recording rules, 40+ alerts enumerated | **0** |
+| `alertmanager.yml` | 1,008 bytes, 1 hit | **0** |
+| `loki-config.yml`, `promtail-config.yml` | 771 / 731 bytes | **0** |
+| `docker-compose.yml` | 4,863 bytes, 29 hits | **0** |
+| Grafana `grafana.db` | 86 tables read, 4 datasources returned | **0**, and **zero dashboards of any kind** |
+| Alertmanager runtime | 1 receiver (`default`), 0 silences | **0** |
+| Blackbox / probe jobs | `identity-probe` is a bespoke exporter; no blackbox exporter exists | n/a |
+| Active targets | 18, enumerated | none CRM |
+| Prometheus metric names | 2,573 read | 0 CRM-named |
+
+**The Grafana UNKNOWN is resolved, not inherited.** The database was read
+directly as a read-only SQLite copy — no credentials were needed and none were
+used, so there was no secret material to destroy. It holds four datasources
+(Prometheus, Loki, Alertmanager, DotMac-Sub-VictoriaMetrics) and **no dashboards
+at all**.
+
+**What does survive is retained DATA, which is history rather than a
+dependency.** Prometheus still holds `job="dotmac-crm-app"` and
+`instance="dotmac-crm"` label values; Loki still holds `app="dotmac_crm"`,
+`project="dotmac_crm"` and `host="crm"`. All recorded before the 2026-08-29
+retirement, all ageing out with their stores' retention, and nothing scrapes,
+ships, routes or alerts on any of it.
+
+**Disposition: CLEAR.** No monitoring binding to CRM survives in Observer, and
+ADR-0008 makes it a standing property rather than a finding with a date on it:
+`retired` declares the three spellings and the render refuses a tree that
+mentions any of them.
+
+### 16.10 One thing this section does not settle
+
+Grafana's `DotMac-Sub-VictoriaMetrics` datasource points at a **different
+address** from the one Prometheus's `dotmac-sub-victoriametrics` job and its
+federation scrape use. Two addresses for one logical upstream, with nothing
+comparing them. Not investigated here; recorded so it is not discovered again
+from scratch.

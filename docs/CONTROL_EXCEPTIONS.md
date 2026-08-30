@@ -68,3 +68,25 @@ tell at a glance which half of AGENTS.md currently bites.
 | 15 | `tests/architecture/test_control_exceptions.py`, `tests/mutations/` |
 | 17 | branch protection on `main`: linear history, no force-push, no deletion, pull request required |
 | 16 | `.dotmac/standards-profile.json`, `.github/workflows/engineering-standards.yml` |
+| 21 | `tests/unit/test_private_inventory_supersede.py`, `tests/unit/test_supersession_request.py`, `tests/architecture/test_supersession_workflow_cannot_leak.py` |
+| 22 | `tests/unit/test_bundle.py`, `tests/mutations/test_bundle_gates_bite.py`, and structurally by `contracts/bundle.schema.json` |
+| 23 | `tests/unit/test_bundle.py`, `tests/mutations/test_bundle_gates_bite.py` |
+| 24 | `tests/unit/test_bundle.py`, and structurally by `contracts/bundle.schema.json` requiring both predicates |
+| 25 | `tests/unit/test_bundle.py`, and CI's `rotation-proof` job running `scripts/rotation_proof.py` with three negative controls |
+| 26 | `tests/unit/test_bundle.py` |
+| 27 | `tests/unit/test_capture_migration.py`, `tests/architecture/test_supersession_workflow_cannot_leak.py` |
+| 28 | `tests/architecture/test_ci_matches_the_makefile.py` |
+
+> **Rule 25's enforcement is worth reading twice**, because it is the only
+> check in this repository that runs external programs and the only one whose
+> value is entirely in its negative half. A rotation that succeeds proves
+> little: the same result would come back from a checker looking at the wrong
+> file. The three deliberately broken stanzas — no owner, no mode, no
+> post-rotation reopen — must each FAIL, and `scripts/rotation_proof.py`
+> reports "THE PROOF PASSED WITH A BROKEN CONTRACT" and exits non-zero if any
+> of them does not.
+>
+> `tests/architecture/test_ci_matches_the_makefile.py` guards the guard: each
+> control locates itself in the rendered stanza by exact string, and a
+> renderer change that reworded the stanza would make every control mutate
+> nothing and every deliberate failure stop happening.

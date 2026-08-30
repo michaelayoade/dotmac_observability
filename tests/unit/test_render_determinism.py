@@ -13,7 +13,18 @@ from pathlib import Path
 from dotmac_observability.render import (
     ALERTMANAGER_CONFIG,
     COMPOSE_FILE,
+    EXPOSURE_IPV4,
+    EXPOSURE_IPV6,
+    GRAFANA_DASHBOARDS,
+    GRAFANA_DATASOURCES,
+    LOGROTATE_CONFIG,
+    LOKI_CONFIG,
+    META_RULES,
     PROMETHEUS_CONFIG,
+    PROMTAIL_CONFIG,
+    RSYSLOG_CONFIG,
+    TIMEZONE_FILE,
+    TMPFILES_CONFIG,
     differences,
     render_control_plane,
     tree_digest,
@@ -37,7 +48,26 @@ def test_the_committed_fixture_matches_a_fresh_render():
 
 def test_every_declared_file_is_produced_exactly_once():
     paths = [path for path, _ in _tree()]
-    assert paths == [PROMETHEUS_CONFIG, ALERTMANAGER_CONFIG, COMPOSE_FILE]
+    # ORDER is asserted, not just membership. The tuple's order is the order a
+    # reviewer reads a render diff in, and a renderer that emits its files in a
+    # different order on a different machine fails the byte gate for a reason
+    # that has nothing to do with the configuration.
+    assert paths == [
+        PROMETHEUS_CONFIG,
+        META_RULES,
+        ALERTMANAGER_CONFIG,
+        LOKI_CONFIG,
+        PROMTAIL_CONFIG,
+        GRAFANA_DATASOURCES,
+        GRAFANA_DASHBOARDS,
+        RSYSLOG_CONFIG,
+        LOGROTATE_CONFIG,
+        TMPFILES_CONFIG,
+        TIMEZONE_FILE,
+        EXPOSURE_IPV4,
+        EXPOSURE_IPV6,
+        COMPOSE_FILE,
+    ]
     assert len(paths) == len(set(paths))
 
 

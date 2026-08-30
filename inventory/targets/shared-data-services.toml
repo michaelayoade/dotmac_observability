@@ -12,6 +12,12 @@ metrics_path = "/metrics"
 authenticated = false
 expected = 1
 
+  # As-built instance label, expressible since ADR-0008. A logical host or
+  # service name, not a resolved address; the private-material scan is what
+  # keeps the distinction from eroding.
+  [[jobs.static_labels]]
+  name = "instance"
+  value = "dotmac-db-primary"
 [[jobs]]
 job = "redis-exporter"
 target_id = "redis-exporter"
@@ -19,3 +25,10 @@ scheme = "http"
 metrics_path = "/metrics"
 authenticated = false
 expected = 1
+
+  # As-built instance label, expressible since ADR-0008. A logical host or
+  # service name, not a resolved address; the private-material scan is what
+  # keeps the distinction from eroding.
+  [[jobs.static_labels]]
+  name = "instance"
+  value = "dotmac-db-primary"

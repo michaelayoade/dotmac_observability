@@ -20,6 +20,24 @@
 #     reports and stops, with a human in between.
 #   * It refuses before the public inventory exists, because the resolution
 #     check runs in both directions or not at all.
+#   * It CLASSIFIES the stored document before loading it. Both mutation tools
+#     used to load the previous version through the ACCEPTED contract as their
+#     first act, so a store holding the pre-contract capture format failed with
+#     68 schema errors in a tool whose job is to print a digest — after passing
+#     the precondition guard, which only checks that public inventory exists.
+#     That is the least legible failure available: it reads as corruption and is
+#     a document in a known older format.
+#
+# TWO KINDS OF CHANGE, and the boundary between them is unchanged.
+# `retire` removes entries, which needs only their logical names.
+# `migrate-capture` rewrites a capture-format document into the accepted one;
+# every byte of the result comes from the store, so it carries no resolved
+# value either. The single field the capture does not hold — the host binding —
+# arrives as a repository secret materialised into a mode-0600 file in the one
+# step that needs it and shredded with everything else. A secret is neither
+# public Git nor a CI input, which is exactly the distinction rule 21 draws.
+# ADDING a target still has no path anywhere, because it needs a resolved
+# endpoint that has never been anywhere but the store.
 #
 # It never emits the document. Not to a log, not to a job summary, not as an
 # artifact, and not on the failure path — which is where this normally leaks,
@@ -28,9 +46,8 @@
 # enforces that structurally over this file's text, so a later edit fails the
 # build rather than the review.
 #
-# It never provisions: a retirement needs a logical name, an addition needs a
-# resolved value that must not pass through public Git or a CI input. It never
-# destroys a prior version: KV v2 retains them, nothing here calls a destroy or
+# It never provisions an ADDITION: that needs a resolved value which must not
+# pass through public Git or a CI input. It never destroys a prior version: KV v2 retains them, nothing here calls a destroy or
 # metadata-delete endpoint, and the superseded version is the evidence for
 # every receipt that names it (AGENTS.md rule 21).
 
@@ -41,10 +58,10 @@ on:
     inputs:
       request:
         description: >-
-          Path to the reviewed retirement request, relative to the repository
-          root. Its CONTENT is the change; this input only says which reviewed
-          file to apply, so nothing typed here can retire anything that was not
-          merged to main first.
+          Path to the reviewed request, relative to the repository root. Its
+          CONTENT is the change — including its `kind` — so this input only says
+          which reviewed file to apply, and nothing typed here can retire or
+          migrate anything that was not merged to main first.
         required: true
         type: string
 
@@ -144,6 +161,22 @@ jobs:
           echo "confirmed shape: $(cat "${RUNNER_TEMP}/shape")"
           echo "shape=$(cat "${RUNNER_TEMP}/shape")" >> "$GITHUB_OUTPUT"
 
+          # The kind and the declared previous format, read out of the reviewed
+          # request by the same parser that validated it. Two logical strings,
+          # neither of which is a value: `grep` over the TOML would be a second
+          # reader of the same document and would drift from the contract.
+          kind=$(poetry run python -c "
+          import sys
+          from pathlib import Path
+          from dotmac_observability.validate import load_supersession_request
+          request = load_supersession_request(Path(sys.argv[1]), contracts=Path('contracts'))
+          print(request.kind, request.previous_format, sep='\t')
+          " "${{ inputs.request }}")
+          echo "kind=$(echo "$kind" | cut -f1)" >> "$GITHUB_OUTPUT"
+          echo "previous_format=$(echo "$kind" | cut -f2)" >> "$GITHUB_OUTPUT"
+          echo "request kind: $(echo "$kind" | cut -f1)"
+          echo "declared previous format: $(echo "$kind" | cut -f2)"
+
       # ── The mutation boundary ────────────────────────────────────────────
       #
       # The writer credential exists in these steps and nowhere else. It is
@@ -161,6 +194,7 @@ jobs:
           BAO_PATH: ${{ secrets.OBSERVABILITY_PRIVATE_INVENTORY_PATH }}
           BAO_FIELD: ${{ secrets.OBSERVABILITY_PRIVATE_INVENTORY_FIELD }}
           SHAPE: ${{ steps.tool.outputs.shape }}
+          PREVIOUS_FORMAT: ${{ steps.tool.outputs.previous_format }}
         run: |
           set -euo pipefail
           # NOT `set -x`. Tracing would echo the document into the log, which is
@@ -202,20 +236,68 @@ jobs:
           esac
           rm -f "$work/response.json"
 
+          # CLASSIFY FIRST. `inventory-digest` loads through the ACCEPTED
+          # contract, so on a capture-format store it fails here with a schema
+          # error list that reads like corruption. The classifier reads one
+          # field, prints one line, and refuses when the store's format is not
+          # the one the reviewed request declared — confirmation rather than
+          # discovery, the same rule the storage shape follows.
           poetry run dotmac-observability --contracts contracts \
-            inventory-digest "$work/v1.json"
+            inventory-classify "$work/v1.json" --expect "${PREVIOUS_FORMAT}"
+
+          # Only an accepted-contract document can be digested. A capture is
+          # identified by its own digest inside `inventory-migrate`, which
+          # reads it through the contract that describes it.
+          if [ "${PREVIOUS_FORMAT}" = "observability-private-inventory.v1" ]; then
+            poetry run dotmac-observability --contracts contracts \
+              inventory-digest "$work/v1.json"
+          fi
 
       - name: Apply the reviewed request and resolve the result
+        env:
+          KIND: ${{ steps.tool.outputs.kind }}
+          # The ONE resolved value a migration needs and the capture format does
+          # not hold. It is a repository secret rather than a dispatch input
+          # because an input is echoed into the run's own record; it exists in
+          # this step and nowhere else, lands in the same mode-0700 working
+          # directory as the document, and is shredded by the always() step
+          # below along with it. Empty for a retirement, which needs none.
+          HOST_BINDING: ${{ secrets.OBSERVABILITY_HOST_BINDING }}
         run: |
           set -euo pipefail
           work="${RUNNER_TEMP}/inventory"
           # Compare-and-set lives in the request: it names the digest it was
           # reviewed against, and this refuses if the store has moved since.
-          poetry run dotmac-observability --contracts contracts \
-            inventory-apply \
-            --request "${{ inputs.request }}" \
-            --previous "$work/v1.json" \
-            --output "$work/v2.json"
+          #
+          # For a MIGRATION that refusal has a second reading worth knowing
+          # about: migrating rewrites the document and therefore changes its
+          # digest, so a request naming the pre-migration digest is refused
+          # AFTER the migration has run — correctly, but only after looking as
+          # though the work had been done. `inventory-classify` is what tells
+          # "already migrated" from "somebody else moved the store", which are
+          # the same digest mismatch and different problems.
+          if [ "${KIND}" = "migrate-capture" ]; then
+            umask 077
+            printf '%s' "${HOST_BINDING}" > "$work/host.json"
+            test -s "$work/host.json" || {
+              echo "OBSERVABILITY_HOST_BINDING is not configured; the accepted contract"
+              echo "requires host.identity and host.ssh_alias and the capture holds neither"
+              exit 1
+            }
+            poetry run dotmac-observability --contracts contracts \
+              inventory-migrate \
+              --request "${{ inputs.request }}" \
+              --stored "$work/v1.json" \
+              --host-binding "$work/host.json" \
+              --output "$work/v2.json"
+            shred -u "$work/host.json" 2>/dev/null || rm -f "$work/host.json"
+          else
+            poetry run dotmac-observability --contracts contracts \
+              inventory-apply \
+              --request "${{ inputs.request }}" \
+              --previous "$work/v1.json" \
+              --output "$work/v2.json"
+          fi
           # Both directions: no unresolved public target, no unused private
           # binding. Findings name logical ids only.
           poetry run dotmac-observability --contracts contracts \

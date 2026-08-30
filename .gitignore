@@ -24,3 +24,15 @@ deploy/rendered/
 # Any private inventory an operator fetches into the working tree. The one
 # tracked instance is the synthetic fixture, which is not under this path.
 private-inventory*.json
+
+# ...but NOT a contract. `private-inventory-capture.schema.json` matched the
+# glob above and was silently untracked: `make check` passed locally, because
+# both scanners read `git ls-files` and an untracked file is not in it, and CI
+# then failed on eight tests importing a file that had never been committed.
+#
+# The un-ignore is scoped to `contracts/` and to `*.schema.json` rather than
+# loosening the glob, because the glob is right: an operator's fetched document
+# must stay ignored wherever it lands. A SCHEMA is the opposite kind of thing —
+# public by ADR-0006 §1, since a shape discloses nothing — so it is exempted by
+# what it is, not by where somebody happened to put it.
+!contracts/private-inventory*.schema.json
