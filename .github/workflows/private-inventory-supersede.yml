@@ -87,70 +87,27 @@ jobs:
   # dependent job rather than queueing it, which is the difference between an
   # answer and a wait.
   #
-  # It holds no credential. It runs hosted precisely because it must be able to
-  # run when the self-hosted runner cannot, and a hosted runner is exactly what
-  # the mutation itself must never be — so the two are kept in separate jobs
-  # rather than the check being a step inside the job it is checking, which
-  # could not have run either.
+  # It holds only the repository-scoped runner-query identity, introduced in
+  # the one step that needs it after checkout. It never holds an OpenBao or
+  # inventory credential. The separate diagnostic proves this identity gets
+  # 200 here and 403 on the Starter repository.
   runner-available:
     name: Refuse to queue against an absent or offline runner
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: github.ref == 'refs/heads/main'
-    permissions:
-      contents: read
-      # Listing self-hosted runners needs this and nothing else. It is granted
-      # to THIS job only; the mutation job below keeps `contents: read`.
-      administration: read
     steps:
-      - name: A runner carrying the required labels is registered and online
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require the exact Observability control runner
         env:
-          GH_TOKEN: ${{ github.token }}
+          RUNNER_QUERY_TOKEN: ${{ secrets.RUNNER_QUERY_TOKEN }}
         run: |
           set -euo pipefail
-          if ! gh api "repos/${GITHUB_REPOSITORY}/actions/runners" > runners.json 2>err.txt; then
-            # FAIL CLOSED. An unverifiable precondition is not a satisfied one,
-            # and the alternative — warn and continue — reproduces exactly the
-            # silent queue this job exists to remove.
-            echo "cannot list runners for ${GITHUB_REPOSITORY}:"
-            cat err.txt
-            echo
-            echo "This job needs the 'administration: read' permission. Do not skip"
-            echo "the check to get past this: an unread precondition and a satisfied"
-            echo "one are the same green tick."
-            exit 1
-          fi
-
-          total=$(jq -r '.total_count' runners.json)
-          echo "runners registered on this repository: ${total}"
-
-          matching=$(jq -r '
-            [ .runners[]
-              | select([.labels[].name] | index("self-hosted"))
-              | select([.labels[].name] | index("dotmac-control-runner"))
-            ]' runners.json)
-
-          count=$(printf '%s' "$matching" | jq -r 'length')
-          if [ "${count}" -eq 0 ]; then
-            echo "no runner carries both 'self-hosted' and 'dotmac-control-runner'."
-            echo "Dispatching would queue this workflow indefinitely. Register the"
-            echo "runner first; see docs/runbooks/migrate-the-capture-format.md."
-            exit 1
-          fi
-
-          online=$(printf '%s' "$matching" | jq -r '[.[] | select(.status == "online")] | length')
-          if [ "${online}" -eq 0 ]; then
-            echo "${count} matching runner(s) are registered and NONE is online:"
-            printf '%s' "$matching" | jq -r '.[] | "  \(.name): status=\(.status) busy=\(.busy)"'
-            echo "Registered-but-offline queues exactly as absent does."
-            exit 1
-          fi
-
-          # Reported, not refused. A busy runner finishes its current job and
-          # takes this one; that is a wait with a known end, unlike an absent
-          # one.
-          printf '%s' "$matching" | jq -r '.[] | "  \(.name): status=\(.status) busy=\(.busy)"'
-          echo "${online} matching runner(s) online"
+          python scripts/require_runner.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --label self-hosted \
+            --label dotmac-control-runner \
+            --label dotmac-observability-control
 
   supersede:
     needs: runner-available
@@ -159,16 +116,13 @@ jobs:
     # the Foundation test host. It polls OUTBOUND and is never reached; nothing
     # in this job may need inbound reachability to it.
     #
-    # A literal label pair rather than a repository variable, and that is the
+    # A literal label set rather than a repository variable, and that is the
     # point: a variable can be repointed at a hosted runner without touching
-    # this file or its guard. With no matching runner registered the job stays
-    # QUEUED — never silently rerouted to a host that cannot hold the tunnel
-    # identity the store's access is bound to.
-    runs-on: [self-hosted, dotmac-control-runner]
-    # Bounds EXECUTION, not queueing. A dispatch with no matching runner
-    # registered waits in the queue; it is not failed by this budget, so
-    # "runner absent" never presents as a job that went wrong. What this
-    # does bound is a hung request against the store.
+    # this file or its guard. The hosted preflight refuses before a missing,
+    # offline or busy label set can leave this job queued.
+    runs-on: [self-hosted, dotmac-control-runner, dotmac-observability-control]
+    # Bounds EXECUTION, not queueing. The hosted preflight handles runner
+    # availability; this budget separately bounds a hung store request.
     timeout-minutes: 15
 
     # Protected main only. `workflow_dispatch` lets a caller choose any ref that

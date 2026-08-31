@@ -152,7 +152,7 @@ def test_only_the_shred_step_runs_on_failure(path):
 # repository variable: a variable can be repointed at a hosted runner without
 # touching either workflow or this guard, and with no matching runner
 # registered a literal leaves the job QUEUED rather than silently rerouted.
-RUNNER = "[self-hosted, dotmac-control-runner]"
+RUNNER = "[self-hosted, dotmac-control-runner, dotmac-observability-control]"
 
 _HOSTED = ("ubuntu-latest", "ubuntu-22", "ubuntu-24", "windows-", "macos-", "-latest")
 
@@ -206,25 +206,24 @@ def test_the_job_that_touches_the_store_runs_only_on_the_named_runner(path):
 
 
 @pytest.mark.parametrize("path", BOTH, ids=lambda p: p.name)
-def test_every_other_job_is_hosted_and_holds_no_credential(path):
-    """A second job is allowed to be hosted, and allowed nothing else.
+def test_every_other_job_is_hosted_and_holds_no_store_credential(path):
+    """A preflight may hold only the repository-scoped runner-query identity.
 
     The pre-dispatch availability check MUST be hosted — it has to be able to
     run precisely when the self-hosted runner cannot, which is the whole point
-    of it. What makes that safe is that it holds no secret at all, so the
-    hosted/self-hosted split stays exactly aligned with the credential split.
+    of it. It holds no OpenBao or inventory credential. The one read-only PAT
+    it can hold is separately proved 200 here and 403 on the foreign repo.
     """
     jobs = _jobs(path)
     for name, body in jobs.items():
         if name == MUTATING_JOB[path.name]:
             continue
-        assert "secrets." not in body, (
-            f"{path.name}:{name} is not the store-touching job and references a secret. A "
-            "hosted job holding a production credential is the arrangement this whole "
-            "workflow is shaped to prevent"
-        )
         for forbidden in (READER_SECRET, WRITER_SECRET, "BAO_TOKEN", "BAO_ADDR"):
             assert forbidden not in body, f"{path.name}:{name} names {forbidden}"
+        references = re.findall(r"secrets\.([A-Z0-9_]+)", body)
+        assert set(references) <= {
+            "RUNNER_QUERY_TOKEN"
+        }, f"{path.name}:{name} holds unexpected secret(s) {sorted(set(references))}"
 
 
 @pytest.mark.parametrize("path", BOTH, ids=lambda p: p.name)
@@ -686,11 +685,9 @@ def test_the_mutation_cannot_queue_against_an_absent_runner():
         "leave it queueing anyway"
     )
     check = jobs["runner-available"]
-    assert "actions/runners" in check, "the check does not ask which runners are registered"
-    assert '"online"' in check, "the check does not distinguish online from registered"
-    # Fail closed. An unverifiable precondition is not a satisfied one, and
-    # "warn and continue" reproduces the silent queue this job exists to remove.
-    assert "cannot list runners" in check and "exit 1" in check
+    assert "require_runner.py" in check
+    assert "RUNNER_QUERY_TOKEN" in check
+    assert "dotmac-observability-control" in check
 
 
 def test_the_availability_check_can_run_when_the_named_runner_cannot():
@@ -698,9 +695,19 @@ def test_the_availability_check_can_run_when_the_named_runner_cannot():
 
     A check that shares the mutation's runner could not have run either, and
     would queue beside it. It is hosted for exactly that reason, which is only
-    safe because it holds no credential — asserted separately above.
+    safe because it holds no production-store credential. Its repository-
+    scoped query identity is asserted separately above.
     """
     check = _jobs(SUPERSEDE)["runner-available"]
     runs_on = re.findall(r"^\s*runs-on:\s*(.+)$", check, re.MULTILINE)
     assert runs_on == ["ubuntu-latest"], runs_on
     assert RUNNER not in check
+
+
+def test_discovery_also_refuses_before_targeting_the_runner():
+    jobs = _jobs(DISCOVER)
+    assert "preflight" in jobs
+    assert "needs: preflight" in jobs["discover"]
+    assert "require_runner.py" in jobs["preflight"]
+    assert "RUNNER_QUERY_TOKEN" in jobs["preflight"]
+    assert "dotmac-observability-control" in jobs["preflight"]

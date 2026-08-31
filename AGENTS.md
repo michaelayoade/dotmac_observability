@@ -351,9 +351,13 @@ review discipline, not a guard, and it is a defect to describe it as enforced.
     `needs:`; a failed precondition skips the dependent job instead of queueing
     it. The check fails closed when it cannot read the runner list, because an
     unverifiable precondition is not a satisfied one. It is hosted precisely so
-    it can run when the named runner cannot, which is safe only because it
-    holds no credential — and that is asserted, not assumed.
-    — `tests/architecture/test_supersession_workflow_cannot_leak.py`
+    it can run when the named runner cannot. It may hold only a repository-
+    scoped `RUNNER_QUERY_TOKEN`, never an OpenBao or inventory credential; the
+    diagnostic proves that identity receives 200 on this repository and 403 on
+    the foreign control-runner repository before a no-secret job acquires the
+    exact repository-specific runner label.
+    — `tests/architecture/test_supersession_workflow_cannot_leak.py`,
+      `tests/architecture/test_control_runner_diagnostic.py`
 
 32. **No workflow may execute fork-controlled content on these runners.**
     `pull_request_target` runs trusted base-branch workflow code with a

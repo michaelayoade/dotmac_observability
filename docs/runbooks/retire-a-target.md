@@ -286,7 +286,8 @@ and a supersession that cannot be resolved is not one worth writing. This is
 first, not last.
 
 **2. Provision `dotmac-control-runner`** — a dedicated fixed-egress runner,
-registered with the labels `self-hosted` and `dotmac-control-runner`. It is
+registered to this repository with the labels `self-hosted`,
+`dotmac-control-runner` and `dotmac-observability-control`. It is
 **not Observer**, **not any product host**, and **not the Foundation test
 host**.
 
@@ -320,12 +321,14 @@ line before it was written.
 > must never hold a credential. Swapping them silently destroys the property
 > each was chosen for.
 
-Both workflows pin `runs-on: [self-hosted, dotmac-control-runner]` as a
+Both workflows pin
+`runs-on: [self-hosted, dotmac-control-runner, dotmac-observability-control]` as a
 literal, deliberately not a repository variable. A variable could be repointed
 at a hosted runner in repository settings, touching neither workflow nor its
-guard and appearing in no diff. With a literal and no matching runner
-registered, the job stays **queued** — it is never silently rerouted, which is
-the failure that would quietly undo the containment. Each workflow also checks
+guard and appearing in no diff. A hosted preflight first lists the exact
+literal label set with a repository-scoped read-only identity and refuses
+absent, offline, busy or unreadable state; only then can the store-touching job
+queue. Each workflow also checks
 `RUNNER_ENVIRONMENT` at run time, so a runner registered under a label that
 does not describe it is caught too.
 

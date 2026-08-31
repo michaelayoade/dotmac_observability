@@ -1,0 +1,58 @@
+name: Control runner diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: control-runner-diagnostic-observability
+  cancel-in-progress: false
+
+jobs:
+  token-boundary:
+    name: Prove the repository-scoped query identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require own 200, foreign 403 and the exact online runner
+        env:
+          RUNNER_QUERY_TOKEN: ${{ secrets.RUNNER_QUERY_TOKEN }}
+        run: |
+          set -euo pipefail
+          python scripts/verify_runner_token_boundary.py \
+            --own-repository michaelayoade/dotmac_observability \
+            --foreign-repository michaelayoade/dotmac_starter_mt \
+            --runner-name control-runner-observability \
+            --label self-hosted \
+            --label dotmac-control-runner \
+            --label dotmac-observability-control
+
+  diagnostic:
+    name: Acquire the dedicated Observability runner without a credential
+    needs: token-boundary
+    runs-on: [self-hosted, dotmac-control-runner, dotmac-observability-control]
+    timeout-minutes: 5
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Prove the acquired runner is the intended unprivileged host
+        run: |
+          set -euo pipefail
+          test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
+          test "${GITHUB_REF}" = "refs/heads/main"
+          test "${GITHUB_REPOSITORY}" = "michaelayoade/dotmac_observability"
+          test "${RUNNER_ENVIRONMENT}" = "self-hosted"
+          test "${RUNNER_NAME}" = "control-runner-observability"
+          if command -v docker >/dev/null 2>&1; then
+            echo "REFUSED: docker is available to the runner identity" >&2
+            exit 1
+          fi
+          if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+            echo "REFUSED: passwordless sudo is available to the runner identity" >&2
+            exit 1
+          fi
+          echo "dedicated Observability control runner acquired without job credentials"

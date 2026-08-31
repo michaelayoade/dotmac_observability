@@ -20,14 +20,14 @@ Both mutation tools load the previous version through the accepted contract as
 their first act, so **every retirement is blocked** until this runs. It is not
 itself a retirement and cannot be done by `retire-a-target.md`.
 
-## Before you start: three things this workflow needs and does not have
+## Before you start: verify these three prerequisites
 
 Checked 2026-08-30 and true then. Confirm each before dispatching, because the
 failures are silent or confusing rather than loud:
 
 | Prerequisite | State on 2026-08-30 | What its absence looks like |
 | --- | --- | --- |
-| A runner labelled `[self-hosted, dotmac-control-runner]` | **none registered** (`gh api repos/:owner/:repo/actions/runners` → 0) | The job sits QUEUED forever. It is not failed, because `timeout-minutes` bounds execution rather than queueing — which is deliberate, so "no runner" never presents as "the run went wrong" |
+| A runner labelled `[self-hosted, dotmac-control-runner, dotmac-observability-control]` | **registered 2026-08-31**; both private-inventory workflows now run a hosted, fail-closed preflight first | Missing, offline, busy or unreadable runner state refuses before the store-touching job is queued |
 | The `private-inventory` environment | **does not exist** (`gh api repos/:owner/:repo/environments` → 0) | The job runs with **no human gate at all**. The workflow's own comment describes a named required reviewer; that is setup, not evidence. Until the environment exists the only thing preventing an unapproved production write is the document failing to load, which is an accident rather than a control |
 | `OPENBAO_ADDR`, `OPENBAO_INVENTORY_WRITER_TOKEN`, `OBSERVABILITY_PRIVATE_INVENTORY_MOUNT`, `OBSERVABILITY_PRIVATE_INVENTORY_PATH`, and for this procedure `OBSERVABILITY_HOST_BINDING` | **none configured** | The read step exits on its own `is not configured` check |
 
