@@ -354,8 +354,9 @@ review discipline, not a guard, and it is a defect to describe it as enforced.
     it can run when the named runner cannot. It may hold only a repository-
     scoped `RUNNER_QUERY_TOKEN`, never an OpenBao or inventory credential; the
     diagnostic proves that identity receives 200 on this repository and 403 on
-    the foreign control-runner repository before a no-secret job acquires the
-    exact repository-specific runner label.
+    the foreign control-runner repository before a job with no user-provisioned
+    repository secret acquires the exact repository-specific runner identity
+    and label set.
     — `tests/architecture/test_supersession_workflow_cannot_leak.py`,
       `tests/architecture/test_control_runner_diagnostic.py`
 
