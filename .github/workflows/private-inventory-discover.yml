@@ -29,18 +29,37 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  preflight:
+    name: Refuse to queue against an absent, offline or busy runner
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require the exact Observability control runner
+        env:
+          RUNNER_QUERY_TOKEN: ${{ secrets.RUNNER_QUERY_TOKEN }}
+        run: |
+          set -euo pipefail
+          python scripts/require_runner.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --label self-hosted \
+            --label dotmac-control-runner \
+            --label dotmac-observability-control
+
   discover:
+    needs: preflight
     name: Report shape, version and digest
     # The same named dedicated runner as the mutation workflow, reaching the
     # store through the same proven WireGuard tunnel. Access is bound to the
     # tunnel identity rather than to a source address on the plaintext
     # listener, so a hosted runner is not merely discouraged here — it could
-    # not authenticate. An absent runner leaves this QUEUED.
-    runs-on: [self-hosted, dotmac-control-runner]
-    # Bounds EXECUTION, not queueing. A dispatch with no matching runner
-    # registered waits in the queue; it is not failed by this budget, so
-    # "runner absent" never presents as a job that went wrong. What this
-    # does bound is a hung request against the store.
+    # not authenticate. The hosted preflight refuses before an absent runner
+    # can leave this job queued.
+    runs-on: [self-hosted, dotmac-control-runner, dotmac-observability-control]
+    # Bounds EXECUTION, not queueing. The hosted preflight turns an absent,
+    # offline or busy runner into a refusal before this job targets the label;
+    # this budget separately bounds a hung request against the store.
     timeout-minutes: 10
     if: github.ref == 'refs/heads/main'
 
@@ -55,7 +74,7 @@ jobs:
       - name: Refuse a hosted runner
         run: |
           set -euo pipefail
-          # Belt and braces with `runs-on`. The label pair is what schedules
+          # Belt and braces with `runs-on`. The literal label set schedules
           # this job; `RUNNER_ENVIRONMENT` is what the runner reports about
           # itself, so the two disagreeing means a runner is registered under a
           # label that does not describe it.
