@@ -10,6 +10,9 @@ OTLP listener is published.
 `config.alloy` is the Docker profile. Installing that profile is refused unless
 Docker is active, the socket is readable by Alloy, and no existing Promtail,
 Alloy, Vector, Fluent Bit or application-direct writer owns the same streams.
+The common systemd drop-in deliberately has no Docker group or Docker data
+path. Docker hosts additionally install
+`systemd/docker-profile/20-docker.conf`; host-only systems never do.
 
 The same configuration runs everywhere. Resolved backend URLs, the stable
 logical `host_id`, and the server identity are private runtime material in

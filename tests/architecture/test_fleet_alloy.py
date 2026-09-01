@@ -7,6 +7,7 @@ CONFIG = ROOT / "fleet" / "alloy" / "config.alloy"
 HOST_CONFIG = ROOT / "fleet" / "alloy" / "config-host.alloy"
 CONFIGS = (CONFIG, HOST_CONFIG)
 DROP_IN = ROOT / "fleet" / "alloy" / "systemd" / "alloy.service.d" / "10-dotmac.conf"
+DOCKER_DROP_IN = ROOT / "fleet" / "alloy" / "systemd" / "docker-profile" / "20-docker.conf"
 VERSION = ROOT / "fleet" / "alloy" / "VERSION"
 
 
@@ -77,6 +78,14 @@ def test_service_is_hardened_and_has_no_remote_configuration() -> None:
     assert "EnvironmentFile=/etc/default/dotmac-alloy" in drop_in
     assert "--server.http.listen-addr=127.0.0.1:12345" in drop_in
     assert "--disable-reporting" in drop_in
+
+
+def test_docker_privilege_is_an_explicit_profile_not_the_host_default() -> None:
+    common = DROP_IN.read_text()
+    docker = DOCKER_DROP_IN.read_text()
+    assert "docker" not in common.lower()
+    assert "SupplementaryGroups=docker" in docker
+    assert "ReadOnlyPaths=/var/lib/docker" in docker
 
 
 def test_alloy_release_inputs_are_exact() -> None:
