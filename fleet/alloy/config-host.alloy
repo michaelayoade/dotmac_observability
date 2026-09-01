@@ -1,0 +1,177 @@
+// Dotmac host-only fleet telemetry agent. Resolved endpoints and host
+// identities arrive through the protected systemd environment, never through
+// public Git. This profile deliberately has no Docker-socket dependency.
+
+logging {
+  level  = "info"
+  format = "logfmt"
+}
+
+prometheus.exporter.unix "host" {
+  disable_collectors = ["ipvs"]
+}
+
+discovery.relabel "host_metrics" {
+  targets = prometheus.exporter.unix.host.targets
+
+  rule {
+    target_label = "fleet"
+    replacement  = sys.env("DOTMAC_FLEET")
+  }
+
+  rule {
+    target_label = "environment"
+    replacement  = sys.env("DOTMAC_ENVIRONMENT")
+  }
+
+  rule {
+    target_label = "host_id"
+    replacement  = sys.env("DOTMAC_HOST_ID")
+  }
+}
+
+prometheus.scrape "host" {
+  targets         = discovery.relabel.host_metrics.output
+  forward_to      = [prometheus.remote_write.central.receiver]
+  scrape_interval = "15s"
+}
+
+prometheus.scrape "agent" {
+  targets = [{
+    "__address__" = "127.0.0.1:12345",
+    "fleet"       = sys.env("DOTMAC_FLEET"),
+    "environment" = sys.env("DOTMAC_ENVIRONMENT"),
+    "host_id"     = sys.env("DOTMAC_HOST_ID"),
+  }]
+  forward_to      = [prometheus.remote_write.central.receiver]
+  scrape_interval = "15s"
+}
+
+prometheus.remote_write "central" {
+  endpoint {
+    url = sys.env("DOTMAC_PROMETHEUS_WRITE_URL")
+
+    tls_config {
+      ca_file     = "/etc/alloy/secrets/ca.pem"
+      cert_file   = "/etc/alloy/secrets/client.pem"
+      key_file    = "/etc/alloy/secrets/client-key.pem"
+      server_name = sys.env("DOTMAC_OBSERVABILITY_SERVER_NAME")
+      min_version = "TLS13"
+    }
+
+    queue_config {
+      capacity             = 10000
+      max_samples_per_send = 2000
+      max_shards           = 4
+    }
+  }
+}
+
+loki.relabel "journal" {
+  forward_to = [loki.write.central.receiver]
+
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "unit"
+  }
+}
+
+loki.source.journal "host" {
+  forward_to    = [loki.relabel.journal.receiver]
+  relabel_rules = loki.relabel.journal.rules
+  max_age       = "2h"
+  labels = {
+    fleet       = sys.env("DOTMAC_FLEET"),
+    environment = sys.env("DOTMAC_ENVIRONMENT"),
+    host_id     = sys.env("DOTMAC_HOST_ID"),
+    source      = "journal",
+  }
+}
+
+loki.write "central" {
+  endpoint {
+    url = sys.env("DOTMAC_LOKI_WRITE_URL")
+
+    tls_config {
+      ca_file     = "/etc/alloy/secrets/ca.pem"
+      cert_file   = "/etc/alloy/secrets/client.pem"
+      key_file    = "/etc/alloy/secrets/client-key.pem"
+      server_name = sys.env("DOTMAC_OBSERVABILITY_SERVER_NAME")
+      min_version = "TLS13"
+    }
+  }
+}
+
+otelcol.receiver.otlp "local" {
+  grpc {
+    endpoint = "127.0.0.1:4317"
+  }
+
+  http {
+    endpoint = "127.0.0.1:4318"
+  }
+
+  output {
+    metrics = [otelcol.processor.resourcedetection.host.input]
+    logs    = [otelcol.processor.resourcedetection.host.input]
+    traces  = [otelcol.processor.resourcedetection.host.input]
+  }
+}
+
+otelcol.processor.resourcedetection "host" {
+  detectors = ["env", "system"]
+  override  = false
+
+  output {
+    metrics = [otelcol.processor.batch.telemetry.input]
+    logs    = [otelcol.processor.batch.telemetry.input]
+    traces  = [otelcol.processor.batch.telemetry.input]
+  }
+}
+
+otelcol.processor.batch "telemetry" {
+  timeout         = "5s"
+  send_batch_size = 1024
+
+  output {
+    metrics = [otelcol.exporter.prometheus.central.input]
+    logs    = [otelcol.exporter.loki.central.input]
+    traces  = [otelcol.exporter.otlp.central.input]
+  }
+}
+
+otelcol.exporter.prometheus "central" {
+  forward_to = [prometheus.remote_write.central.receiver]
+}
+
+otelcol.exporter.loki "central" {
+  forward_to = [loki.write.central.receiver]
+}
+
+otelcol.exporter.otlp "central" {
+  client {
+    endpoint = sys.env("DOTMAC_TEMPO_OTLP_ENDPOINT")
+
+    tls {
+      ca_file         = "/etc/alloy/secrets/ca.pem"
+      cert_file       = "/etc/alloy/secrets/client.pem"
+      key_file        = "/etc/alloy/secrets/client-key.pem"
+      server_name     = sys.env("DOTMAC_OBSERVABILITY_SERVER_NAME")
+      min_version     = "1.3"
+      reload_interval = "5m"
+    }
+  }
+
+  retry_on_failure {
+    enabled          = true
+    initial_interval = "5s"
+    max_interval     = "30s"
+    max_elapsed_time = "5m"
+  }
+
+  sending_queue {
+    enabled       = true
+    queue_size    = 2048
+    num_consumers = 4
+  }
+}
