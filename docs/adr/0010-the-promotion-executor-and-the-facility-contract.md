@@ -209,6 +209,29 @@ expectations, the verdict, the receipt's honesty checks and the six conditions
 are this repository's, because they are statements about THIS control plane.
 The facility reports what it observed and performs what it was told.
 
+## The approval gate proves itself
+
+Measured 2026-09-01: this repository has **zero environments configured** while
+two workflows name one. A job naming an environment that does not exist does
+not wait for anybody — GitHub creates it implicitly with no protection rules
+and the job proceeds — so `environment: observability-promotion` is a comment
+until somebody configures it, and the existing supersession workflow says as
+much about its own `private-inventory` environment in a comment that turns out
+to be describing nothing.
+
+`promote.yml`'s hosted pre-dispatch job therefore queries the environment and
+refuses when it does not exist, and refuses again when it exists with no
+`required_reviewers` rule. An unprotected environment and no environment behave
+identically; only one of them looks configured.
+
+Two operational facts stand alongside it. The dedicated runner
+`control-runner-observability` IS registered and online with the exact label
+set. None of the OpenBao bindings — `OPENBAO_ADDR`,
+`OPENBAO_INVENTORY_READER_TOKEN`, `OPENBAO_INVENTORY_WRITER_TOKEN`,
+`OBSERVABILITY_PRIVATE_INVENTORY_{MOUNT,PATH,FIELD}` — nor
+`OBSERVABILITY_HOST_BINDING` is configured, so the private inventory cannot be
+read, migrated or superseded, and a promotion cannot resolve.
+
 ## Consequences
 
 `AGENTS.md` rules 10, 11 and 12 move from unmonitored to enforced, and

@@ -96,10 +96,12 @@ jobs:
   # always execute, and a failed precondition SKIPS the dependent job instead
   # of leaving it waiting.
   runner-available:
-    name: Refuse to queue against an absent or offline runner
+    name: Refuse to queue against an absent runner or an ungated environment
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Require the exact Observability control runner
@@ -112,6 +114,44 @@ jobs:
             --label self-hosted \
             --label dotmac-control-runner \
             --label dotmac-observability-control
+
+      - name: Require the approval gate to actually exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # A job naming an environment that does not exist does not wait for
+          # anybody: GitHub creates the environment implicitly, with no
+          # protection rules, and the job proceeds. So "environment:
+          # observability-promotion" on the job below is a comment until
+          # somebody configures it, and a comment saying a human gate is in
+          # place is exactly the kind of evidence this repository refuses.
+          #
+          # Measured 2026-09-01: this repository had ZERO environments
+          # configured while two workflows named one. That is why this step
+          # exists and why it runs BEFORE the queue, on a hosted runner that
+          # can always execute.
+          status=0
+          body=$(curl --fail-with-body -sS \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/environments/observability-promotion") \
+            || status=$?
+          if [ "${status}" -ne 0 ]; then
+            echo "REFUSED: the 'observability-promotion' environment does not exist."
+            echo "Create it with a named required reviewer and main-only deployment"
+            echo "branches. Until then the promotion job has no human gate at all."
+            exit 1
+          fi
+          reviewers=$(printf '%s' "${body}" \
+            | jq '[.protection_rules[]? | select(.type == "required_reviewers")] | length')
+          echo "required_reviewers rules: ${reviewers}"
+          if [ "${reviewers}" -lt 1 ]; then
+            echo "REFUSED: the environment exists and requires no reviewer, so naming it"
+            echo "gates nothing. An unprotected environment and no environment behave"
+            echo "identically; only one of them looks configured."
+            exit 1
+          fi
 
   promote:
     needs: runner-available
