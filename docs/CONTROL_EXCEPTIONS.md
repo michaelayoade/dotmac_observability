@@ -24,8 +24,22 @@ enforced, and when the count below disagrees with the table. The downward
 direction is the one that matters: a ledger that only ever grows is a backlog,
 while one that must shrink deliberately is a plan.
 
-declared-unmonitored: 10
+declared-unmonitored: 7
 
+> **Down three, on evidence.** Rules 10, 11 and 12 left this table with the
+> promotion executor: `live_verify.py` counts rules that exist and evaluate
+> rather than treating absence as health, `promote.py` captures the previous
+> release before activation and rolls back on every failure from `STAGED`
+> onward, and `drift.py` compares three artifacts and refuses to present a
+> two-artifact answer as a three-artifact one.
+>
+> Two rows STAYED and had their reasons rewritten, which is the more useful
+> half of this edit. Rule 2's comparison now exists and nothing schedules it
+> against the live host; rule 3's executor now refuses an inexact revision and
+> an unproven one, and nothing verifies the oracle it is handed. Both are
+> closer than they were and neither is enforced, and moving a row on "closer"
+> is how a ledger stops meaning anything.
+>
 > **Down one, on evidence.** Rule 18's row left this table: ADR-0006 gave it
 > two detectors, one structural and one a scan. Rule 20 arrived already
 > enforced rather than deferred, which is worth a sentence because the first
@@ -40,15 +54,12 @@ declared-unmonitored: 10
 
 | rule | subject | why there is no detector yet | monitored by |
 | --- | --- | --- | --- |
-| 2 | No direct production file editing | Detecting a hand edit means reading the live host and comparing it with the last receipt, and neither the live reader nor the receipt exists yet. | PR 6 |
-| 3 | Promotion targets an exact protected-main SHA | There is no promotion lane to constrain. Asserting the rule against a lane that does not exist would be a check that passes vacuously. | PR 6 |
+| 2 | No direct production file editing | The comparison exists (`drift.compare`) and the receipt exists. What does not exist is anything that READS the live host, because that is the promotion facility's job and the facility is not released — so no hand edit can currently fail anything. | Foundation facility |
+| 3 | Promotion targets an exact protected-main SHA | The executor refuses a revision that is not an exact commit and one with no external oracle reference. Nothing yet verifies that the oracle actually resolved protected main; only the workflow holding that token can, and it cannot run until the facility exists. | promotion lane |
 | 4 | Bundles are immutable and digest-pinned | The lock contract exists and is schema-enforced; nothing yet FETCHES an artifact, so the digest comparison has no input to run against. | PR 3C |
 | 5 | Product rules stay product-owned | Enforcing this means byte-comparing a fetched bundle against its recorded digest. Same missing input as rule 4. | PR 3C |
 | 6 | No duplicate alert or recording rule names, no incompatible label vocabularies | The check operates over the union of loaded bundles. No bundle is loaded yet. | PR 3C |
 | 8 | Every rule carries owner, severity, summary, runbook and producer proof | Producer proof compares an alert expression against the product's metrics manifest. Neither the manifest fetch nor the expression parser exists yet. | PR 3C |
-| 10 | "Rule inactive" is not recovery evidence | This is a property of the live verifier, which is written against a running evaluator on the disposable host. | PR 5 |
-| 11 | Promotion failure restores the exact preceding release | Requires the staging and activation machinery. | PR 6 |
-| 12 | Desired, live and receipt states are independently comparable | Desired state exists. Live state and receipts do not. | PR 6 |
 | 19 | Declared exposure and address family on every published surface | The guard belongs to the reusable contract, which `dotmac-deployment-foundation` owns and has not released yet. Writing a local detector would fork the rule from its owner and produce two answers to the same question. | Foundation adoption |
 
 ## Rules that ARE enforced today
@@ -80,6 +91,9 @@ tell at a glance which half of AGENTS.md currently bites.
 | 30 | `GATE-INTEGRITY-NOT-DELTA` in `validate._bundle_findings`, `tests/unit/test_bundle.py` |
 | 31 | `tests/architecture/test_supersession_workflow_cannot_leak.py` |
 | 32 | `tests/architecture/test_ci_matches_the_makefile.py`, `tests/architecture/test_supersession_workflow_cannot_leak.py` |
+| 10 | `src/dotmac_observability/live_verify.py`, `tests/unit/test_live_verify.py` |
+| 11 | `src/dotmac_observability/promote.py`, `tests/unit/test_promotion_executor.py` |
+| 12 | `src/dotmac_observability/drift.py`, `contracts/live-observation.schema.json`, `tests/unit/test_drift.py` |
 
 > **Rule 29 is the one entry above that is NOT a detector**, and saying so is
 > the point of this file. No test can decide whether a summary sentence

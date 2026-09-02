@@ -28,14 +28,24 @@ review discipline, not a guard, and it is a defect to describe it as enforced.
    editing surface. Every live byte is rendered here, staged as an immutable
    release directory and activated atomically. A change made on the host is
    drift to be reported and reverted, never a fix to be kept.
-   — enforcement: drift detection, `none yet (PR 6)`
+   — the COMPARISON exists (`src/dotmac_observability/drift.py`,
+     `tests/unit/test_drift.py`), and nothing runs it against the live host,
+     because reading the host is the promotion facility's job and that facility
+     is not released. A detector nobody schedules is not enforcement.
+     enforcement: `none yet (Foundation facility)`
 
 3. **Every promotion targets an exact protected-main SHA**, reasserted as
    current at promotion time. A branch name, a tag alone or "latest" is not a
    promotion target. A repository-local claim is derived from repository-local
    facts; a claim that a bundle is published requires an external oracle
    carrying immutable coordinates (Governance ADR 0013).
-   — enforcement: `none yet (PR 6)`
+   — the executor refuses a revision that is not an exact 40-character commit
+     and one carrying no external oracle reference
+     (`promote._preconditions`, `tests/unit/test_promotion_executor.py`), which
+     is half of it. Nothing yet VERIFIES that the named oracle resolved
+     protected main; the workflow holding that token is the only thing that
+     can, and it cannot run until the facility exists.
+     enforcement: `none yet (promotion lane)`
 
 4. **Every bundle is immutable and digest-pinned.** A bundle lock names the
    product, environment, source revision, image digest, product-manifest
@@ -79,18 +89,32 @@ review discipline, not a guard, and it is a defect to describe it as enforced.
     rule EXISTS and is healthy, AND that its target is present and healthy. A
     deleted rule, a failed evaluation and a vanished target all present as
     "not firing". Any verification that accepts absence as success is wrong.
-    — enforcement: `none yet (PR 5)`
+    — `src/dotmac_observability/live_verify.py` counts rules that EXIST and
+      evaluate cleanly and reports a declared rule the evaluator did not load;
+      an observation carrying no rules at all is refused rather than read as
+      quiet. `tests/unit/test_live_verify.py`
 
 11. **Promotion failure restores the exact preceding release.** The previous
     release pointer is preserved before activation and restored on any failure
     before `ACCEPTED`. There is no partial-promotion state an operator is
     expected to finish by hand.
-    — enforcement: `none yet (PR 6)`
+    — `src/dotmac_observability/promote.py` captures the pointer at staging,
+      refuses to continue when staging captured none, and rolls back on every
+      failure from `STAGED` onward — including a failure at acceptance. A
+      restore is recorded only when the facility returns a READ-BACK proving
+      it; a command that returned is not a host that recovered.
+      `tests/unit/test_promotion_executor.py`
 
 12. **Desired state, live state and the last verified receipt are three
     independently comparable artifacts.** Drift is the disagreement between
     them. A design that can only read one of the three cannot detect drift.
-    — enforcement: `none yet (PR 6)`
+    — all three are now artifacts: the desired state renders to a tree digest,
+      the receipt has `contracts/promotion-receipt.schema.json`, and live state
+      has `contracts/live-observation.schema.json` rather than being a habit of
+      reading APIs in the right order. `drift.compare` reports which PAIR
+      disagrees, and reports `DRIFT-INCOMPARABLE` rather than presenting a
+      two-artifact answer as a three-artifact one.
+      `src/dotmac_observability/drift.py`, `tests/unit/test_drift.py`
 
 13. **Rendered bytes are committed, never hand-edited, and deterministic.**
     `make render-check` re-renders every declared inventory and compares

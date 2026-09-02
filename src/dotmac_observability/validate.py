@@ -113,6 +113,7 @@ __all__ = [
     "load_supersession_request",
     "migrate_capture",
     "migration_findings",
+    "private_material_findings",
     "resolution_findings",
     "resolve",
     "retirement_findings",
@@ -1757,6 +1758,32 @@ _PRIVATE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
+def private_material_findings(text: str, *, location: str) -> tuple[Finding, ...]:
+    """Every line of ``text`` that carries resolved material, by line number.
+
+    Extracted from the tree scanner so that a document produced at promotion
+    time — a receipt, a live observation — is held to the SAME detector as a
+    tracked file, rather than to a second copy of the patterns that would drift
+    from this one. A receipt is the artifact most likely to be pasted into a
+    ticket, so it is the last place a second, weaker spelling of rule 18 should
+    live.
+    """
+    findings: list[Finding] = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        for code, pattern in _PRIVATE_PATTERNS:
+            if pattern.search(line):
+                findings.append(
+                    Finding(
+                        f"PRIVATE-{code}",
+                        f"{location}:{number}",
+                        "looks like resolved material; public Git carries the LOGICAL "
+                        "description and the private inventory carries the resolution "
+                        "(AGENTS.md rule 18, ADR-0004)",
+                    )
+                )
+    return tuple(findings)
+
+
 def scan_for_private_material(root: Path, files: Iterable[Path]) -> tuple[Finding, ...]:
     """Report any line carrying resolved material ADR-0004 keeps out of Git.
 
@@ -1775,18 +1802,7 @@ def scan_for_private_material(root: Path, files: Iterable[Path]) -> tuple[Findin
             text = path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
             continue
-        for number, line in enumerate(text.splitlines(), start=1):
-            for code, pattern in _PRIVATE_PATTERNS:
-                if pattern.search(line):
-                    findings.append(
-                        Finding(
-                            f"PRIVATE-{code}",
-                            f"{relative}:{number}",
-                            "looks like resolved material; public Git carries the LOGICAL "
-                            "description and the private inventory carries the resolution "
-                            "(AGENTS.md rule 18, ADR-0004)",
-                        )
-                    )
+        findings.extend(private_material_findings(text, location=relative))
     return tuple(findings)
 
 
