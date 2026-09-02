@@ -69,6 +69,7 @@ __all__ = [
     "TMPFILES_CONFIG",
     "RenderedTree",
     "differences",
+    "file_digest",
     "render_control_plane",
     "tree_digest",
     "write_tree",
@@ -959,6 +960,17 @@ def tree_digest(tree: RenderedTree) -> str:
         digest.update(text.encode("utf-8"))
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def file_digest(contents: str) -> str:
+    """One rendered file's digest, as a live read-back reports it.
+
+    Here rather than in the verifier because the renderer owns what a rendered
+    file IS, digest included. A comparison module computing its own would be a
+    second answer to that question, and the two would agree right up until one
+    of them learned about an encoding the other did not.
+    """
+    return hashlib.sha256(contents.encode("utf-8")).hexdigest()
 
 
 def write_tree(tree: RenderedTree, destination: Path) -> None:

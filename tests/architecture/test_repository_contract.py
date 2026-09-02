@@ -46,6 +46,11 @@ def test_the_declared_contracts_are_all_present():
         "bundle-lock.schema.json",
         "routing.schema.json",
         "promotion-receipt.schema.json",
+        # Live state as an ARTIFACT rather than a habit of reading APIs in the
+        # right order. Rule 12 names three independently comparable artifacts;
+        # two of them were contracts and the third was a procedure, which
+        # cannot be compared later, attached to a ticket or replayed.
+        "live-observation.schema.json",
         # Both public schemas whose every INSTANCE is private (ADR-0004). A
         # shape discloses nothing; publishing it is what lets a reviewer
         # disagree with the split.

@@ -22,6 +22,9 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from .drift import compare
+from .live_verify import load_live_observation, render_verification, verify
+from .receipt import load_receipt, receipt_findings
 from .render import differences, render_control_plane, tree_digest, write_tree
 from .validate import (
     ACCEPTED_SCHEMA_VERSION,
@@ -394,6 +397,89 @@ def _cmd_render(root: Path, contracts: Path, output: Path, private: Path, *, che
     return 0
 
 
+def _cmd_verify(
+    root: Path,
+    contracts: Path,
+    private: Path,
+    observation: Path,
+    baseline: Path | None,
+    previous_digest: str | None,
+    *,
+    first_promotion: bool,
+) -> int:
+    """Report the six conditions against one read-back, and the verdict.
+
+    The verdict is printed even when it is the bad one, and all six rows are
+    printed even when five passed: a report listing only failures cannot be
+    told from a report of a run that checked less.
+    """
+    try:
+        state = load(root, contracts=contracts)
+        inventory = load_private_inventory(private, contracts=contracts)
+        resolution = resolve(state, inventory)
+        live = load_live_observation(observation, contracts=contracts)
+        recorded = (
+            None if baseline is None else load_live_observation(baseline, contracts=contracts)
+        )
+    except InventoryError as error:
+        return _report(error.findings, heading="refusing to verify an unloadable input")
+
+    verification = verify(
+        state,
+        resolution,
+        render_control_plane(state, resolution),
+        live,
+        baseline=recorded,
+        previous_digest=previous_digest,
+        first_promotion=first_promotion,
+    )
+    print(render_verification(verification))
+    return 0 if not verification.findings else 1
+
+
+def _cmd_receipt_check(contracts: Path, path: Path, *, first_promotion: bool) -> int:
+    findings = receipt_findings(
+        load_receipt(path),
+        contracts=contracts,
+        location=path.name,
+        first_promotion=first_promotion,
+    )
+    if findings:
+        return _report(findings, heading="the receipt claims more than it records")
+    print(f"{path.name} is internally consistent")
+    return 0
+
+
+def _cmd_drift(
+    root: Path, contracts: Path, private: Path, observation: Path | None, receipt: Path | None
+) -> int:
+    """Compare the three artifacts, and say plainly which were not supplied.
+
+    Exits non-zero when any artifact is missing as well as when any pair
+    disagrees. Two artifacts agreeing is an incomplete result, not a clean one,
+    and a zero exit is how "incomplete" becomes "clean" in somebody's job log.
+    """
+    try:
+        state = load(root, contracts=contracts)
+        inventory = load_private_inventory(private, contracts=contracts)
+        resolution = resolve(state, inventory)
+        live = (
+            None if observation is None else load_live_observation(observation, contracts=contracts)
+        )
+    except InventoryError as error:
+        return _report(error.findings, heading="refusing to compare an unloadable input")
+
+    report = compare(
+        tree=render_control_plane(state, resolution),
+        live=live,
+        receipt=None if receipt is None else load_receipt(receipt),
+    )
+    if report.clean:
+        print("desired, live and receipt agree")
+        return 0
+    return _report(report.findings, heading="drift")
+
+
 def _cmd_secret_scan(root: Path) -> int:
     findings = scan_for_secret_material(root, _tracked_files(root))
     return _report(findings, heading="secret material in tracked files")
@@ -525,6 +611,45 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
 
+    verify_command = commands.add_parser(
+        "verify", help="report the six production conditions against one read-back"
+    )
+    verify_command.add_argument("--private-inventory", type=Path, required=True)
+    verify_command.add_argument(
+        "--observation",
+        type=Path,
+        required=True,
+        help="an observability-live-observation.v1 document",
+    )
+    verify_command.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help=(
+            "the read-back taken BEFORE the promotion. Without it the ingestion delta cannot "
+            "be computed and condition 3 is reported unmet \u2014 never assumed to be zero."
+        ),
+    )
+    verify_command.add_argument(
+        "--previous-digest",
+        default=None,
+        help="the tree digest the previous release was accepted with, for condition 6",
+    )
+    verify_command.add_argument("--first-promotion", action="store_true")
+
+    receipt_command = commands.add_parser(
+        "receipt-check", help="refuse a receipt that claims more than it records"
+    )
+    receipt_command.add_argument("receipt", type=Path)
+    receipt_command.add_argument("--first-promotion", action="store_true")
+
+    drift_command = commands.add_parser(
+        "drift", help="compare desired state, live state and the last accepted receipt"
+    )
+    drift_command.add_argument("--private-inventory", type=Path, required=True)
+    drift_command.add_argument("--observation", type=Path, default=None)
+    drift_command.add_argument("--receipt", type=Path, default=None)
+
     commands.add_parser("secret-scan", help="refuse secret material in tracked files")
     commands.add_parser(
         "private-material-scan", help="refuse resolved material in tracked files (ADR-0004)"
@@ -568,6 +693,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments.previous,
             arguments.following,
             arguments.expect_previous_sha256,
+        )
+    if arguments.command == "verify":
+        return _cmd_verify(
+            root,
+            contracts,
+            arguments.private_inventory,
+            arguments.observation,
+            arguments.baseline,
+            arguments.previous_digest,
+            first_promotion=bool(arguments.first_promotion),
+        )
+    if arguments.command == "receipt-check":
+        return _cmd_receipt_check(
+            contracts, arguments.receipt, first_promotion=bool(arguments.first_promotion)
+        )
+    if arguments.command == "drift":
+        return _cmd_drift(
+            root, contracts, arguments.private_inventory, arguments.observation, arguments.receipt
         )
     if arguments.command == "secret-scan":
         return _cmd_secret_scan(root)

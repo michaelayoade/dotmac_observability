@@ -527,9 +527,49 @@ A receipt is written for a failed or rolled-back promotion too
 (`outcome: accepted | rolled-back | failed`): a promotion that leaves no record
 is indistinguishable from one that never ran.
 
-None of this is implemented. The contract
-(`contracts/promotion-receipt.schema.json`) is accepted; the facility is PR 6
-and the first production promotion is PR 7, separately authorized.
+### The executor, and the facility it drives
+
+`promote.promote` is the state machine above. It owns the ORDER, the refusals,
+the rollback decision and the receipt; it owns no host effect at all. Every one
+of those is a method on `promote.PromotionFacility`, a Protocol this repository
+DECLARES and does not implement, because reaching a host belongs to
+`dotmac-deployment-foundation` (see the ownership table above). A control plane
+that grew its own transport would be a second answer to how a release reaches a
+host, and the second answer is the one that never gets the fixes.
+
+The split is also what makes the machine testable. Every stage, every refusal
+and every rollback path is exercised against a recording double in
+`tests/unit/test_promotion_executor.py`, with no host, container or daemon —
+so "no stage is skippable" and "a failure after staging rolls back" are
+properties with tests rather than sentences in this file.
+
+Two refusals happen before anything is fetched. The target host is NAMED by the
+caller and merely CHECKED against the inventory (`AGENTS.md` rule 17: never
+inferred from an inventory row), and the revision arrives as an
+`AssertedRevision` carrying an external oracle reference, because "this commit
+is the protected-main tip" is not a repository-local fact (rule 3, Governance
+ADR 0013).
+
+Rollback begins at `STAGED` and not before. Before `STAGED` nothing on the host
+has changed, so a fetch or validation failure leaves the previous release
+running untouched and invoking a restore there would be a host mutation in
+response to a failure that caused none. From `STAGED` onward every failure —
+including a failure at `ACCEPTED` — restores the pointer captured at staging.
+A restore counts only when the facility returns a READ-BACK proving it: a
+`rollback()` that returns without raising says a command succeeded, and only an
+observation says the host came back.
+
+**What is still missing is the facility.** The Foundation's shipped executor
+swaps a Compose image digest on the local host; it stages no release directory,
+captures no previous pointer from the host, has no remote transport and reads
+nothing back from Prometheus or Alertmanager. `docs/adr/0010-the-promotion-executor-and-the-facility-contract.md`
+states, as a contract another lane can implement, exactly what it must provide.
+
+The rehearsal is held to conditions 1, 2, 4 and 5 only, and the exclusion is
+stated rather than silent: a disposable host's ingestion counter starts at zero,
+which is the state `INTEGRITY-BASELINE-ZERO` refuses, and its first release has
+no rollback target. Applying the production conjunction to a rehearsal would
+make the rehearsal permanently unpassable, which teaches a lane to skip it.
 
 ## Three independently comparable artifacts
 
@@ -553,7 +593,21 @@ only read one of the three cannot detect drift at all, which is why
 `DesiredState` is a single value rather than a habit of reading files in the
 right order, and why the receipt is a contract rather than a log line.
 
-Comparison is PR 6. Today only the first artifact exists.
+All three are artifacts now. The third used to be a procedure — read these
+APIs, in this order — which cannot be compared later, attached to a ticket or
+replayed against a different desired state; it is
+`contracts/live-observation.schema.json`, and every field in it is a count, a
+boolean, a digest, an enum, a logical name or a timestamp. There is
+deliberately no field an endpoint, a scrape URL, a credential basename or an
+error string can be typed into: `last_error` carries the target's address in
+most real failures, and one such field would undo rule 18 for the whole
+document.
+
+`drift.compare` reports which PAIR disagrees, because the pair is the
+diagnosis. Handed fewer than three artifacts it reports `DRIFT-INCOMPARABLE`
+and performs the pairs it can, rather than presenting a two-artifact answer as
+a three-artifact one — a partial comparison labelled as a full one is worse
+than no comparison, because a reader acts on it.
 
 ## Delivery train
 
@@ -578,8 +632,8 @@ Comparison is PR 6. Today only the first artifact exists.
 > change rather than landing as one commit. Neither sequence supersedes the
 > other: one describes what changes here, the other what has to exist first.
 | 4 | CI workflows, the standards-profile pin, the architecture tests and the mutation-based sensitivity proofs | delivered early, in PR 1; the remaining proofs cover the capabilities the PR 3 stack and PR 5 add |
-| 5 | Disposable-host rehearsal on the dedicated test server, and `live_verify.py` | planned |
-| 6 | The promotion facility in `dotmac-deployment-foundation` vNext, plus `receipt.py` and `drift.py` here | planned |
+| 5 | Disposable-host rehearsal on the dedicated test server, and `live_verify.py` | `live_verify.py` **done**; the rehearsal needs the Foundation facility |
+| 6 | The promotion facility in `dotmac-deployment-foundation` vNext, plus `receipt.py` and `drift.py` here | everything in THIS repository is **done** (`promote.py`, `receipt.py`, `drift.py`, `contracts/live-observation.schema.json`); the facility is not, and its contract is ADR-0010 |
 | 7 | Production bootstrap of the Observer host | planned, separately authorized |
 | 8 | ERP bundle onboarding: the first product bundle pinned, promoted and verified | planned |
 
@@ -594,15 +648,33 @@ this repository defines that contract.
 
 ### What exists today
 
-Everything under `src/dotmac_observability/` listed as shipped below, the five
-contracts, the reference fixture at `tests/fixtures/reference/` with its
-committed `rendered/` tree, and five unit tests
-(`test_render_determinism.py`, `test_yaml_emit.py`, `test_routing_coverage.py`,
-`test_federation_rename.py`, `test_model_loading.py`).
+Everything under `src/dotmac_observability/` listed as shipped below, every
+contract under `contracts/`, and the reference fixture at
+`tests/fixtures/reference/` with its committed `rendered/` tree.
 
 `make check` runs `poetry-lock-check`, `lint`, `format-check`, `type-check`,
-`secret-scan`, `private-scan`, `schema-check`, `render-check` and `test`, and
-the CI matrix names that list exactly.
+`secret-scan`, `private-scan`, `schema-check`, `production-check`,
+`render-check` and `test`, and the CI matrix names that list exactly.
+
+The promotion lane — `promote.py`, `live_verify.py`, `receipt.py`, `drift.py`
+and `contracts/live-observation.schema.json` — is complete AS FAR AS THIS
+REPOSITORY'S SIDE GOES, and it cannot promote anything, because every host
+effect belongs to `dotmac-deployment-foundation` and no version providing them
+is installable. `.github/workflows/promote.yml` encodes the sequence and stops
+at that step by construction: it probes for an installed facility rather than
+carrying a comment saying one is missing, because a comment is removed by
+whoever wants to try and a failing import is removed only by making it succeed.
+ADR-0010 states what the facility must provide.
+
+Two facts this repository cannot check, recorded rather than left implicit. The
+receipt requires `images` to equal the approved plan's image set, and the
+deployment control plane's plan record carries no image field — the images live
+inside its opaque `spec` — so `authorized_images` is supplied by the promotion
+caller and the comparison proves the caller consistent with itself. And there
+is no read API for an approved plan there: no fetch-by-digest and no
+verify-approved route, only a write path that compares an expected digest
+during authorization. An Observability promotion is HANDED an authorization; it
+cannot independently confirm one.
 
 `render-check` and `schema-check` were scheduled for 3C, blocked on "no
 production inventory to validate". ADR-0006 makes that block permanent — there
@@ -641,6 +713,7 @@ review discipline.
 | `validate.supersede_findings` / `supersede_summary` | Prove one private document legitimately replaces a NAMED earlier version, and describe the change in logical names only | shipped |
 | `validate.load_supersession_request` / `apply_supersession` | Apply a reviewed, public retirement request to a stored private document, preserving fields this package does not read | shipped |
 | `validate.scan_for_private_material` | Refuse resolved material anywhere in the tracked tree (rule 18) | shipped |
-| `live_verify.py` | Read live target, rule and route state from the evaluator APIs and compare it with the desired state | PR 5 |
-| `receipt.py` | Write and validate a promotion receipt against `contracts/promotion-receipt.schema.json` | PR 6 |
-| `drift.py` | Three-way comparison of desired state, live state and the last verified receipt | PR 6 |
+| `live_verify.py` | Compare a read-back with the desired state: the six conditions of `AGENTS.md` rule 29, and the verdict they add up to. Performs no I/O — it takes a parsed observation | shipped |
+| `receipt.py` | Build a promotion receipt from what was observed, and refuse one that claims more than it proved | shipped |
+| `drift.py` | Three-way comparison of desired state, live state and the last verified receipt, grouped by which pair disagrees | shipped |
+| `promote.py` | The promotion state machine, and the `PromotionFacility` Protocol the Foundation must implement. Declares every host effect and performs none | shipped |

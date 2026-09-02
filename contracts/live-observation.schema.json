@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dotmac.io/schemas/observability/live-observation.v1.json",
+  "title": "observability-live-observation.v1",
+  "description": "What was READ BACK from a running control plane, as one document. AGENTS.md rule 12 names three independently comparable artifacts: the desired state (this repository at a commit, rendered to a known tree digest), the last verified receipt (`promotion-receipt.schema.json`), and live state. The first two were contracts and the third was a habit of reading APIs in the right order, which is not an artifact and cannot be compared later, attached to a ticket or replayed against a different desired state. This is the third one.  Every field is a count, a boolean, a digest, an enum, a logical name or a timestamp — the same discipline the receipt keeps, and for the same reason. There is deliberately NO field an endpoint, a port, a scrape URL, a credential basename or an error string can be typed into: `last_error` would carry the target's address in most real failures, so target failure is reported as a health enum and the address is established from the private inventory whose digest the receipt already carries (ADR-0004, rule 18). The document is therefore safe to attach to a ticket, which is what makes it usable as evidence.  It is PRODUCED by the promotion facility — the thing that can reach the host — and CONSUMED by `live_verify.py`, which performs no I/O. That split is why the six production conditions can be unit-tested without a running stack.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "observed_at",
+    "environment",
+    "host_target_id",
+    "release",
+    "tree",
+    "targets",
+    "rules",
+    "routes",
+    "integrity",
+    "canary",
+    "probes"
+  ],
+  "properties": {
+    "schema_version": { "const": "observability-live-observation.v1" },
+    "observed_at": { "type": "string", "format": "date-time" },
+    "environment": { "type": "string", "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$" },
+    "host_target_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$",
+      "description": "The LOGICAL host, spelled as the receipt spells it. Its resolved identity is in the private inventory."
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["current", "previous"],
+      "properties": {
+        "current": { "type": "string", "minLength": 1 },
+        "previous": {
+          "type": ["string", "null"],
+          "description": "The pointer captured BEFORE activation. Null only on the very first promotion; any later null means the rollback target was not captured (rule 11)."
+        }
+      }
+    },
+    "tree": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/tree_entry" },
+      "uniqueItems": true,
+      "description": "Every file the read-back found under the active release, by path and digest. COMPLETE, never sampled: an entry absent here is compared as missing, and a path present here that the render does not produce is compared as unexpected — a stale file left in the release directory is still mounted into the evaluator. An empty array is refused by the verifier rather than passing as 'nothing differs', because a read-back that failed to list anything reports exactly as a clean one does."
+    },
+    "targets": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/target" },
+      "description": "One entry per ACTIVE target, not per job: a job resolving to four endpoints contributes four entries, which is what makes the declared `expected` count checkable."
+    },
+    "rules": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/rule" },
+      "description": "Every rule LOADED by the evaluator, with its evaluation health. AGENTS.md rule 10: absence is not health, so a rule the desired state declares and this array omits is a finding rather than a silence."
+    },
+    "routes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/route" },
+      "description": "The resolved route tree, by declared route id and the receiver it lands on."
+    },
+    "integrity": { "$ref": "#/$defs/integrity" },
+    "canary": { "$ref": "#/$defs/canary" },
+    "probes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/probe" },
+      "description": "One entry per declared surface PER ADDRESS FAMILY. A `dual_stack` surface with one entry is an incomplete pass, never a passing one: IPv4 and IPv6 traverse different chains on this host and a v4-only probe has repeatedly passed over a live v6 exposure."
+    },
+    "rollback": { "$ref": "#/$defs/rollback" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "tree_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$",
+          "description": "Relative to the release root, spelled as the renderer spells it."
+        },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      },
+      "description": "A digest rather than the bytes. The rendered tree legitimately contains resolved endpoints and credential basenames; its digest does not, and a digest is all a comparison needs."
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job", "health"],
+      "properties": {
+        "job": { "type": "string", "minLength": 1 },
+        "health": {
+          "enum": ["up", "down", "unknown"],
+          "description": "Prometheus's own vocabulary. There is deliberately no `last_error`: the address of the target it could not reach is in almost every such message, and one field carrying it would undo rule 18 for the whole document."
+        }
+      }
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["group", "name", "health"],
+      "properties": {
+        "group": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "health": { "enum": ["ok", "err", "unknown"] }
+      }
+    },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "receiver"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "receiver": { "type": "string", "minLength": 1 }
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["counter", "value", "process_start_time"],
+      "properties": {
+        "counter": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The ingestion counter this observation read, named so a comparison against a baseline of a DIFFERENT counter is a refusal rather than an accidental pass."
+        },
+        "value": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The absolute counter value. The verifier asserts a DELTA against a recorded baseline, never that this is zero: `counter == 0` is satisfiable by a reset, a fresh TSDB or a container restart, and a predicate made true that way cannot be told from one made true by a repair (rule 30)."
+        },
+        "process_start_time": {
+          "type": "number",
+          "description": "`process_start_time_seconds` from the same evaluator, in the same read. This is what makes the reset undetectable-by-omission impossible: a counter that went backwards is caught by comparing values, and a counter that was reset and climbed back past the baseline is caught only by noticing the process restarted underneath it."
+        }
+      }
+    },
+    "canary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fired", "delivered", "recovered", "receiver"],
+      "properties": {
+        "fired": { "type": "boolean" },
+        "delivered": {
+          "type": "boolean",
+          "description": "Proved AT THE RECEIVER. A 200 from a delivery API is Alertmanager's outbound attempt succeeding, which is not evidence a human can be reached."
+        },
+        "recovered": { "type": "boolean" },
+        "receiver": { "type": "string", "minLength": 1 },
+        "receiver_evidence_ref": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Where at the receiver the delivery was seen — a message id, a thread reference, a log coordinate. The verifier refuses `delivered: true` without one, because a boolean with nothing behind it is the claim, not the proof."
+        }
+      }
+    },
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["surface", "family", "chain", "expectation", "outcome", "control"],
+      "properties": {
+        "surface": { "type": "string", "minLength": 1 },
+        "family": { "enum": ["ipv4", "ipv6"] },
+        "chain": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The chain the rule for this surface was OBSERVED in. Compared against the chain the surface's kind and family derive (rule 23): seven IPv6 DROP rules were found on this host in `DOCKER-USER`, which no IPv6 packet to a published port traverses, so every port they named read as closed and was open."
+        },
+        "expectation": {
+          "enum": ["refused", "reachable"],
+          "description": "What the declared exposure says should happen, derived from the desired state rather than typed by the prober."
+        },
+        "outcome": { "enum": ["refused", "reachable", "inconclusive"] },
+        "control": { "$ref": "#/$defs/positive_control" }
+      }
+    },
+    "positive_control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outcome"],
+      "properties": {
+        "outcome": {
+          "enum": ["reachable", "unreachable", "inconclusive"],
+          "description": "A control that is expected to SUCCEED, run in the same pass on the same address family. Without it a refusal proves the probe ran, not that access is shut: an unplugged cable, a wrong address family or a dead prober all present as `refused`."
+        },
+        "evidence_ref": { "type": "string", "minLength": 1 }
+      },
+      "description": "Structurally nested inside the probe, and deliberately not a sibling array. A control listed alongside the probes could be matched to the wrong family by a later reader; nested, an IPv6 probe cannot borrow an IPv4 control."
+    },
+    "rollback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exercised", "restored_release", "restored_digest", "succeeded"],
+      "properties": {
+        "exercised": { "type": "boolean" },
+        "restored_release": { "type": ["string", "null"] },
+        "restored_digest": {
+          "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }],
+          "description": "The tree digest read back AFTER the restore. Compared against the digest the previous release was accepted with: a rollback that restored a pointer without restoring the bytes is the failure this field exists to catch."
+        },
+        "succeeded": { "type": "boolean" }
+      },
+      "description": "Absent when no rollback was attempted in this pass. The verifier treats absence as condition 6 unproven rather than passed — a rollback that has never been exercised is a plan, not a capability."
+    }
+  }
+}

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://dotmac.io/schemas/observability/promotion-receipt.v2.json",
   "title": "observability-promotion-receipt.v2",
-  "description": "What a completed promotion proved, recorded as facts a later reader can re-check. The receipt is one of the three artifacts drift compares (AGENTS.md rule 12): desired state in Git, live state read from the APIs, and this record of the last verified deployment.  v2 adds the ADR-0006 halves a receipt needs to be checkable without disclosing anything: the approved plan the promotion executed (issued by the deployment control plane, referenced here), the private inventory it resolved against, and the exact image digests that ran \u2014 each by identity and digest, never by value. `host.identity` became `host.target_id` for the same reason. This receipt remains the artifact most likely to be pasted into a ticket, so every field it permits is still a count, a boolean, a digest, a revision, a version string, a logical name or a timestamp.",
+  "description": "AMENDED 2026-09-01: `release`, `live` and `canary` moved out of the unconditional required list and into `allOf` branches on `outcome`. A receipt is written for a FAILURE too, and a promotion that failed at fetch or at configuration validation has no release directory, no read-back and no canary. Requiring those blocks forced a failed receipt to carry fabricated ones \u2014 zeros that read as \"0 of 0 targets up\" rather than as \"never measured\" \u2014 which is the absence-is-not-evidence mistake this contract exists to prevent, wearing the other way round. An `accepted` receipt still requires all three, and a `rolled-back` one still requires the release and the rollback record, so nothing an outcome actually asserts became optional.  What a completed promotion proved, recorded as facts a later reader can re-check. The receipt is one of the three artifacts drift compares (AGENTS.md rule 12): desired state in Git, live state read from the APIs, and this record of the last verified deployment.  v2 adds the ADR-0006 halves a receipt needs to be checkable without disclosing anything: the approved plan the promotion executed (issued by the deployment control plane, referenced here), the private inventory it resolved against, and the exact image digests that ran \u2014 each by identity and digest, never by value. `host.identity` became `host.target_id` for the same reason. This receipt remains the artifact most likely to be pasted into a ticket, so every field it permits is still a count, a boolean, a digest, a revision, a version string, a logical name or a timestamp.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -17,12 +17,33 @@
     "bundles",
     "evaluator",
     "host",
-    "release",
     "validation",
-    "live",
-    "canary",
     "runs",
     "timestamps"
+  ],
+  "allOf": [
+    {
+      "if": { "properties": { "outcome": { "const": "accepted" } }, "required": ["outcome"] },
+      "then": {
+        "required": ["release", "live", "canary"],
+        "properties": {
+          "validation": {
+            "required": [
+              "render_check",
+              "secret_scan",
+              "promtool_config",
+              "promtool_rules",
+              "amtool_config",
+              "compose_config"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "rolled-back" } }, "required": ["outcome"] },
+      "then": { "required": ["release", "rollback"] }
+    }
   ],
   "properties": {
     "schema_version": { "const": "observability-promotion-receipt.v2" },
@@ -107,7 +128,8 @@
     "validation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["render_check", "secret_scan", "promtool_config", "promtool_rules", "amtool_config", "compose_config"],
+      "description": "The checks that RAN. No field is unconditionally required, and an absent one means the check did not run \u2014 never that it passed. A promotion that failed at fetch never reached the evaluator toolchain, and filling its receipt with `passed: false` would record six failures that never happened. The `accepted` branch below requires all six, because an acceptance asserts every one of them.",
+      "required": [],
       "properties": {
         "render_check": { "$ref": "#/$defs/check" },
         "secret_scan": { "$ref": "#/$defs/check" },
@@ -197,8 +219,9 @@
       "required": ["plan_digest", "approval_decision_ref"],
       "properties": {
         "plan_digest": {
-          "$ref": "#/$defs/sha256",
-          "description": "The frozen plan's digest, as issued by the deployment control plane. A plan is frozen at proposal, so this identifies exactly what was approved rather than whatever the desired state happens to say now."
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "The frozen plan's digest, as issued by the deployment control plane, IN THE OWNER'S CANONICAL FORM. A plan is frozen at proposal, so this identifies exactly what was approved rather than whatever the desired state happens to say now.  Deliberately NOT `#/$defs/sha256`, and the difference is the whole point. The owner emits `sha256:<64 hex>` and forbids a consumer from stripping the prefix (bare hex is its retired pre-canonical form). A receipt demanding bare hex would force every adopter to normalize, and a forked digest parser surfaces later as a false \"the plan changed\" that nobody can explain. This field is compared as an opaque string and is never re-derived here."
         },
         "approval_decision_ref": {
           "type": "string",
@@ -210,7 +233,12 @@
           "minLength": 1,
           "description": "Which approval policy the decision was taken under. Optional here because whether a plan requires approval at all is the control plane's per-plan declaration, never this repository's inference."
         },
-        "approval_policy_version": { "type": "integer", "minimum": 1 }
+        "approval_policy_version": { "type": "integer", "minimum": 1 },
+        "execution_plan_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "`ExecutionPlanDigestV1` \u2014 the digest of the canonical `FoundationExecutionPlanV1` document, which `dotmac-deployment-foundation` OWNS, renders and recomputes immediately before execution. It is deliberately NOT `plan_digest`: that is the deployment control plane's internal snapshot digest, and it is also not the descriptor digest or the authorization-envelope digest. Reaching for one of those near-misses is exactly how a Control/Foundation binding that could never be equal for any input shipped reading as correct.  Optional here because Control's `execution_plan_digest` field and the Foundation version that renders the document are not published yet. When both are, this becomes the term that binds what was authorized to what ran, and `plan_digest` stays as the answer to WHICH approved plan record was executed."
+        }
       },
       "description": "A reference into `dotmac-deployment-control`'s approved-plan record. The field names mirror that owner's deliberately; if the two ever disagree, the owner is right and this is the defect."
     },

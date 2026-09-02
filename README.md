@@ -77,10 +77,24 @@ rather than silently exempt — read that file before describing any rule here
 as enforced.
 
 **Nothing is promoted, and no production configuration is committed.** The
-governance, the seven contracts, the typed model, four-layer validation, the
-deterministic renderer, the resolution layer and both scanners exist. The
-production inventory, bundle fetching, live verification, promotion, receipts
-and drift comparison do not.
+governance, the contracts, the typed model, four-layer validation, the
+deterministic renderer, the resolution layer, both scanners and the production
+inventory exist. So, now, does the promotion lane: the state machine
+(`promote.py`), the six-condition read-back verifier (`live_verify.py`), the
+receipt writer and its refusals (`receipt.py`), and the three-way drift
+comparison (`drift.py`).
+
+It still cannot promote anything, and the reason is a boundary rather than a
+gap in the work. Every host effect — staging an immutable release directory,
+capturing the previous pointer, transporting the tree, reloading the
+evaluators, reading them back and restoring on failure — is a method on
+`promote.PromotionFacility`, a Protocol this repository declares and
+`dotmac-deployment-foundation` implements. No version providing them is
+installable, so `.github/workflows/promote.yml` stops at the step that probes
+for one. `docs/adr/0010-the-promotion-executor-and-the-facility-contract.md`
+states what it must provide.
+
+Bundle fetching (`bundle.py`) also does not exist.
 
 ## Commands
 
