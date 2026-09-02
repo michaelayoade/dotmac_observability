@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://dotmac.io/schemas/observability/live-observation.v1.json",
-  "title": "observability-live-observation.v1",
+  "$id": "https://dotmac.io/schemas/observability/live-observation.v2.json",
+  "title": "observability-live-observation.v2",
   "description": "What was READ BACK from a running control plane, as one document. AGENTS.md rule 12 names three independently comparable artifacts: the desired state (this repository at a commit, rendered to a known tree digest), the last verified receipt (`promotion-receipt.schema.json`), and live state. The first two were contracts and the third was a habit of reading APIs in the right order, which is not an artifact and cannot be compared later, attached to a ticket or replayed against a different desired state. This is the third one.  Every field is a count, a boolean, a digest, an enum, a logical name or a timestamp — the same discipline the receipt keeps, and for the same reason. There is deliberately NO field an endpoint, a port, a scrape URL, a credential basename or an error string can be typed into: `last_error` would carry the target's address in most real failures, so target failure is reported as a health enum and the address is established from the private inventory whose digest the receipt already carries (ADR-0004, rule 18). The document is therefore safe to attach to a ticket, which is what makes it usable as evidence.  It is PRODUCED by the promotion facility — the thing that can reach the host — and CONSUMED by `live_verify.py`, which performs no I/O. That split is why the six production conditions can be unit-tested without a running stack.",
   "type": "object",
   "additionalProperties": false,
@@ -20,7 +20,7 @@
     "probes"
   ],
   "properties": {
-    "schema_version": { "const": "observability-live-observation.v1" },
+    "schema_version": { "const": "observability-live-observation.v2" },
     "observed_at": { "type": "string", "format": "date-time" },
     "environment": { "type": "string", "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$" },
     "host_target_id": {
@@ -61,7 +61,12 @@
       "items": { "$ref": "#/$defs/route" },
       "description": "The resolved route tree, by declared route id and the receiver it lands on."
     },
-    "integrity": { "$ref": "#/$defs/integrity" },
+    "integrity": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/integrity" },
+      "description": "One reading PER ingestion counter the declared gates name, and every one of them. `live_verify.integrity_counters` derives that list from the gates' own integrity predicates, so a bundle whose gates watch three counters produces three readings here. v1 held a single object, which meant a facility handed several counters had two options and both were wrong: read the first and file a document that reads as a COMPLETE read-back while the unread counters are exactly what the remaining alert gates assert about, or refuse the promotion outright. The subset is the worse one -- it is indistinguishable from a genuine full pass -- so v1's shape made a correct facility refuse. The verifier requires the set of counters here to EQUAL the set the gates declare: a missing one is `INTEGRITY-COUNTER-UNREAD` and an extra one is `INTEGRITY-COUNTER-UNWATCHED`, because a reading nothing alerts on is evidence for a question nobody asked."
+    },
     "canary": { "$ref": "#/$defs/canary" },
     "probes": {
       "type": "array",
@@ -193,16 +198,27 @@
     "rollback": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["exercised", "restored_release", "restored_digest", "succeeded"],
+      "required": ["exercised", "restored_release", "restored_digest", "digest_absence", "succeeded"],
       "properties": {
         "exercised": { "type": "boolean" },
         "restored_release": { "type": ["string", "null"] },
         "restored_digest": {
           "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }],
-          "description": "The tree digest read back AFTER the restore. Compared against the digest the previous release was accepted with: a rollback that restored a pointer without restoring the bytes is the failure this field exists to catch."
+          "description": "The tree digest read back AFTER the restore. Compared against the digest the previous release was accepted with: a rollback that restored a pointer without restoring the bytes is the failure this field exists to catch. Null when no digest could be computed, and `digest_absence` then says which of the two very different reasons applies."
+        },
+        "digest_absence": {
+          "enum": ["ordering_manifest_absent", "nothing_restored", null],
+          "description": "WHY `restored_digest` is null, because a bare null conflates two facts an operator must act on differently. A tree digest is order-dependent and a directory read-back has no inherent order, so the order comes from a `ReleaseTreeManifest.v1` stored outside the release directory. `ordering_manifest_absent` means the bytes were read but that manifest did not survive: the restore may have been perfect and is merely UNPROVABLE, and the repair is to restore the manifest. `nothing_restored` means the pointer came back empty, so there was no tree to digest: the restore FAILED and the host is not on the release it was meant to be. Both leave condition 6 unproven -- which is the safe reading and stays -- but conflating them tells an operator to go looking for a lost file when the host is actually running the wrong release, or the reverse. Null exactly when `restored_digest` is present."
         },
         "succeeded": { "type": "boolean" }
       },
+      "allOf": [
+        {
+          "if": { "properties": { "restored_digest": { "type": "null" } }, "required": ["restored_digest"] },
+          "then": { "properties": { "digest_absence": { "enum": ["ordering_manifest_absent", "nothing_restored"] } } },
+          "else": { "properties": { "digest_absence": { "type": "null" } } }
+        }
+      ],
       "description": "Absent when no rollback was attempted in this pass. The verifier treats absence as condition 6 unproven rather than passed — a rollback that has never been exercised is a plan, not a capability."
     }
   }

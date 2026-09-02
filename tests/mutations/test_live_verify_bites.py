@@ -85,15 +85,15 @@ def test_a_counter_only_comparison_passes_the_reset_that_climbed_back():
     """
     live = passing()
     restarted = IntegrityReading(
-        counter=live.integrity.counter,
+        counter=live.integrity[0].counter,
         value=COUNTER_VALUE,
         process_start_time=PROCESS_START + 900,
     )
-    mutated = dataclasses.replace(live, integrity=restarted)
+    mutated = dataclasses.replace(live, integrity=(restarted,))
 
     # The naive check, written out so the disagreement is visible rather than
     # asserted. It reads the same two documents and reaches the wrong answer.
-    naive_passes = mutated.integrity.value <= baseline().integrity.value
+    naive_passes = mutated.integrity[0].value <= baseline().integrity[0].value
     assert naive_passes, "the mutation must look acceptable to a no-increase comparison"
 
     verification = run(mutated)
@@ -109,10 +109,10 @@ def test_a_zero_valued_check_is_satisfied_by_the_reset_it_cannot_detect():
     container restart. Exactly one of the four ways to reach zero is a repair.
     """
     live = passing()
-    zeroed = dataclasses.replace(live.integrity, value=0)
-    mutated = dataclasses.replace(live, integrity=zeroed)
+    zeroed = dataclasses.replace(live.integrity[0], value=0)
+    mutated = dataclasses.replace(live, integrity=(zeroed,))
 
-    naive_passes = mutated.integrity.value == 0
+    naive_passes = mutated.integrity[0].value == 0
     assert naive_passes, "the mutation must satisfy a zero-valued check"
 
     verification = run(mutated)

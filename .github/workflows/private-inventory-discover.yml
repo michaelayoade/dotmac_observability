@@ -94,8 +94,55 @@ jobs:
           BAO_MOUNT: ${{ secrets.OBSERVABILITY_PRIVATE_INVENTORY_MOUNT }}
           BAO_PATH: ${{ secrets.OBSERVABILITY_PRIVATE_INVENTORY_PATH }}
           BAO_FIELD: ${{ secrets.OBSERVABILITY_PRIVATE_INVENTORY_FIELD }}
+          # The custody pointer, and the ONLY consumer of this secret. ADR-0004
+          # keeps the store location out of Git and out of Knowledge, so the
+          # mount, path and field survive in exactly one place: a repository
+          # secret written when the census captured the document. Without a
+          # reader this secret is indistinguishable from dead configuration,
+          # and deleting a custody record is not reversible.
+          BAO_REF: ${{ secrets.OBS_PRIVATE_INVENTORY_REF }}
         run: |
           set -euo pipefail
+          # NOT `set -x`. Every value below is private custody material.
+
+          # Resolve the three location secrets from the pointer when they are
+          # not set individually. The explicit secrets WIN where present: this
+          # is a fallback, never an override, so configuring them cannot be
+          # silently undone by a stale pointer.
+          if [ -z "${BAO_MOUNT:-}" ] || [ -z "${BAO_PATH:-}" ]; then
+            if [ -z "${BAO_REF:-}" ]; then
+              echo "neither OBSERVABILITY_PRIVATE_INVENTORY_MOUNT/_PATH nor"
+              echo "OBS_PRIVATE_INVENTORY_REF is configured, so the store location"
+              echo "is not knowable from this repository. ADR-0004 keeps it out of"
+              echo "Git deliberately; a repository administrator supplies it."
+              exit 1
+            fi
+            # The fleet-canonical form, `bao://<mount>/<path>#<field>`. Parsed
+            # strictly and refused loudly: a pointer this cannot read is
+            # reported as unparseable rather than guessed at, because a wrong
+            # mount reads as an empty store and an empty store reads as a
+            # retired estate.
+            case "${BAO_REF}" in
+              bao://*/*#*) ;;
+              *) echo "OBS_PRIVATE_INVENTORY_REF is set and is not in the canonical"
+                 echo "bao://<mount>/<path>#<field> form. Its shape is not reported"
+                 echo "here because the value is custody material."
+                 exit 1 ;;
+            esac
+            _rest="${BAO_REF#bao://}"
+            _loc="${_rest%%#*}"
+            _fld="${_rest#*#}"
+            BAO_MOUNT="${BAO_MOUNT:-${_loc%%/*}}"
+            BAO_PATH="${BAO_PATH:-${_loc#*/}}"
+            BAO_FIELD="${BAO_FIELD:-${_fld}}"
+            # Mask every derived component before it can reach a log line.
+            for _v in "${BAO_MOUNT}" "${BAO_PATH}" "${BAO_FIELD}"; do
+              [ -n "${_v}" ] && echo "::add-mask::${_v}"
+            done
+            unset _rest _loc _fld _v
+            echo "store location resolved from the custody pointer"
+          fi
+
           for name in BAO_ADDR BAO_TOKEN BAO_MOUNT BAO_PATH; do
             if [ -z "${!name:-}" ]; then echo "$name is not configured"; exit 1; fi
           done

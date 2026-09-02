@@ -178,8 +178,8 @@ def test_a_loaded_rule_that_fails_to_evaluate_is_not_healthy():
 def test_a_counter_that_grew_fails_even_with_every_target_up():
     """The exact pair measured on this host: 18/18 green, samples being dropped."""
     live = passing()
-    grown = dataclasses.replace(live.integrity, value=COUNTER_VALUE + 1)
-    verification = run(dataclasses.replace(live, integrity=grown))
+    grown = dataclasses.replace(live.integrity[0], value=COUNTER_VALUE + 1)
+    verification = run(dataclasses.replace(live, integrity=(grown,)))
     assert "INTEGRITY-INCREASED" in codes(verification)
     assert verification.conditions[1].passed, "targets were healthy; only integrity failed"
     assert verification.verdict == VERDICT_RENDERED_GUARDED
@@ -187,8 +187,8 @@ def test_a_counter_that_grew_fails_even_with_every_target_up():
 
 def test_resetting_the_counter_is_a_refusal_and_never_a_pass():
     live = passing()
-    reset = dataclasses.replace(live.integrity, value=0)
-    verification = run(dataclasses.replace(live, integrity=reset))
+    reset = dataclasses.replace(live.integrity[0], value=0)
+    verification = run(dataclasses.replace(live, integrity=(reset,)))
     assert "INTEGRITY-COUNTER-RESET" in codes(verification)
     assert verification.verdict == VERDICT_RENDERED_GUARDED
 
@@ -205,25 +205,25 @@ def test_a_reset_that_climbed_back_past_the_baseline_is_caught_by_the_restart():
     restarted = IntegrityReading(
         counter=counter_name(), value=COUNTER_VALUE + 5, process_start_time=PROCESS_START + 900
     )
-    verification = run(dataclasses.replace(live, integrity=restarted))
+    verification = run(dataclasses.replace(live, integrity=(restarted,)))
     assert "INTEGRITY-PROCESS-RESTARTED" in codes(verification)
 
 
 def test_a_restart_is_caught_even_when_the_value_looks_perfect():
     live = passing()
-    restarted = dataclasses.replace(live.integrity, process_start_time=PROCESS_START + 1)
-    verification = run(dataclasses.replace(live, integrity=restarted))
+    restarted = dataclasses.replace(live.integrity[0], process_start_time=PROCESS_START + 1)
+    verification = run(dataclasses.replace(live, integrity=(restarted,)))
     assert "INTEGRITY-PROCESS-RESTARTED" in codes(verification)
     assert "INTEGRITY-INCREASED" not in codes(verification)
 
 
 def test_a_zero_baseline_is_refused_because_it_makes_the_delta_vacuous():
     base = baseline()
-    zeroed = dataclasses.replace(base.integrity, value=0)
+    zeroed = dataclasses.replace(base.integrity[0], value=0)
     live = passing()
     verification = run(
-        dataclasses.replace(live, integrity=dataclasses.replace(live.integrity, value=0)),
-        base=dataclasses.replace(base, integrity=zeroed),
+        dataclasses.replace(live, integrity=(dataclasses.replace(live.integrity[0], value=0),)),
+        base=dataclasses.replace(base, integrity=(zeroed,)),
     )
     assert "INTEGRITY-BASELINE-ZERO" in codes(verification)
 
@@ -248,10 +248,95 @@ def test_a_delta_measured_over_less_than_the_gate_window_is_not_evidence():
 
 
 def test_a_baseline_for_a_different_counter_cannot_be_compared():
+    """Matching by NAME makes the old mismatch unrepresentable.
+
+    v1 compared whichever single reading each document held, so two unrelated
+    series could be compared and a guard had to notice. Readings are now paired
+    by counter name before comparison, so a baseline naming a different counter
+    does not produce a bad comparison -- it produces NO comparison, which is
+    reported as the declared counter having no baseline reading.
+    """
     base = baseline()
-    other = dataclasses.replace(base.integrity, counter="prometheus_something_else_total")
-    verification = run(passing(), base=dataclasses.replace(base, integrity=other))
-    assert "INTEGRITY-COUNTER-MISMATCH" in codes(verification)
+    other = dataclasses.replace(base.integrity[0], counter="prometheus_something_else_total")
+    verification = run(passing(), base=dataclasses.replace(base, integrity=(other,)))
+    assert "INTEGRITY-BASELINE-COUNTER-ABSENT" in codes(verification)
+    assert verification.verdict == VERDICT_RENDERED_GUARDED
+
+
+# ── Condition 3, the v2 shape: every declared counter, not just the first ───
+
+SECOND_COUNTER = "prometheus_target_scrapes_sample_out_of_order_total"
+
+
+def _two_counter_state():
+    """The reference state with one gate widened to watch a second counter."""
+    gates = STATE.bundle.gates
+    assert gates, "the reference bundle declares no gate"
+    widened = dataclasses.replace(
+        gates[0],
+        integrity=(f"increase({counter_name()}[5m]) + increase({SECOND_COUNTER}[5m]) == 0"),
+    )
+    bundle = dataclasses.replace(STATE.bundle, gates=(widened, *gates[1:]))
+    return dataclasses.replace(STATE, bundle=bundle)
+
+
+def _reading(counter: str, value: int) -> IntegrityReading:
+    return IntegrityReading(counter=counter, value=value, process_start_time=PROCESS_START)
+
+
+def test_a_read_back_missing_a_declared_counter_is_not_a_complete_pass():
+    """The v1 defect, named. A subset must not read as the whole."""
+    live = dataclasses.replace(passing(), integrity=())
+    verification = run(live)
+    assert "INTEGRITY-COUNTER-UNREAD" in codes(verification)
+    assert verification.verdict == VERDICT_RENDERED_GUARDED
+
+
+def test_a_reading_no_declared_gate_watches_is_reported():
+    live = passing()
+    extra = dataclasses.replace(live, integrity=(*live.integrity, _reading(SECOND_COUNTER, 1)))
+    verification = run(extra)
+    assert "INTEGRITY-COUNTER-UNWATCHED" in codes(verification)
+
+
+def test_every_declared_counter_is_compared_and_not_only_the_first():
+    """The non-vacuity proof for the v2 shape.
+
+    Two counters are declared. The FIRST is unchanged and the SECOND grew, so
+    a verifier that read `counters[0]` and filed the document would report a
+    complete, clean read-back over a control plane that is dropping samples.
+    The first assertion establishes that the rejected design really does pass
+    here; without it this test could not tell a fix from a coincidence.
+    """
+    state = _two_counter_state()
+    first, second = counter_name(), SECOND_COUNTER
+    base = dataclasses.replace(
+        baseline(),
+        integrity=(_reading(first, COUNTER_VALUE), _reading(second, COUNTER_VALUE)),
+    )
+    live = dataclasses.replace(
+        passing(),
+        integrity=(_reading(first, COUNTER_VALUE), _reading(second, COUNTER_VALUE + 7)),
+    )
+
+    only_the_first_moved = live.integrity[0].value == base.integrity[0].value
+    assert only_the_first_moved, "reading counters[0] alone must look clean here"
+
+    verification = verify(
+        state,
+        RESOLUTION,
+        TREE,
+        live,
+        baseline=base,
+        previous_digest=PREVIOUS_DIGEST,
+        first_promotion=False,
+    )
+    assert "INTEGRITY-INCREASED" in codes(verification)
+    assert any(
+        finding.code == "INTEGRITY-INCREASED" and finding.location == second
+        for finding in verification.findings
+    ), "the finding must name the counter that actually moved"
+    assert verification.verdict == VERDICT_RENDERED_GUARDED
 
 
 # ── Condition 4: routes and delivery ────────────────────────────────────────
@@ -413,6 +498,63 @@ def test_a_rollback_with_no_recorded_previous_digest_cannot_be_checked():
         first_promotion=False,
     )
     assert "ROLLBACK-BASELINE-ABSENT" in codes(verification)
+
+
+def test_a_lost_ordering_manifest_is_not_reported_as_a_failed_restore():
+    live = passing()
+    assert live.rollback is not None
+    unprovable = dataclasses.replace(
+        live.rollback, restored_digest=None, digest_absence="ordering_manifest_absent"
+    )
+    verification = run(dataclasses.replace(live, rollback=unprovable))
+    assert "ROLLBACK-ORDER-UNKNOWN" in codes(verification)
+    assert "ROLLBACK-RESTORED-NOTHING" not in codes(verification)
+    assert verification.verdict == VERDICT_RENDERED_GUARDED
+
+
+def test_a_pointer_that_came_back_empty_is_reported_as_a_failed_restore():
+    live = passing()
+    assert live.rollback is not None
+    failed = dataclasses.replace(
+        live.rollback, restored_digest=None, digest_absence="nothing_restored"
+    )
+    verification = run(dataclasses.replace(live, rollback=failed))
+    assert "ROLLBACK-RESTORED-NOTHING" in codes(verification)
+    assert "ROLLBACK-ORDER-UNKNOWN" not in codes(verification)
+    assert verification.verdict == VERDICT_RENDERED_GUARDED
+
+
+def test_the_two_reasons_a_digest_is_absent_are_told_apart():
+    """Both leave condition 6 unproven; they send an operator to different places.
+
+    The safety property is unchanged and deliberately re-asserted: neither
+    absence is allowed to pass. What v2 adds is that the OPERATOR can tell a
+    lost manifest from a host running the wrong release, which one null could
+    not express.
+    """
+    live = passing()
+    assert live.rollback is not None
+    lost = run(
+        dataclasses.replace(
+            live,
+            rollback=dataclasses.replace(
+                live.rollback, restored_digest=None, digest_absence="ordering_manifest_absent"
+            ),
+        )
+    )
+    empty = run(
+        dataclasses.replace(
+            live,
+            rollback=dataclasses.replace(
+                live.rollback, restored_digest=None, digest_absence="nothing_restored"
+            ),
+        )
+    )
+    assert codes(lost) != codes(
+        empty
+    ), "one null for two facts is exactly the conflation v2 removes"
+    for verification in (lost, empty):
+        assert verification.verdict == VERDICT_RENDERED_GUARDED
 
 
 # ── Identity ────────────────────────────────────────────────────────────────
