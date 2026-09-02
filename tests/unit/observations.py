@@ -126,8 +126,10 @@ def passing() -> LiveState:
             LiveRoute(identifier=route.identifier, receiver=route.receiver)
             for route in STATE.routes
         ),
-        integrity=IntegrityReading(
-            counter=counter_name(), value=COUNTER_VALUE, process_start_time=PROCESS_START
+        integrity=(
+            IntegrityReading(
+                counter=counter_name(), value=COUNTER_VALUE, process_start_time=PROCESS_START
+            ),
         ),
         canary=LiveCanary(
             fired=True,
@@ -141,6 +143,7 @@ def passing() -> LiveState:
             exercised=True,
             restored_release=PREVIOUS_RELEASE,
             restored_digest=PREVIOUS_DIGEST,
+            digest_absence=None,
             succeeded=True,
         ),
     )

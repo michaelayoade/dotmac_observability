@@ -619,7 +619,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--observation",
         type=Path,
         required=True,
-        help="an observability-live-observation.v1 document",
+        help="an observability-live-observation.v2 document",
     )
     verify_command.add_argument(
         "--baseline",

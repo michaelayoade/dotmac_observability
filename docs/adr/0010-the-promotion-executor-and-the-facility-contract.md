@@ -1,7 +1,7 @@
 # ADR-0010: The promotion executor here, the facility contract elsewhere
 
 - **Status:** Accepted
-- **Date:** 2026-09-01
+- **Date:** 2026-09-01 (amended 2026-09-02)
 - **Related:** ADR-0002 (immutable releases), ADR-0006 (private inventory),
   ADR-0008 (the bundle); `AGENTS.md` rules 2, 3, 10, 11, 12, 17, 20, 23, 24,
   29, 30; `docs/inventories/observer-as-built.md` §17; Starter ADR-0070
@@ -37,7 +37,7 @@ rollback decision and the receipt. Every host effect is a method on
 
 `live_verify.py` compares a read-back with the desired state and reports the
 six conditions and the verdict they add up to. It performs no I/O:
-it takes a parsed `observability-live-observation.v1` document.
+it takes a parsed `observability-live-observation.v2` document.
 
 `receipt.py` builds a receipt from what was observed and refuses one that
 claims more than it proved. `drift.py` compares the three artifacts and reports
@@ -159,7 +159,7 @@ installable version).
    take the new configuration over `--web.enable-lifecycle` without recreating
    the container and losing the scrape window, and reload Alertmanager.
 
-5. **A read-back that produces `observability-live-observation.v1`.** Nothing
+5. **A read-back that produces `observability-live-observation.v2`.** Nothing
    in the package queries Prometheus or Alertmanager; its only network call is
    a readiness GET (`providers/compose_host.py:132`). `observe` must return a
    document satisfying that contract:
@@ -170,7 +170,7 @@ installable version).
    | `targets` | `/api/v1/targets`, one entry per active target, job and health only |
    | `rules` | `/api/v1/rules`, group, name and evaluation health |
    | `routes` | the resolved Alertmanager route tree, by declared route id |
-   | `integrity` | the counter named in `ObservationRequest.integrity_counters`, plus `process_start_time_seconds` from the same read |
+   | `integrity` | one reading per counter named in `ObservationRequest.integrity_counters` — ALL of them — each with `process_start_time_seconds` from the same read |
    | `canary` | fired, delivered AT THE RECEIVER with an evidence reference, recovered |
    | `probes` | one per `ObservationRequest.probe_slots` entry, with the chain observed and a positive control |
 
@@ -287,6 +287,113 @@ consistent with itself. And there is **no read API** for an approved plan there:
 no fetch-by-digest and no verify-approved route, only a write path that compares
 an expected digest during authorization. An Observability promotion is therefore
 HANDED an authorization; it cannot independently confirm one.
+
+
+## Amendment 2026-09-02: the facility exists, and the contract it exposed two holes in
+
+Michael ruled on four open questions. Recorded here because three of them are
+statements about THIS repository's boundaries and the fourth is what makes the
+first three testable.
+
+1. `dotmac_observability` owns the monitoring bundle, the promotion workflow
+   and **monitoring-specific verification**.
+2. The Foundation owns generic execution, rollback and target read-back.
+   **This repository must not create a second executor.**
+3. **Deployment Control is the only authority for approved-plan standing and
+   `authorized_images`.** A workflow input cannot substitute for
+   `ApprovedPlanLookup`.
+4. A real protected GitHub production environment with a named required
+   reviewer; narrowly scoped OpenBao identities; `OBSERVABILITY_HOST_BINDING`.
+
+### The approval gate is no longer a comment
+
+Both environments now exist and were read back from the GitHub API rather than
+asserted: `private-inventory` and `observability-promotion`, each with
+`michaelayoade` as a required reviewer and a custom deployment-branch policy
+naming exactly `main`. `promote.yml`'s pre-dispatch refusals were NOT relaxed
+to achieve this — they stop firing because the gate became real, which is the
+only acceptable way for a refusal to stop firing.
+
+`observability-promotion` **is** the production environment decision 4 asks
+for; `promote.yml` promotes to the named production host and gates on that
+environment. A third environment was deliberately not invented.
+
+`prevent_self_review` is `false` and stays there while there is one reviewer:
+with a single reviewer who is also the dispatcher, `true` makes every promotion
+un-approvable. The gate is a genuine blocking pause; it is not an independent
+second party, and only a second reviewer would make it one. That limitation is
+recorded rather than papered over.
+
+### Binding to the facility, and why nothing imports it yet
+
+`dotmac_deployment_foundation.observability_promotion` exists and is merged
+(Starter `a203b6e6`, declaring `0.3.0a4`). It supplies immutable staging, the
+previous-pointer read and its preservation, exact-byte transport, atomic
+activation, both reloads, the complete read-back, exact rollback, and the
+restored read-back after it — the nine things this ADR said were absent.
+
+`promote.PromotionFacility` stays a Protocol this repository declares and does
+not implement, and the binding will be an adapter over that Protocol. There is
+no second executor and there will not be one.
+
+**It is not imported yet, and that is rule 26 rather than reluctance.**
+`0.3.0a4` is recorded in Starter's own publication baseline as *"DECLARED,
+NEVER BUILT"*, and the newest published tag is
+`dotmac-deployment-foundation-v0.2.0a2`. A version present in a `pyproject.toml`
+or on `main` is not evidence it is published or pinnable, and this repository
+does not get to be the exception. The same holds for decision 3: Control's
+`find_approved_plan(db, *, plan_digest, expected_execution_plan_digest=None)
+-> ApprovedPlanLookup` is merged at `4e3cbd78` and unreleased, newest tag
+`dotmac-deployment-control-v0.1.0a2`. Both are designed against and pinned when
+a tag exists.
+
+### The two findings the facility's author left here
+
+Both are defects in the contract THIS repository owns, which is why the
+facility could not fix either one and correctly refused to try.
+
+**A read-back must carry every counter, not the first.**
+`live_verify.integrity_counters` derives its list from the gates' own integrity
+predicates, so a bundle whose gates watch several counters names several. The
+v1 `integrity` block held exactly one object. A facility handed several had two
+options and both were wrong: read `counters[0]` and file a document that reads
+as a COMPLETE read-back while the unread counters are precisely what the
+remaining alert gates assert about, or refuse the promotion outright. The
+subset is the worse failure because it is indistinguishable from a genuine full
+pass — so v1's shape forced a correct facility to refuse.
+
+`integrity` is now an array with one reading per declared counter, and the
+verifier compares SETS: a declared counter with no reading is
+`INTEGRITY-COUNTER-UNREAD`, a reading no gate watches is
+`INTEGRITY-COUNTER-UNWATCHED`. Readings are paired by counter name before they
+are compared, which retires `INTEGRITY-COUNTER-MISMATCH` — that guard existed
+because v1 could compare two unrelated series, and the mismatch is now
+unrepresentable rather than merely detected.
+
+**A null digest must say which null it is.** A tree digest is order-dependent
+and a directory read-back has no inherent order, so the order comes from a
+`ReleaseTreeManifest.v1` held outside the release directory. That leaves two
+very different facts sharing one `restored_digest: null`: the manifest was lost
+(the bytes were read, the restore may have been exact, and it is merely
+UNPROVABLE) or the pointer came back empty (there was no tree, and the host is
+running the wrong release). The verifier read both as condition 6 unproven,
+which is safe and stays safe — but it sent an operator hunting for a lost file
+when the host was on the wrong release, and the reverse.
+
+`rollback.digest_absence` now carries `ordering_manifest_absent` or
+`nothing_restored`, is required, and is null exactly when a digest is present.
+The verifier emits `ROLLBACK-ORDER-UNKNOWN` and `ROLLBACK-RESTORED-NOTHING`
+respectively. Neither passes; the point is that they are told apart, and a test
+asserts the two produce DIFFERENT findings rather than only that each fails.
+
+### Consequences of the amendment
+
+The contract is `observability-live-observation.v2`. Nothing published consumes
+v1 — this repository is `Private :: Do Not Upload` and the only producer is a
+Foundation version that was never built — so the version moves without a
+compatibility window. The Foundation must emit v2, and until it does a
+multi-counter bundle refuses loudly. That refusal is correct: it is the shape
+that was making a correct facility choose between refusing and lying.
 
 ## Alternatives considered
 

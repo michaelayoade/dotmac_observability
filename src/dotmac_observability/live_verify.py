@@ -11,7 +11,7 @@ stopped it.
 ## Why this module performs no I/O
 
 It takes a :class:`LiveState` — a parsed
-``observability-live-observation.v1`` document — and compares it with the
+``observability-live-observation.v2`` document — and compares it with the
 desired state, the rendered tree and a recorded baseline. Reaching the host is
 the promotion facility's job (see :mod:`dotmac_observability.promote`); the
 comparison is this module's, and separating them is what lets every one of the
@@ -220,6 +220,12 @@ class LiveRollback:
     exercised: bool
     restored_release: str | None
     restored_digest: str | None
+    #: Why :attr:`restored_digest` is absent — ``"ordering_manifest_absent"``
+    #: (the bytes were read, the order was not, so the restore is unprovable)
+    #: or ``"nothing_restored"`` (the pointer came back empty, so the restore
+    #: failed). ``None`` exactly when a digest was computed. Both absences
+    #: leave condition 6 unproven; they send an operator to different places.
+    digest_absence: str | None
     succeeded: bool
 
 
@@ -241,7 +247,7 @@ class LiveState:
     targets: tuple[LiveTarget, ...]
     rules: tuple[LiveRule, ...]
     routes: tuple[LiveRoute, ...]
-    integrity: IntegrityReading
+    integrity: tuple[IntegrityReading, ...]
     canary: LiveCanary
     probes: tuple[LiveProbe, ...]
     rollback: LiveRollback | None
@@ -277,7 +283,6 @@ def load_live_observation(path: Path, *, contracts: Path) -> LiveState:
 def live_state(document: Mapping[str, object]) -> LiveState:
     """Type a document already known to satisfy the contract."""
     release = _mapping(document["release"])
-    integrity = _mapping(document["integrity"])
     canary = _mapping(document["canary"])
     rollback_raw = document.get("rollback")
     rollback = None
@@ -285,10 +290,12 @@ def live_state(document: Mapping[str, object]) -> LiveState:
         row = _mapping(rollback_raw)
         restored_release = row["restored_release"]
         restored_digest = row["restored_digest"]
+        absence = row["digest_absence"]
         rollback = LiveRollback(
             exercised=bool(row["exercised"]),
             restored_release=None if restored_release is None else str(restored_release),
             restored_digest=None if restored_digest is None else str(restored_digest),
+            digest_absence=None if absence is None else str(absence),
             succeeded=bool(row["succeeded"]),
         )
     previous = release["previous"]
@@ -317,10 +324,13 @@ def live_state(document: Mapping[str, object]) -> LiveState:
             LiveRoute(identifier=str(row["id"]), receiver=str(row["receiver"]))
             for row in _rows(document["routes"])
         ),
-        integrity=IntegrityReading(
-            counter=str(integrity["counter"]),
-            value=int(str(integrity["value"])),
-            process_start_time=float(str(integrity["process_start_time"])),
+        integrity=tuple(
+            IntegrityReading(
+                counter=str(row["counter"]),
+                value=int(str(row["value"])),
+                process_start_time=float(str(row["process_start_time"])),
+            )
+            for row in _rows(document["integrity"])
         ),
         canary=LiveCanary(
             fired=bool(canary["fired"]),
@@ -633,20 +643,68 @@ def _integrity_findings(
         )
         return findings
 
-    before = baseline.integrity
-    after = live.integrity
-    if before.counter != after.counter:
+    declared = set(integrity_counters(state))
+    read = {reading.counter: reading for reading in live.integrity}
+    based = {reading.counter: reading for reading in baseline.integrity}
+
+    # The set comparison IS the check. v1 carried one reading, so a facility
+    # handed several counters either read the first — filing a document that
+    # reads as a complete read-back while the unread counters are exactly what
+    # the remaining gates assert about — or refused the promotion. Comparing
+    # sets makes the subset a named finding instead of an invisible pass.
+    for missing in sorted(declared - set(read)):
         findings.append(
             Finding(
-                "INTEGRITY-COUNTER-MISMATCH",
-                after.counter,
-                f"the baseline read {before.counter!r}; two different counters cannot be "
-                "compared, and a comparison that ignored the name would silently report a "
-                "delta of zero between unrelated series",
+                "INTEGRITY-COUNTER-UNREAD",
+                missing,
+                "a declared gate asserts about this counter and the read-back carries no "
+                "reading for it. The remaining readings do not stand in for it: a document "
+                "that verified a subset while reporting a complete pass is the failure this "
+                "comparison exists to make impossible.",
             )
         )
-        return findings
+    for extra in sorted(set(read) - declared):
+        findings.append(
+            Finding(
+                "INTEGRITY-COUNTER-UNWATCHED",
+                extra,
+                "the read-back carries this counter and no declared gate asserts about it, "
+                "so a delta proved here is evidence for a question nobody asked. Counters "
+                "are derived from the gates' own predicates precisely so the two lists "
+                "cannot drift apart.",
+            )
+        )
 
+    for counter in sorted(declared & set(read)):
+        after = read[counter]
+        before = based.get(counter)
+        if before is None:
+            findings.append(
+                Finding(
+                    "INTEGRITY-BASELINE-COUNTER-ABSENT",
+                    counter,
+                    "the baseline carries no reading for this counter, so there is nothing "
+                    "to compute a delta against. An absent baseline reading is not a "
+                    "baseline of zero.",
+                )
+            )
+            continue
+        findings.extend(_counter_findings(before, after))
+
+    findings.extend(_window_findings(state, live, baseline))
+    return findings
+
+
+def _counter_findings(before: IntegrityReading, after: IntegrityReading) -> list[Finding]:
+    """The three ways one counter's pair of readings fails, compared by NAME.
+
+    ``INTEGRITY-COUNTER-MISMATCH`` is gone and its absence is the point: v1
+    compared whichever single reading each document happened to hold, so
+    comparing two different series was reachable and needed a guard. Readings
+    are now matched by counter name before they are compared, which makes the
+    mismatch unrepresentable rather than merely detected.
+    """
+    findings: list[Finding] = []
     if before.value == 0:
         findings.append(
             Finding(
@@ -657,7 +715,6 @@ def _integrity_findings(
                 "before the baseline. The historical rejections must stay visible.",
             )
         )
-
     if after.process_start_time != before.process_start_time:
         findings.append(
             Finding(
@@ -669,7 +726,6 @@ def _integrity_findings(
                 "reports a healthy delta over the period every sample was dropped.",
             )
         )
-
     if after.value < before.value:
         findings.append(
             Finding(
@@ -690,8 +746,6 @@ def _integrity_findings(
                 "check reports as green.",
             )
         )
-
-    findings.extend(_window_findings(state, live, baseline))
     return findings
 
 
@@ -1007,12 +1061,39 @@ def _rollback_findings(
                 "digest' has nothing to compare against",
             )
         )
+    elif rollback.restored_digest is None:
+        # One null, two facts, and an operator sent to the wrong place by the
+        # wrong one. A tree digest is order-dependent and a directory
+        # read-back has no order, so the order comes from a manifest stored
+        # outside the release directory. Losing that manifest and losing the
+        # release are both "no digest" and are not the same emergency.
+        if rollback.digest_absence == "nothing_restored":
+            findings.append(
+                Finding(
+                    "ROLLBACK-RESTORED-NOTHING",
+                    live.release.current,
+                    "the rollback read its pointer back empty, so there were no bytes to "
+                    "digest and the host is NOT running the release it was returned to. "
+                    "This is a failed restore, not a missing measurement.",
+                )
+            )
+        else:
+            findings.append(
+                Finding(
+                    "ROLLBACK-ORDER-UNKNOWN",
+                    live.release.current,
+                    "the restored bytes were read but the ordering manifest did not "
+                    "survive, so no order-dependent digest could be computed. The restore "
+                    "may have been exact and is UNPROVABLE either way; condition 6 stays "
+                    "unproven and the repair is the manifest, not the release.",
+                )
+            )
     elif rollback.restored_digest != previous_digest:
         findings.append(
             Finding(
                 "ROLLBACK-DIGEST-MISMATCH",
                 live.release.current,
-                f"restored {(rollback.restored_digest or 'nothing')[:12]}, the previous "
+                f"restored {rollback.restored_digest[:12]}, the previous "
                 f"release was accepted at {previous_digest[:12]}. A pointer restored without "
                 "the bytes is the failure this comparison exists to catch.",
             )
@@ -1143,7 +1224,7 @@ def observation_document(live: LiveState) -> Mapping[str, object]:
     kind of defect one file makes visible and two files hide.
     """
     document: dict[str, object] = {
-        "schema_version": "observability-live-observation.v1",
+        "schema_version": "observability-live-observation.v2",
         "observed_at": live.observed_at,
         "environment": live.environment,
         "host_target_id": live.host_target_id,
@@ -1154,11 +1235,14 @@ def observation_document(live: LiveState) -> Mapping[str, object]:
             {"group": rule.group, "name": rule.name, "health": rule.health} for rule in live.rules
         ],
         "routes": [{"id": route.identifier, "receiver": route.receiver} for route in live.routes],
-        "integrity": {
-            "counter": live.integrity.counter,
-            "value": live.integrity.value,
-            "process_start_time": live.integrity.process_start_time,
-        },
+        "integrity": [
+            {
+                "counter": reading.counter,
+                "value": reading.value,
+                "process_start_time": reading.process_start_time,
+            }
+            for reading in live.integrity
+        ],
         "canary": _canary_document(live.canary),
         "probes": [_probe_document(probe) for probe in live.probes],
     }
@@ -1167,6 +1251,7 @@ def observation_document(live: LiveState) -> Mapping[str, object]:
             "exercised": live.rollback.exercised,
             "restored_release": live.rollback.restored_release,
             "restored_digest": live.rollback.restored_digest,
+            "digest_absence": live.rollback.digest_absence,
             "succeeded": live.rollback.succeeded,
         }
     return document

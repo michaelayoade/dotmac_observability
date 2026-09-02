@@ -299,7 +299,7 @@ jobs:
             echo "repository's to write. dotmac-deployment-foundation must provide"
             echo "release-directory staging, a previous-pointer reader, a remote"
             echo "transport, an evaluator reload, and a read-back producing an"
-            echo "observability-live-observation.v1 document - with rollback"
+            echo "observability-live-observation.v2 document - with rollback"
             echo "returning that document rather than None."
             echo
             echo "The contract is docs/adr/0010-the-promotion-executor-and-the-facility-contract.md"
