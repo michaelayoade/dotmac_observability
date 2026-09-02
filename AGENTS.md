@@ -92,7 +92,9 @@ review discipline, not a guard, and it is a defect to describe it as enforced.
     — `src/dotmac_observability/live_verify.py` counts rules that EXIST and
       evaluate cleanly and reports a declared rule the evaluator did not load;
       an observation carrying no rules at all is refused rather than read as
-      quiet. `tests/unit/test_live_verify.py`
+      quiet. `tests/unit/test_live_verify.py`, and the sensitivity proof at
+      `tests/mutations/test_live_verify_bites.py`, which shows the obvious
+      version of each check reporting the same broken state as healthy.
 
 11. **Promotion failure restores the exact preceding release.** The previous
     release pointer is preserved before activation and restored on any failure

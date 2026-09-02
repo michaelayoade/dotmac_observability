@@ -437,22 +437,7 @@ def promote(
             receipt_inputs=inputs(),
         )
     reached.append("ACCEPTED")
-    document = build_receipt(
-        outcome=OUTCOME_ACCEPTED,
-        state=state,
-        control_plane_revision=revision.revision,
-        authorization=authorization,
-        inventory=inventory,
-        tree=tree,
-        images=authorized_images,
-        bundles=[_bundle_record(bundle) for bundle in bundles],
-        live=live,
-        verification=verification,
-        validation=validation,
-        runs=runs,
-        started_at=started_at,
-        finished_at=finished_at,
-    )
+    document = inputs().receipt(outcome=OUTCOME_ACCEPTED, live=live, verification=verification)
     return PromotionOutcome(
         outcome=OUTCOME_ACCEPTED,
         states=tuple(reached),
@@ -493,6 +478,42 @@ class _ReceiptInputs:
     runs: Runs
     started_at: str
     finished_at: str
+
+    def receipt(
+        self,
+        *,
+        outcome: str,
+        live: LiveState | None,
+        verification: Verification | None,
+    ) -> dict[str, object]:
+        """The ONE place this module assembles a receipt.
+
+        Both the accepted path and every stop path go through here, which is
+        the whole reason this record exists: the failure path is the one a
+        reader skims, and a second spelled-out call there is how a field ends
+        up missing from exactly the receipt that mattered.
+
+        ``live`` is passed rather than read from ``self.live`` because a
+        rolled-back promotion files the read-back of the RESTORED host, which
+        is what the host is actually running when the receipt is written.
+        """
+        plan = self.authorization  # the approved plan this promotion executed
+        return build_receipt(
+            outcome=outcome,
+            state=self.state,
+            control_plane_revision=self.revision.revision,
+            authorization=plan,
+            inventory=self.inventory,
+            tree=self.tree,
+            images=self.images,
+            bundles=[_bundle_record(bundle) for bundle in self.bundles],
+            live=live,
+            verification=verification if verification is not None else _empty_verification(),
+            validation=self.validation,
+            runs=self.runs,
+            started_at=self.started_at,
+            finished_at=self.finished_at,
+        )
 
 
 def _stop(
@@ -564,22 +585,7 @@ def _stop(
                     outcome = OUTCOME_ROLLED_BACK
                     observed = restored
 
-    document = build_receipt(
-        outcome=outcome,
-        state=receipt_inputs.state,
-        control_plane_revision=receipt_inputs.revision.revision,
-        authorization=receipt_inputs.authorization,
-        inventory=receipt_inputs.inventory,
-        tree=receipt_inputs.tree,
-        images=receipt_inputs.images,
-        bundles=[_bundle_record(bundle) for bundle in receipt_inputs.bundles],
-        live=observed,
-        verification=verification if verification is not None else _empty_verification(),
-        validation=receipt_inputs.validation,
-        runs=receipt_inputs.runs,
-        started_at=receipt_inputs.started_at,
-        finished_at=receipt_inputs.finished_at,
-    )
+    document = receipt_inputs.receipt(outcome=outcome, live=observed, verification=verification)
     return PromotionOutcome(
         outcome=outcome,
         states=states,

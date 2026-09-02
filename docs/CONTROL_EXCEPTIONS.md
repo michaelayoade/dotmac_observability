@@ -91,7 +91,7 @@ tell at a glance which half of AGENTS.md currently bites.
 | 30 | `GATE-INTEGRITY-NOT-DELTA` in `validate._bundle_findings`, `tests/unit/test_bundle.py` |
 | 31 | `tests/architecture/test_supersession_workflow_cannot_leak.py` |
 | 32 | `tests/architecture/test_ci_matches_the_makefile.py`, `tests/architecture/test_supersession_workflow_cannot_leak.py` |
-| 10 | `src/dotmac_observability/live_verify.py`, `tests/unit/test_live_verify.py` |
+| 10 | `src/dotmac_observability/live_verify.py`, `tests/unit/test_live_verify.py`, `tests/mutations/test_live_verify_bites.py` |
 | 11 | `src/dotmac_observability/promote.py`, `tests/unit/test_promotion_executor.py` |
 | 12 | `src/dotmac_observability/drift.py`, `contracts/live-observation.schema.json`, `tests/unit/test_drift.py` |
 
