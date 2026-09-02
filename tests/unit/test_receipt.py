@@ -29,6 +29,7 @@ from tests.conftest import CONTRACTS
 from tests.unit.observations import (
     AUTHORIZATION,
     BUNDLES,
+    EXECUTION_PLAN_DIGEST,
     IMAGES,
     INVENTORY,
     PASSED,
@@ -83,6 +84,7 @@ def check(
         verification=verification() if held is None else held,
         authorized_images=IMAGES if authorized_images is None else authorized_images,
         authorized_plan_digest=PLAN_DIGEST,
+        authorized_execution_plan_digest=EXECUTION_PLAN_DIGEST,
         tree=TREE,
     )
 
@@ -218,8 +220,40 @@ def test_an_image_set_that_differs_from_the_approved_plan_is_the_finding():
 
 
 def test_a_receipt_naming_a_different_plan_from_the_authorized_one_is_refused():
-    other = Authorization(plan_digest="sha256:" + "8" * 64, approval_decision_ref="decision/1")
+    other = Authorization(
+        plan_digest="sha256:" + "8" * 64,
+        approval_decision_ref="decision/1",
+        execution_plan_digest=EXECUTION_PLAN_DIGEST,
+    )
     assert "RECEIPT-PLAN-DIGEST" in codes(check(build(authorization=other)))
+
+
+def test_the_two_digests_are_different_values_and_both_are_recorded():
+    """`plan_digest` says WHICH plan; `ExecutionPlanDigestV1` says what ran.
+
+    They were conflated once on this fleet, in a binding that could not be
+    equal for any input and read as correct on both sides. A fixture reusing
+    one for both would exercise the conflation rather than the distinction.
+    """
+    assert PLAN_DIGEST != EXECUTION_PLAN_DIGEST
+    authorization = table(build(), "authorization")
+    assert authorization["plan_digest"] == PLAN_DIGEST
+    assert authorization["execution_plan_digest"] == EXECUTION_PLAN_DIGEST
+
+
+def test_a_foundation_that_executed_a_different_plan_is_refused():
+    other = Authorization(
+        plan_digest=PLAN_DIGEST,
+        approval_decision_ref="decision/1",
+        execution_plan_digest="sha256:" + "6" * 64,
+    )
+    assert "RECEIPT-EXECUTION-PLAN-DIGEST" in codes(check(build(authorization=other)))
+
+
+def test_an_authorized_execution_plan_the_receipt_does_not_record_is_refused():
+    """Absence binds nothing, and is reported rather than read as agreement."""
+    without = Authorization(plan_digest=PLAN_DIGEST, approval_decision_ref="decision/1")
+    assert "RECEIPT-EXECUTION-PLAN-ABSENT" in codes(check(build(authorization=without)))
 
 
 def test_a_rendered_digest_that_is_not_the_promoted_trees_is_refused():

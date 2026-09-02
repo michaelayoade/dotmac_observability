@@ -233,7 +233,12 @@
           "minLength": 1,
           "description": "Which approval policy the decision was taken under. Optional here because whether a plan requires approval at all is the control plane's per-plan declaration, never this repository's inference."
         },
-        "approval_policy_version": { "type": "integer", "minimum": 1 }
+        "approval_policy_version": { "type": "integer", "minimum": 1 },
+        "execution_plan_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "`ExecutionPlanDigestV1` \u2014 the digest of the canonical `FoundationExecutionPlanV1` document, which `dotmac-deployment-foundation` OWNS, renders and recomputes immediately before execution. It is deliberately NOT `plan_digest`: that is the deployment control plane's internal snapshot digest, and it is also not the descriptor digest or the authorization-envelope digest. Reaching for one of those near-misses is exactly how a Control/Foundation binding that could never be equal for any input shipped reading as correct.  Optional here because Control's `execution_plan_digest` field and the Foundation version that renders the document are not published yet. When both are, this becomes the term that binds what was authorized to what ran, and `plan_digest` stays as the answer to WHICH approved plan record was executed."
+        }
       },
       "description": "A reference into `dotmac-deployment-control`'s approved-plan record. The field names mirror that owner's deliberately; if the two ever disagree, the owner is right and this is the defect."
     },

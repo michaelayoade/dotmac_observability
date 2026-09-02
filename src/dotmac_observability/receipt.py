@@ -99,6 +99,19 @@ class Authorization:
     approval_decision_ref: str
     approval_policy_code: str | None = None
     approval_policy_version: int | None = None
+    execution_plan_digest: str | None = None
+    """`ExecutionPlanDigestV1`, owned and recomputed by the Foundation.
+
+    A different value from ``plan_digest`` on purpose. ``plan_digest`` says
+    WHICH approved plan record was executed; this says what the Foundation
+    actually rendered and re-derived immediately before executing it. The two
+    were conflated once across this fleet, in a binding that could not be equal
+    for any input and read as correct on both sides.
+
+    Optional until Control's field and the Foundation version that renders the
+    document are published. Held as an opaque string, like every other
+    cross-boundary digest here.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,6 +264,8 @@ def _authorization_document(authorization: Authorization) -> dict[str, object]:
         document["approval_policy_code"] = authorization.approval_policy_code
     if authorization.approval_policy_version is not None:
         document["approval_policy_version"] = authorization.approval_policy_version
+    if authorization.execution_plan_digest is not None:
+        document["execution_plan_digest"] = authorization.execution_plan_digest
     return document
 
 
@@ -303,6 +318,7 @@ def receipt_findings(
     verification: Verification | None = None,
     authorized_images: Sequence[ImageRecord] | None = None,
     authorized_plan_digest: str | None = None,
+    authorized_execution_plan_digest: str | None = None,
     tree: RenderedTree | None = None,
 ) -> tuple[Finding, ...]:
     """Every reason this receipt should not be believed.
@@ -322,7 +338,11 @@ def receipt_findings(
     findings.extend(private_material_findings(json.dumps(document, indent=2), location=location))
     findings.extend(_release_findings(document, first_promotion=first_promotion))
     findings.extend(
-        _authorization_findings(document, authorized_plan_digest=authorized_plan_digest)
+        _authorization_findings(
+            document,
+            authorized_plan_digest=authorized_plan_digest,
+            authorized_execution_plan_digest=authorized_execution_plan_digest,
+        )
     )
     findings.extend(_image_findings(document, authorized_images=authorized_images))
     findings.extend(_digest_findings(document, tree=tree))
@@ -351,22 +371,54 @@ def _release_findings(document: Mapping[str, object], *, first_promotion: bool) 
 
 
 def _authorization_findings(
-    document: Mapping[str, object], *, authorized_plan_digest: str | None
+    document: Mapping[str, object],
+    *,
+    authorized_plan_digest: str | None,
+    authorized_execution_plan_digest: str | None,
 ) -> list[Finding]:
-    if authorized_plan_digest is None:
-        return []
-    recorded = str(_table(document, "authorization").get("plan_digest"))
-    if recorded == authorized_plan_digest:
-        return []
-    return [
-        Finding(
-            "RECEIPT-PLAN-DIGEST",
-            "authorization.plan_digest",
-            "the receipt records a different plan from the one the promotion was authorized "
-            "to execute. Compared as an opaque string: the digest's canonical form belongs "
-            "to the deployment control plane and is never re-derived here.",
+    """Both digests, compared as opaque strings against what was authorized.
+
+    Neither is re-derived. Each has one owning side — the control plane owns
+    `plan_digest`, the Foundation owns `ExecutionPlanDigestV1` — and a consumer
+    that normalized either would be a second canonicalizer, which is how a
+    binding that could never be equal for any input came to read as correct.
+    """
+    findings: list[Finding] = []
+    recorded = _table(document, "authorization")
+    if (
+        authorized_plan_digest is not None
+        and str(recorded.get("plan_digest")) != authorized_plan_digest
+    ):
+        findings.append(
+            Finding(
+                "RECEIPT-PLAN-DIGEST",
+                "authorization.plan_digest",
+                "the receipt records a different approved plan from the one this promotion "
+                "was authorized to execute",
+            )
         )
-    ]
+    if authorized_execution_plan_digest is not None:
+        if recorded.get("execution_plan_digest") is None:
+            findings.append(
+                Finding(
+                    "RECEIPT-EXECUTION-PLAN-ABSENT",
+                    "authorization.execution_plan_digest",
+                    "an execution plan digest was authorized and the receipt records none, so "
+                    "nothing binds what was authorized to what actually ran",
+                )
+            )
+        elif str(recorded["execution_plan_digest"]) != authorized_execution_plan_digest:
+            findings.append(
+                Finding(
+                    "RECEIPT-EXECUTION-PLAN-DIGEST",
+                    "authorization.execution_plan_digest",
+                    "the Foundation executed a different plan from the one that was frozen. "
+                    "This means the PLAN CHANGED — never that two canonicalizers disagreed, "
+                    "because there is only one, and reading it the other way is how a "
+                    "normalizer gets added and the divergence becomes permanent.",
+                )
+            )
+    return findings
 
 
 def _image_findings(

@@ -43,6 +43,7 @@ from tests.unit.observations import (
     AUTHORIZATION,
     BUNDLES,
     CURRENT_RELEASE,
+    EXECUTION_PLAN_DIGEST,
     IMAGES,
     INVENTORY,
     PASSED,
@@ -211,6 +212,7 @@ def test_a_clean_promotion_writes_a_receipt_that_passes_its_own_validator():
         verification=outcome.verification,
         authorized_images=IMAGES,
         authorized_plan_digest=PLAN_DIGEST,
+        authorized_execution_plan_digest=EXECUTION_PLAN_DIGEST,
     )
     assert findings == (), [finding.render() for finding in findings]
 

@@ -186,7 +186,19 @@ installable version).
    document. The rehearsal-receipt and host-lease records already exist and
    should carry it.
 
-8. **An installable `IngressPolicy.v1`.** `0.3.0a1` is declared-unpublished and
+8. **`ExecutionPlanDigestV1`, recomputed before execution.** The fleet ruling
+   of 2026-09-01 (Starter `AGENTS.md` rule 49) makes
+   `ExecutionPlanDigestV1 = sha256(canonical FoundationExecutionPlanV1 bytes)`
+   the middle term of the receipt binding, owned by the Foundation and merely
+   frozen by Control. The facility renders that document, computes the digest,
+   and **recomputes it immediately before executing**. A mismatch means the
+   PLAN CHANGED, and the refusal must say so: if a mismatch could also mean
+   "two canonicalizers disagreed", the fix a reader reaches for is a
+   normalizer, which is how the original Control/Foundation divergence became
+   permanent. Nothing here re-derives it — this repository records it and
+   compares it as an opaque string (`RECEIPT-EXECUTION-PLAN-DIGEST`).
+
+9. **An installable `IngressPolicy.v1`.** `0.3.0a1` is declared-unpublished and
    held; `0.2.0a2` does not carry the contract. This repository's rule 19 stays
    unmonitored until a version carrying it is publishable and pinnable.
 
@@ -231,6 +243,17 @@ absent check now means "did not run", exactly as a null `run_ref` already did.
 An `accepted` receipt still requires the release, the live block, the canary
 and all six checks; a `rolled-back` one still requires the release and the
 rollback record. Nothing an outcome actually asserts became optional.
+
+`authorization.execution_plan_digest` is added to the receipt as an OPTIONAL
+field, and it is deliberately a different value from `plan_digest`.
+`plan_digest` answers which approved plan record was executed;
+`ExecutionPlanDigestV1` answers what the Foundation actually rendered and
+re-derived before executing it. Conflating the two is not hypothetical — it
+shipped across this fleet as a binding that could not be equal for any input
+while reading as correct on both sides. Optional rather than required because
+Control's `execution_plan_digest` column and the Foundation version that
+renders the document are both unpublished; a required field would bind this
+contract to something nothing can yet produce.
 
 Two things this repository cannot check are recorded here rather than left
 implicit. The receipt requires `images` to equal the approved plan's image set,

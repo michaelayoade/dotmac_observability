@@ -158,6 +158,11 @@ REVISION = "1" * 40
 # The owner's canonical form, prefix included. A test that stripped it would
 # stop exercising the field the contract actually declares.
 PLAN_DIGEST = "sha256:" + "9" * 64
+# A DIFFERENT value from PLAN_DIGEST, deliberately. The two were conflated
+# once across this fleet in a binding that could not be equal for any input;
+# a fixture reusing one for both would exercise the conflation rather than
+# the distinction.
+EXECUTION_PLAN_DIGEST = "sha256:" + "7" * 64
 
 IMAGES: tuple[ImageRecord, ...] = (
     ImageRecord(
@@ -195,7 +200,11 @@ PASSED: dict[str, CheckResult] = {
 
 RUNS = Runs(ci="ci/1", rehearsal="rehearsal/1", promotion="promotion/1")
 
-AUTHORIZATION = Authorization(plan_digest=PLAN_DIGEST, approval_decision_ref="decision/1")
+AUTHORIZATION = Authorization(
+    plan_digest=PLAN_DIGEST,
+    approval_decision_ref="decision/1",
+    execution_plan_digest=EXECUTION_PLAN_DIGEST,
+)
 
 
 def verification() -> Verification:

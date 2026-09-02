@@ -61,6 +61,16 @@ on:
           deployment control plane. Not a person's name.
         required: true
         type: string
+      execution_plan_digest:
+        description: >-
+          `ExecutionPlanDigestV1` as `dotmac-deployment-foundation` rendered it
+          for this target and operation. NOT the same value as `plan_digest`:
+          that one names the approved plan record, this one is what the
+          Foundation recomputes immediately before executing. Leave blank until
+          a Foundation version that renders the document is published.
+        required: false
+        default: ""
+        type: string
       first_promotion:
         description: >-
           Only for a host that has never held a release. It permits a null
@@ -173,6 +183,7 @@ jobs:
         env:
           PLAN_DIGEST: ${{ inputs.plan_digest }}
           DECISION_REF: ${{ inputs.approval_decision_ref }}
+          EXECUTION_PLAN_DIGEST: ${{ inputs.execution_plan_digest }}
         run: |
           set -euo pipefail
           # Shape only. Whether the plan is APPROVED is the deployment control
@@ -185,6 +196,20 @@ jobs:
                exit 1 ;;
           esac
           test -n "${DECISION_REF}" || { echo "REFUSED: no approval decision reference"; exit 1; }
+          # Same rule, same reason. A stripped prefix on either digest reads
+          # later as a plan that changed.
+          if [ -n "${EXECUTION_PLAN_DIGEST}" ]; then
+            case "${EXECUTION_PLAN_DIGEST}" in
+              sha256:*) ;;
+              *) echo "REFUSED: execution_plan_digest must carry its canonical sha256: prefix"
+                 exit 1 ;;
+            esac
+            if [ "${EXECUTION_PLAN_DIGEST}" = "${PLAN_DIGEST}" ]; then
+              echo "REFUSED: execution_plan_digest equals plan_digest. They are different"
+              echo "terms with different owners; equal values mean one was pasted twice."
+              exit 1
+            fi
+          fi
 
       - name: Refuse a target the inventory does not declare
         env:
