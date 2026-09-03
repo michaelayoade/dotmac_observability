@@ -76,6 +76,28 @@
         "tests/architecture/test_public_inventory_carries_no_private_material.py",
         "tests/mutations/test_private_material_detector_bites.py"
       ]
+    },
+    {
+      "authority_id": "telemetry-ingestion-admission",
+      "subject": "Whether one telemetry record is accepted at the ingestion boundary, and WHICH declared rule refused it (ADR-0011). One owner, because a second classifier is a second answer to what this control plane accepts \u2014 and the two would agree on every clean record and differ only on the ones that matter.",
+      "protected_resources": [
+        "telemetry-ingestion-admission-decision"
+      ],
+      "owner_component": "ingestion-classifier",
+      "owner_implementation": "src/dotmac_observability/ingestion.py",
+      "decision_interface": "dotmac_observability.ingestion.classify",
+      "canonical_writer_paths": [
+        "src/dotmac_observability/ingestion.py"
+      ],
+      "adapter_paths": [
+        "src/dotmac_observability/validate.py",
+        "src/dotmac_observability/render.py"
+      ],
+      "drift_test_paths": [
+        "tests/unit/test_ingestion.py",
+        "tests/mutations/test_ingestion_gates_bite.py",
+        "tests/architecture/test_ingestion_procedures.py"
+      ]
     }
   ],
   "typed_contract_surfaces": [

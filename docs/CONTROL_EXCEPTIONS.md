@@ -24,7 +24,7 @@ enforced, and when the count below disagrees with the table. The downward
 direction is the one that matters: a ledger that only ever grows is a backlog,
 while one that must shrink deliberately is a plan.
 
-declared-unmonitored: 7
+declared-unmonitored: 8
 
 > **Down three, on evidence.** Rules 10, 11 and 12 left this table with the
 > promotion executor: `live_verify.py` counts rules that exist and evaluate
@@ -60,7 +60,27 @@ declared-unmonitored: 7
 | 5 | Product rules stay product-owned | Enforcing this means byte-comparing a fetched bundle against its recorded digest. Same missing input as rule 4. | PR 3C |
 | 6 | No duplicate alert or recording rule names, no incompatible label vocabularies | The check operates over the union of loaded bundles. No bundle is loaded yet. | PR 3C |
 | 8 | Every rule carries owner, severity, summary, runbook and producer proof | Producer proof compares an alert expression against the product's metrics manifest. Neither the manifest fetch nor the expression parser exists yet. | PR 3C |
+| 33 | Rejection is applied at the ingestion boundary | The policy is complete, gated, and proved against planted material the loader runs the classifier over — but nothing applies it to BYTES ON THE WIRE. No ingestion-edge stage is deployed, so a sender shipping an Authorization header today reaches the store; what fails is the build, if the rule stops refusing the planted probe. The two halves are worth keeping apart: the decision is owned and checked, the enforcement point is not built. | ingestion-edge lane |
 | 19 | Declared exposure and address family on every published surface | The guard belongs to the reusable contract, which `dotmac-deployment-foundation` owns and has not released yet. Writing a local detector would fork the rule from its owner and produce two answers to the same question. | Foundation adoption |
+
+## Gaps in the ESTATE, not in enforcement
+
+A different register, deliberately kept apart from the table above. Those rows
+are hard rules with no detector. These are things this control plane does not
+currently observe, each with a reason and an owner — and each is a place where
+somebody could reasonably assume coverage that does not exist. They are not
+counted by `declared-unmonitored`, which counts rules.
+
+The first column is a subject rather than a rule number, which is also what
+keeps the two-directional ratchet from reading these as rule rows.
+
+| gap | measured | why it is not closed here | owner |
+| --- | --- | --- | --- |
+| Log ingestion LAG is not measured | 2026-09-03 | Loki publishes no ingestion-lag gauge. The truthful measurement is a delivery canary stamped at send and compared at read, which needs something able to inject into the fleet and read back — the promotion facility (ADR-0010). `inventory/ingestion.toml` declares `lag_unmeasured` rather than naming a plausible metric, because an expression over a series nothing emits renders a rule that can never fire. | delivery-canary lane |
+| No watcher outside this host | 2026-09-03 | Neither deadman can detect the evaluator being DEAD, because the evaluator is what evaluates them. The alternative — an always-firing heartbeat routed to a dead-man's-switch service — was refused: `routing/` declares no such receiver, so the rule would page continuously and be silenced inside a week, which is worse than the gap. | fleet lane |
+| No trace store | 2026-09-03 | `fleet/alloy/config.alloy` exports traces to an OTLP endpoint and `inventory/bundle.toml` rosters no Tempo. The ingestion contract therefore declares no `traces` stream and no span attributes: declaring either would produce alerts over a store that does not exist. Whether traces should be received at all is a decision, not an omission to be tidied. | Michael |
+| Grafana and promtail are rostered and unscraped | 2026-09-03 | Alertmanager was in the same state and is scraped by this change, because the notification-path deadman reads its series. These two are left because nothing reads theirs, and adding a job whose series nothing consumes is the other half of the same mistake — the shape `RESOLUTION-UNUSED` already refuses in the other direction. | this repository, when a reader exists |
+| The audit projection does not exist | 2026-09-03 | `projection.status = "planned"`, so no lag alert is rendered. Its retention bound, its non-authority notice and its `UNMEASURED` rebuild verdict are declared and gated anyway, because those are the decisions that get argued about rather than declared once a thing is running and somebody depends on it. | product/kernel lanes, then this one |
 
 ## Rules that ARE enforced today
 
@@ -94,6 +114,17 @@ tell at a glance which half of AGENTS.md currently bites.
 | 10 | `src/dotmac_observability/live_verify.py`, `tests/unit/test_live_verify.py`, `tests/mutations/test_live_verify_bites.py` |
 | 11 | `src/dotmac_observability/promote.py`, `tests/unit/test_promotion_executor.py` |
 | 12 | `src/dotmac_observability/drift.py`, `contracts/live-observation.schema.json`, `tests/unit/test_drift.py` |
+| 34 | `ingestion.integrity_state`, `render._ingestion_rules`, `tests/unit/test_ingestion.py`, `tests/mutations/test_ingestion_gates_bite.py` |
+| 35 | `validate._ingestion_findings` (`DEADMAN-UNPROVED-COUNT`, `DEADMAN-NOT-META`), `tests/architecture/test_ingestion_procedures.py`, `tests/mutations/test_ingestion_gates_bite.py` |
+| 36 | `contracts/telemetry-ingestion.schema.json` (`authoritative` is a `const false`), `ingestion.compare_rebuild`, `validate._ingestion_findings`, `tests/mutations/test_ingestion_gates_bite.py` |
+
+> **Up one, on evidence.** ADR-0011 added four rules and closed three of them
+> outright; rule 33's second half is the one that could not be closed. Its
+> policy, its planted proofs and its positive controls all bite in `make check`,
+> and the runtime stage that would apply the policy to bytes on the wire does
+> not exist. Recording the enforced half as enforced and the unbuilt half as
+> unmonitored is the whole discipline: a rule counted as closed because most of
+> it works is a rule nobody looks at again.
 
 > **Rule 29 is the one entry above that is NOT a detector**, and saying so is
 > the point of this file. No test can decide whether a summary sentence

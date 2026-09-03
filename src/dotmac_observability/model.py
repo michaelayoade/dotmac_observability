@@ -45,8 +45,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 __all__ = [
+    "AcceptedAttribute",
+    "AttributeValidation",
+    "Attribution",
     "Bundle",
+    "ControlAttribute",
     "ControlPlane",
+    "ControlRecord",
+    "Deadman",
+    "DeadmanSignal",
     "DesiredState",
     "DirectoryContract",
     "Evaluator",
@@ -59,19 +66,29 @@ __all__ = [
     "GrafanaDatasource",
     "Host",
     "HostBinding",
+    "Identifier",
+    "Ingestion",
     "Inhibition",
     "Integration",
     "Label",
+    "LabelBudget",
+    "LagUnmeasured",
     "Loki",
+    "PlantedProbe",
     "PrivateInventory",
+    "Projection",
     "Promtail",
     "PromtailJob",
     "Publication",
+    "Rebuild",
     "Receiver",
     "ReceiverBinding",
+    "RejectionRule",
     "Resolution",
     "ResolvedEndpoint",
     "ResolvedReceiver",
+    "ResourceField",
+    "RetentionClass",
     "RetiredProduct",
     "RosterEntry",
     "Rotation",
@@ -80,9 +97,11 @@ __all__ = [
     "Runtime",
     "ScrapeJob",
     "SecretFile",
+    "Sensitivity",
     "Smtp",
     "SourceSet",
     "SourceSetBinding",
+    "Stream",
     "Surface",
     "Syslog",
     "SyslogFile",
@@ -396,6 +415,15 @@ class DesiredState:
     rotation contract and the exposure policy is a promotion that can leave the
     host in a combination nobody described. One value, one digest, one
     activation.
+    """
+    ingestion: Ingestion
+    """What the fleet shipper may put into this control plane, and what it may not.
+
+    Part of the same desired state for the same reason the bundle is. The log
+    store's label limit, the alerts that notice a stopped shipper and the
+    retention every stream ages out under are all rendered from this document,
+    so a promotion able to activate the evaluators without it would be a
+    promotion that accepts an unspecified wire.
     """
     targets: tuple[TargetSet, ...]
     federations: tuple[Federation, ...]
@@ -765,6 +793,274 @@ class Bundle:
     retired: tuple[RetiredProduct, ...]
     exposure: Exposure
     gates: tuple[VerificationGate, ...]
+
+
+# ── The ingestion boundary (ADR-0011) ───────────────────────────────────────
+#
+# What arrives, from the one fleet shipper. The types are here rather than in
+# `ingestion.py` for the same reason every other record is: `model` is the
+# typed contract surface named by `.dotmac/standards-profile.json`, and a
+# decision module that also defined its own inputs would be two authorities.
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceField:
+    """One piece of resource identity every accepted record carries.
+
+    ``cardinality`` is not decoration. It decides whether the field may become
+    a stream label, and the decision has to be made where the field is
+    declared: an unbounded field promoted to a label is a store that stops
+    answering queries, and by the time it does the labels are already written.
+    """
+
+    field: str
+    required: bool
+    cardinality: str
+    rationale: str
+
+
+@dataclass(frozen=True, slots=True)
+class Identifier:
+    """One of the identifiers that must not collapse into another.
+
+    ``means`` is an enum rather than prose because the property being defended
+    is that no two of them mean the same thing, and free text cannot be
+    compared. A request, a business flow, a trace, a span and a durable audit
+    event are five different questions; a deployment that spells them all
+    ``request_id`` can ask one.
+    """
+
+    name: str
+    means: str
+    transport: str
+    signals: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class Attribution:
+    """How a record reports where it believes its client address came from.
+
+    ``unresolved`` is a constant in the contract rather than a gate here, so
+    the shape cannot express the mistake: a resolver reporting ``direct`` when
+    it could not establish the peer has manufactured an attribution, and every
+    later reader treats a manufactured one exactly like an observed one.
+    """
+
+    values: tuple[str, ...]
+    unresolved: str
+    rationale: str
+
+
+@dataclass(frozen=True, slots=True)
+class LabelBudget:
+    max_stream_labels: int
+    rationale: str
+
+
+@dataclass(frozen=True, slots=True)
+class AttributeValidation:
+    """What an accepted attribute's value is checked against.
+
+    ``opaque`` is the only kind that accepts a value without looking at it, and
+    it carries a rationale for exactly that reason. A field accepted and never
+    validated is a field this control plane has taken responsibility for and
+    does not look at.
+    """
+
+    kind: str
+    values: tuple[str, ...]
+    shape: str | None
+    rationale: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptedAttribute:
+    name: str
+    signals: tuple[str, ...]
+    disposition: str
+    cardinality: str
+    validation: AttributeValidation
+    rationale: str
+
+
+@dataclass(frozen=True, slots=True)
+class PlantedProbe:
+    """Synthetic material one rejection rule must refuse.
+
+    The value is named rather than written: ``value_shape`` indexes a table in
+    :mod:`~dotmac_observability.ingestion` that assembles the string at check
+    time. A repository that had to commit realistic credential-shaped strings
+    in order to prove it refuses them would be defeating its own scanner to do
+    it.
+    """
+
+    attribute: str
+    value_shape: str
+
+
+@dataclass(frozen=True, slots=True)
+class RejectionRule:
+    name: str
+    kind: str
+    match: str
+    rationale: str
+    planted: tuple[PlantedProbe, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ControlAttribute:
+    name: str
+    value_shape: str
+
+
+@dataclass(frozen=True, slots=True)
+class ControlRecord:
+    """A record that must be ACCEPTED, checked in the same pass as the rejections.
+
+    The positive control for a negative suite. A classifier that refuses every
+    record satisfies every rejection probe ever written, and nothing about the
+    refusals distinguishes it from a correct one.
+    """
+
+    name: str
+    signal: str
+    attributes: tuple[ControlAttribute, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class LagUnmeasured:
+    """Why a stream's lag is not measured, and what will measure it.
+
+    The alternative was naming a metric nothing emits. That renders an alert
+    that can never fire, which is indistinguishable on every dashboard from one
+    that is quietly passing — the defect AGENTS.md rule 8 names. A declared
+    unmeasured region with an owner is worse news and better evidence.
+    """
+
+    rationale: str
+    monitored_by: str
+
+
+@dataclass(frozen=True, slots=True)
+class Stream:
+    """One signal's ingestion health, as three facts one counter cannot separate.
+
+    ``arrival_counter`` and ``integrity_counter`` are deliberately different
+    series. A drop counter that is not moving describes a healthy pipeline and
+    a stopped one identically, so silence is detected on arrivals and only on
+    arrivals — by ABSENCE, because a rate over a series that has ceased to
+    exist is not zero, it is nothing, and matches no rows to alert on.
+    """
+
+    signal: str
+    arrival_counter: str
+    integrity_counter: str
+    integrity_window: str
+    lag_expr: str | None
+    lag_budget: str | None
+    lag_unmeasured: LagUnmeasured | None
+    silence_budget: str
+    retention_class: str
+    rationale: str
+
+
+@dataclass(frozen=True, slots=True)
+class Sensitivity:
+    """The planted condition that makes a deadman fire, and when it last did.
+
+    ``last_proved`` is nullable and null is the honest value. A deadman that
+    has never fired is not known to work: it is indistinguishable from one
+    whose expression matches no series at all, which is the most common way an
+    alert is silently wrong. The null is counted by a ratchet and stamped into
+    the rendered alert's own annotations, so an operator reading it in an
+    incident learns that nobody has watched it work.
+    """
+
+    planted_condition: str
+    procedure_ref: str
+    last_proved: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class DeadmanSignal:
+    name: str
+    expr: str
+    hold: str
+    summary: str
+    sensitivity: Sensitivity
+
+
+@dataclass(frozen=True, slots=True)
+class Deadman:
+    unproved_declared: int
+    signals: tuple[DeadmanSignal, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class Rebuild:
+    procedure_ref: str
+    compare: str
+    last_rebuilt: str | None
+    verdict: str
+
+
+@dataclass(frozen=True, slots=True)
+class Projection:
+    """The central audit projection, and why it is never the evidence.
+
+    Audit is durable evidence owned by each application's own database, written
+    in the same transaction as the decision it records. This is a searchable
+    copy with a lag. ``authoritative`` is a constant in the contract so no
+    document can express the other value — a projection that CAN be declared
+    authoritative eventually is, usually in the hour when the application
+    database is the thing that is down.
+    """
+
+    name: str
+    status: str
+    authoritative: bool
+    derived_from: str
+    lag_expr: str
+    lag_budget: str
+    source_retention: str
+    retention_class: str
+    non_authority_notice: str
+    rebuild: Rebuild
+
+
+@dataclass(frozen=True, slots=True)
+class RetentionClass:
+    """One retention and access decision, with the question it answers.
+
+    ``kind`` separates two constraints that point in opposite directions.
+    Telemetry is kept while it is operationally useful and may be shortened
+    freely. An audit projection's retention is bounded from ABOVE by its
+    source's, because a projection retained longer than the rows it derives
+    from becomes, on the day the source ages one out, the last copy of it — and
+    a last copy is authoritative whatever any document says.
+    """
+
+    name: str
+    kind: str
+    duration: str
+    access: tuple[str, ...]
+    last_copy: bool
+    rationale: str
+
+
+@dataclass(frozen=True, slots=True)
+class Ingestion:
+    resource: tuple[ResourceField, ...]
+    identifiers: tuple[Identifier, ...]
+    attribution: Attribution
+    labels: LabelBudget
+    attributes: tuple[AcceptedAttribute, ...]
+    rejected: tuple[RejectionRule, ...]
+    accepted_control: tuple[ControlRecord, ...]
+    streams: tuple[Stream, ...]
+    deadman: Deadman
+    projection: Projection
+    retention: tuple[RetentionClass, ...]
 
 
 @dataclass(frozen=True, slots=True)

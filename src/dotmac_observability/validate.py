@@ -44,9 +44,24 @@ from typing import TypeAlias, cast
 
 import jsonschema
 
+from .ingestion import (
+    ACCEPTED,
+    PLANTED_SHAPES,
+    REJECTED,
+    VALUE_SHAPE_NAMES,
+    classify,
+    duration_seconds,
+)
 from .model import (
+    AcceptedAttribute,
+    AttributeValidation,
+    Attribution,
     Bundle,
+    ControlAttribute,
     ControlPlane,
+    ControlRecord,
+    Deadman,
+    DeadmanSignal,
     DesiredState,
     DirectoryContract,
     Evaluator,
@@ -59,19 +74,29 @@ from .model import (
     GrafanaDatasource,
     Host,
     HostBinding,
+    Identifier,
+    Ingestion,
     Inhibition,
     Integration,
     Label,
+    LabelBudget,
+    LagUnmeasured,
     Loki,
+    PlantedProbe,
     PrivateInventory,
+    Projection,
     Promtail,
     PromtailJob,
     Publication,
+    Rebuild,
     Receiver,
     ReceiverBinding,
+    RejectionRule,
     Resolution,
     ResolvedEndpoint,
     ResolvedReceiver,
+    ResourceField,
+    RetentionClass,
     RetiredProduct,
     RosterEntry,
     Rotation,
@@ -80,9 +105,11 @@ from .model import (
     Runtime,
     ScrapeJob,
     SecretFile,
+    Sensitivity,
     Smtp,
     SourceSet,
     SourceSetBinding,
+    Stream,
     Surface,
     Syslog,
     SyslogFile,
@@ -592,9 +619,231 @@ def _bundle(document: Document) -> Bundle:
     )
 
 
+# ── The ingestion boundary (ADR-0011) ───────────────────────────────────────
+
+# The identity every accepted record must carry, in stable OpenTelemetry
+# spelling. A closed set here rather than a free choice in the document,
+# because every downstream question is asked BY these fields: silence is
+# detected per service, retention is applied per environment, and a record that
+# cannot say which service it came from is a record no deadman can miss.
+_REQUIRED_RESOURCE_FIELDS = frozenset({"service.name", "deployment.environment.name"})
+
+# The five meanings that must not collapse into one another. Enumerated as
+# MEANINGS rather than as names, because renaming `correlation_id` to
+# `flow_id` is a spelling change and dropping the concept is a capability loss,
+# and a gate over names cannot tell those apart.
+_REQUIRED_IDENTIFIER_MEANS = frozenset(
+    {
+        "one_request",
+        "one_business_flow",
+        "one_telemetry_trace",
+        "one_telemetry_span",
+        "one_durable_audit_event",
+    }
+)
+
+_ATTRIBUTION_VALUES = frozenset({"direct", "trusted_forwarded", "unknown"})
+
+# Series prefixes a control-plane meta alert may be written over. AGENTS.md
+# rule 5 keeps a PRODUCT's alert expression in the product; a deadman is
+# legitimate here precisely because it is about the observability plane's own
+# liveness, and this is what holds the distinction to something checkable
+# rather than to the author's intent.
+_META_SERIES_PREFIXES = (
+    "scrape_",
+    "prometheus_",
+    "alertmanager_",
+    "loki_",
+    "alloy_",
+    "otelcol_",
+)
+
+# `up` is matched as a WORD and the others as substrings, which is not a
+# stylistic difference. Every other entry is a metric-family prefix that cannot
+# occur by accident; `up` is two letters that appear inside `group`, `backup`
+# and `duplicate`, and a substring test would have quietly accepted a product
+# expression containing any of them.
+_UP_SERIES = re.compile(r"\bup\b")
+
+
+def _validation(raw: Mapping[str, object]) -> AttributeValidation:
+    return AttributeValidation(
+        kind=str(raw["kind"]),
+        values=_strings(raw["values"]) if "values" in raw else (),
+        shape=str(raw["shape"]) if "shape" in raw else None,
+        rationale=str(raw["rationale"]) if "rationale" in raw else None,
+    )
+
+
+def _ingestion(document: Document) -> Ingestion:
+    attribution = _mapping(document["attribution"])
+    labels = _mapping(document["labels"])
+    deadman = _mapping(document["deadman"])
+    projection = _mapping(document["projection"])
+    rebuild = _mapping(projection["rebuild"])
+    return Ingestion(
+        resource=tuple(
+            ResourceField(
+                field=str(row["field"]),
+                required=bool(row["required"]),
+                cardinality=str(row["cardinality"]),
+                rationale=str(row["rationale"]),
+            )
+            for row in _rows(document["resource"])
+        ),
+        identifiers=tuple(
+            Identifier(
+                name=str(row["name"]),
+                means=str(row["means"]),
+                transport=str(row["transport"]),
+                signals=_strings(row["signals"]),
+            )
+            for row in _rows(document["identifiers"])
+        ),
+        attribution=Attribution(
+            values=_strings(attribution["values"]),
+            unresolved=str(attribution["unresolved"]),
+            rationale=str(attribution["rationale"]),
+        ),
+        labels=LabelBudget(
+            max_stream_labels=int(cast(int, labels["max_stream_labels"])),
+            rationale=str(labels["rationale"]),
+        ),
+        attributes=tuple(
+            AcceptedAttribute(
+                name=str(row["name"]),
+                signals=_strings(row["signals"]),
+                disposition=str(row["disposition"]),
+                cardinality=str(row["cardinality"]),
+                validation=_validation(_mapping(row["validation"])),
+                rationale=str(row["rationale"]),
+            )
+            for row in _rows(document["attributes"])
+        ),
+        rejected=tuple(
+            RejectionRule(
+                name=str(row["name"]),
+                kind=str(row["kind"]),
+                match=str(row["match"]),
+                rationale=str(row["rationale"]),
+                planted=tuple(
+                    PlantedProbe(
+                        attribute=str(probe["attribute"]),
+                        value_shape=str(probe["value_shape"]),
+                    )
+                    for probe in _rows(row["planted"])
+                ),
+            )
+            for row in _rows(document["rejected"])
+        ),
+        accepted_control=tuple(
+            ControlRecord(
+                name=str(row["name"]),
+                signal=str(row["signal"]),
+                attributes=tuple(
+                    ControlAttribute(
+                        name=str(entry["name"]),
+                        value_shape=str(entry["value_shape"]),
+                    )
+                    for entry in _rows(row["attributes"])
+                ),
+            )
+            for row in _rows(document["accepted_control"])
+        ),
+        streams=tuple(
+            Stream(
+                signal=str(row["signal"]),
+                arrival_counter=str(row["arrival_counter"]),
+                integrity_counter=str(row["integrity_counter"]),
+                integrity_window=str(row["integrity_window"]),
+                lag_expr=str(row["lag_expr"]) if "lag_expr" in row else None,
+                lag_budget=str(row["lag_budget"]) if "lag_budget" in row else None,
+                lag_unmeasured=_lag_unmeasured(row),
+                silence_budget=str(row["silence_budget"]),
+                retention_class=str(row["retention_class"]),
+                rationale=str(row["rationale"]),
+            )
+            for row in _rows(document["streams"])
+        ),
+        deadman=Deadman(
+            unproved_declared=int(cast(int, deadman["unproved_declared"])),
+            signals=tuple(
+                DeadmanSignal(
+                    name=str(row["name"]),
+                    expr=str(row["expr"]),
+                    hold=str(row["for"]),
+                    summary=str(row["summary"]),
+                    sensitivity=_sensitivity(_mapping(row["sensitivity"])),
+                )
+                for row in _rows(deadman["signals"])
+            ),
+        ),
+        projection=Projection(
+            name=str(projection["name"]),
+            status=str(projection["status"]),
+            authoritative=bool(projection["authoritative"]),
+            derived_from=str(projection["derived_from"]),
+            lag_expr=str(projection["lag_expr"]),
+            lag_budget=str(projection["lag_budget"]),
+            source_retention=str(projection["source_retention"]),
+            retention_class=str(projection["retention_class"]),
+            non_authority_notice=str(projection["non_authority_notice"]),
+            rebuild=Rebuild(
+                procedure_ref=str(rebuild["procedure_ref"]),
+                compare=str(rebuild["compare"]),
+                last_rebuilt=_dated(rebuild["last_rebuilt"]),
+                verdict=str(rebuild["verdict"]),
+            ),
+        ),
+        retention=tuple(
+            RetentionClass(
+                name=str(row["name"]),
+                kind=str(row["kind"]),
+                duration=str(row["duration"]),
+                access=_strings(row["access"]),
+                last_copy=bool(row["last_copy"]),
+                rationale=str(row["rationale"]),
+            )
+            for row in _rows(document["retention"])
+        ),
+    )
+
+
+def _dated(value: object) -> str | None:
+    """A date, or ``None`` for the document's ``never`` sentinel.
+
+    The document spells "never" out because TOML has no null and an omitted key
+    would mean both "never proved" and "somebody forgot the field". The model
+    carries ``None``, so every reader downstream asks one question — is there a
+    date — rather than comparing against a magic string it might spell
+    differently.
+    """
+    text = str(value)
+    return None if text == "never" else text
+
+
+def _lag_unmeasured(row: Mapping[str, object]) -> LagUnmeasured | None:
+    raw = row.get("lag_unmeasured")
+    if raw is None:
+        return None
+    entry = _mapping(raw)
+    return LagUnmeasured(
+        rationale=str(entry["rationale"]),
+        monitored_by=str(entry["monitored_by"]),
+    )
+
+
+def _sensitivity(raw: Mapping[str, object]) -> Sensitivity:
+    return Sensitivity(
+        planted_condition=str(raw["planted_condition"]),
+        procedure_ref=str(raw["procedure_ref"]),
+        last_proved=_dated(raw["last_proved"]),
+    )
+
+
 def _inventory_files(
     root: Path,
-) -> tuple[Path, Path, Path, tuple[Path, ...], tuple[Path, ...]]:
+) -> tuple[Path, Path, Path, Path, tuple[Path, ...], tuple[Path, ...]]:
     """Locate every input, in a fixed order.
 
     ``sorted`` on the directory listings is what makes rendering reproducible
@@ -604,6 +853,7 @@ def _inventory_files(
     return (
         root / "inventory" / "control-plane.toml",
         root / "inventory" / "bundle.toml",
+        root / "inventory" / "ingestion.toml",
         root / "routing",
         tuple(sorted((root / "inventory" / "targets").glob("*.toml"))),
         tuple(sorted((root / "inventory" / "federations").glob("*.toml"))),
@@ -622,14 +872,20 @@ def load(root: Path, *, contracts: Path | None = None) -> DesiredState:
     missing or malformed.
     """
     schema_root = contracts if contracts is not None else root / "contracts"
-    control_plane_path, bundle_path, routing_dir, target_paths, federation_paths = _inventory_files(
-        root
-    )
+    (
+        control_plane_path,
+        bundle_path,
+        ingestion_path,
+        routing_dir,
+        target_paths,
+        federation_paths,
+    ) = _inventory_files(root)
     findings: list[Finding] = []
 
     required = {
         "control-plane": control_plane_path,
         "bundle": bundle_path,
+        "ingestion": ingestion_path,
         "receivers": routing_dir / "receivers.toml",
         "policies": routing_dir / "policies.toml",
         "inhibition": routing_dir / "inhibition.toml",
@@ -651,6 +907,11 @@ def load(root: Path, *, contracts: Path | None = None) -> DesiredState:
 
     bundle_doc = _read_toml(bundle_path)
     findings += _validate_document(schema_root, "bundle", bundle_doc, "inventory/bundle.toml")
+
+    ingestion_doc = _read_toml(ingestion_path)
+    findings += _validate_document(
+        schema_root, "telemetry-ingestion", ingestion_doc, "inventory/ingestion.toml"
+    )
 
     target_docs: list[tuple[str, Document]] = []
     for path in target_paths:
@@ -699,6 +960,7 @@ def load(root: Path, *, contracts: Path | None = None) -> DesiredState:
     return DesiredState(
         control_plane=_control_plane(control_plane_doc),
         bundle=_bundle(bundle_doc),
+        ingestion=_ingestion(ingestion_doc),
         targets=tuple(_target_set(document) for _, document in target_docs),
         federations=tuple(_federation(document) for _, document in federation_docs),
         receivers=_receivers(routing_docs["receivers"]),
@@ -1164,6 +1426,451 @@ def _bundle_findings(state: DesiredState) -> list[Finding]:
     return findings
 
 
+def _ingestion_findings(state: DesiredState) -> list[Finding]:
+    """The gates over what this control plane accepts from the fleet shipper.
+
+    Two of them are unusual and are the reason this function exists rather than
+    a schema alone. ``REJECTION-UNPROVEN`` RUNS the classifier over each
+    rejection rule's planted material, so a rule that has stopped biting fails
+    ``make check`` in the run that broke it. ``CONTROL-REFUSED`` runs the same
+    classifier over material that must be ACCEPTED, because a classifier that
+    refuses everything satisfies every rejection probe ever written and nothing
+    about its refusals says so.
+    """
+    findings: list[Finding] = []
+    policy = state.ingestion
+    where = "inventory/ingestion.toml"
+
+    # ── resource identity ───────────────────────────────────────────────────
+    required_fields = {field.field for field in policy.resource if field.required}
+    for name in sorted(_REQUIRED_RESOURCE_FIELDS - required_fields):
+        findings.append(
+            Finding(
+                "RESOURCE-IDENTITY-INCOMPLETE",
+                f"{where}#resource",
+                f"{name!r} is not declared and required; every question asked downstream is "
+                "asked BY this field — silence is detected per service, retention applies per "
+                "environment — so a record that cannot say where it came from is a record no "
+                "deadman can miss",
+            )
+        )
+
+    # ── the five identifiers, and what they mean ────────────────────────────
+    by_means: dict[str, list[str]] = {}
+    for identifier in policy.identifiers:
+        by_means.setdefault(identifier.means, []).append(identifier.name)
+    for means in sorted(_REQUIRED_IDENTIFIER_MEANS - set(by_means)):
+        findings.append(
+            Finding(
+                "IDENTIFIER-MISSING",
+                f"{where}#identifiers",
+                f"nothing declares {means!r}; the five identifiers answer five different "
+                "questions, and a deployment that carries four of them can ask four",
+            )
+        )
+    for means, names in sorted(by_means.items()):
+        if len(names) > 1:
+            findings.append(
+                Finding(
+                    "IDENTIFIER-COLLAPSED",
+                    f"{where}#identifiers/{means}",
+                    f"{', '.join(sorted(names))} all mean {means!r}; two identifiers meaning "
+                    "the same thing is one identifier with two spellings, and the two drift "
+                    "the first time a retry rewrites one of them",
+                )
+            )
+    for identifier in policy.identifiers:
+        telemetry = identifier.means in {"one_telemetry_trace", "one_telemetry_span"}
+        if telemetry and "logs" in identifier.signals and identifier.transport != "native":
+            findings.append(
+                Finding(
+                    "IDENTIFIER-NOT-NATIVE",
+                    f"{where}#identifiers/{identifier.name}",
+                    "a log record carries its trace and span ids as fields of the record; "
+                    "copying them into an attribute alongside creates a second spelling, and "
+                    "a sampler or a processor that rewrites one and not the other makes the "
+                    "two disagree with nothing reporting it",
+                )
+            )
+
+    # ── attribution never manufactures what it did not observe ──────────────
+    # Belt to the contract's brace, and unreachable through a schema-validated
+    # document today: `values` is a three-member enum with `minItems: 3` and
+    # `uniqueItems`, so the only set that validates is the complete one, and
+    # `unresolved` is a `const`. Kept because the refusal it names is the point
+    # of the whole block — if the schema is ever widened, the property must not
+    # be widened with it — and recorded as belt rather than left looking like a
+    # gate somebody could exercise. `tests/unit/test_ingestion.py` asserts the
+    # structural refusal instead.
+    declared_attribution = set(policy.attribution.values)
+    for value in sorted(_ATTRIBUTION_VALUES - declared_attribution):
+        findings.append(
+            Finding(
+                "ATTRIBUTION-INCOMPLETE",
+                f"{where}#attribution",
+                f"{value!r} is not among the accepted attribution values; `unknown` in "
+                "particular is a first-class verdict, and a vocabulary without it forces a "
+                "resolver that could not establish the peer to report one it did not observe",
+            )
+        )
+
+    # ── the label budget, and what may become a label ───────────────────────
+    for attribute in policy.attributes:
+        location = f"{where}#attributes/{attribute.name}"
+        if attribute.disposition == "label" and attribute.cardinality == "unbounded":
+            findings.append(
+                Finding(
+                    "ATTRIBUTE-UNBOUNDED-LABEL",
+                    location,
+                    "an unbounded attribute promoted to a stream label is an index dimension "
+                    "with no ceiling; the store stops answering queries and then stops "
+                    "accepting writes, and by then the labels are already written",
+                )
+            )
+        validation = attribute.validation
+        if validation.kind == "enum" and not validation.values:
+            findings.append(
+                Finding(
+                    "VALIDATION-ENUM-EMPTY",
+                    location,
+                    "an enum validation with no values accepts nothing and is indistinguishable "
+                    "from one that accepts everything, depending on which way the reader "
+                    "assumes it fails",
+                )
+            )
+        if validation.kind == "shape" and validation.shape is None:
+            findings.append(
+                Finding(
+                    "VALIDATION-SHAPE-UNNAMED",
+                    location,
+                    "a shape validation that names no shape checks nothing",
+                )
+            )
+        if validation.kind == "opaque" and not validation.rationale:
+            findings.append(
+                Finding(
+                    "VALIDATION-OPAQUE-UNEXPLAINED",
+                    location,
+                    "`opaque` is the one kind that accepts a value without looking at it; a "
+                    "field accepted and never validated is a field this control plane has "
+                    "taken responsibility for and does not look at, so it states why",
+                )
+            )
+    label_count = len(required_fields) + sum(
+        1 for attribute in policy.attributes if attribute.disposition == "label"
+    )
+    if label_count > policy.labels.max_stream_labels:
+        findings.append(
+            Finding(
+                "LABEL-BUDGET-EXCEEDED",
+                f"{where}#labels",
+                f"{label_count} labels are declared against a budget of "
+                f"{policy.labels.max_stream_labels}; the budget is rendered into the store's "
+                "own limit, so exceeding it here produces a configuration that refuses the "
+                "streams this document describes",
+            )
+        )
+
+    # ── rejection: every rule is watched to bite, by NAME ───────────────────
+    for rule in policy.rejected:
+        location = f"{where}#rejected/{rule.name}"
+        if rule.kind == "value_shape" and rule.match not in VALUE_SHAPE_NAMES:
+            findings.append(
+                Finding(
+                    "REJECTION-UNKNOWN-SHAPE",
+                    location,
+                    f"{rule.match!r} is not a shape the classifier implements, so this rule "
+                    "matches nothing; an inert rule and a rule with nothing to catch produce "
+                    f"identical evidence. Known shapes: {', '.join(sorted(VALUE_SHAPE_NAMES))}",
+                )
+            )
+            continue
+        for probe in rule.planted:
+            if probe.value_shape not in PLANTED_SHAPES:
+                findings.append(
+                    Finding(
+                        "REJECTION-UNKNOWN-PROBE",
+                        location,
+                        f"planted probe names shape {probe.value_shape!r}, which the "
+                        "classifier cannot materialise; the probe would be run against nothing "
+                        "and would prove nothing",
+                    )
+                )
+                continue
+            verdict = classify(
+                policy,
+                "logs",
+                ((probe.attribute, PLANTED_SHAPES[probe.value_shape]),),
+            )
+            if verdict.outcome != REJECTED or verdict.rule != rule.name:
+                findings.append(
+                    Finding(
+                        "REJECTION-UNPROVEN",
+                        location,
+                        f"planted {probe.value_shape!r} on {probe.attribute!r} was "
+                        f"{verdict.outcome} by {verdict.rule!r}, not rejected by this rule. "
+                        "The rule NAME is compared rather than the outcome: a probe refused by "
+                        "the vocabulary check instead would leave this rule inert while every "
+                        "assertion about it still passed",
+                    )
+                )
+
+    # ── the positive control for the negative suite ─────────────────────────
+    for control in policy.accepted_control:
+        attributes = tuple(
+            (entry.name, PLANTED_SHAPES.get(entry.value_shape, "")) for entry in control.attributes
+        )
+        unknown = [
+            entry.value_shape
+            for entry in control.attributes
+            if entry.value_shape not in PLANTED_SHAPES
+        ]
+        if unknown:
+            findings.append(
+                Finding(
+                    "CONTROL-UNKNOWN-SHAPE",
+                    f"{where}#accepted_control/{control.name}",
+                    f"shapes {', '.join(sorted(unknown))} cannot be materialised, so this "
+                    "control would be run against empty values and would pass without "
+                    "exercising anything",
+                )
+            )
+            continue
+        verdict = classify(policy, control.signal, attributes)
+        if verdict.outcome != ACCEPTED:
+            findings.append(
+                Finding(
+                    "CONTROL-REFUSED",
+                    f"{where}#accepted_control/{control.name}",
+                    f"a record that must be accepted was refused by {verdict.rule!r}: "
+                    f"{verdict.reason}. This is the positive control — a classifier that "
+                    "refuses everything satisfies every rejection probe ever written, and "
+                    "only this check can tell the two apart",
+                )
+            )
+
+    # ── streams: arrival, integrity and lag are three facts ─────────────────
+    classes = {entry.name: entry for entry in policy.retention}
+    used_classes: set[str] = set()
+    seen_signals: set[str] = set()
+    for stream in policy.streams:
+        location = f"{where}#streams/{stream.signal}"
+        if stream.signal in seen_signals:
+            findings.append(
+                Finding(
+                    "STREAM-DUPLICATE",
+                    location,
+                    "two declarations for one signal; the renderer would emit two alerts with "
+                    "one name and Alertmanager would group them as one",
+                )
+            )
+        seen_signals.add(stream.signal)
+        if stream.arrival_counter == stream.integrity_counter:
+            findings.append(
+                Finding(
+                    "STREAM-COUNTERS-CONFLATED",
+                    location,
+                    "arrival and integrity are the same counter, so silence and cleanliness "
+                    "are the same reading. A drop counter that is not moving describes a "
+                    "healthy pipeline and a stopped one identically, and separating them is "
+                    "the entire reason there are two",
+                )
+            )
+        measured = stream.lag_expr is not None and stream.lag_budget is not None
+        if measured and stream.lag_unmeasured is not None:
+            findings.append(
+                Finding(
+                    "STREAM-LAG-DOUBLE-DECLARED",
+                    location,
+                    "the stream declares both a lag expression and a reason its lag is not "
+                    "measured; one of the two is stale, and a reader cannot tell which",
+                )
+            )
+        if not measured and stream.lag_unmeasured is None:
+            findings.append(
+                Finding(
+                    "STREAM-LAG-UNDECLARED",
+                    location,
+                    "the stream measures no lag and does not say why. Naming a metric nothing "
+                    "emits would have been the easy alternative, and it renders an alert that "
+                    "can never fire — indistinguishable on any dashboard from one quietly "
+                    "passing. An unmeasured region declared with an owner is the honest shape",
+                )
+            )
+        if stream.lag_expr is not None and stream.lag_budget is None:
+            findings.append(
+                Finding(
+                    "STREAM-LAG-UNBUDGETED",
+                    location,
+                    "a lag expression with no budget is a number nobody compares; the budget "
+                    "is both the alert threshold and its hold, rendered from one string",
+                )
+            )
+        if stream.retention_class not in classes:
+            findings.append(
+                Finding(
+                    "STREAM-RETENTION-UNDECLARED",
+                    location,
+                    f"names retention class {stream.retention_class!r}, which nothing declares",
+                )
+            )
+        else:
+            used_classes.add(stream.retention_class)
+
+    # ── deadman: an unproved signal is counted, never assumed ───────────────
+    metric_names = {stream.arrival_counter for stream in policy.streams}
+    metric_names |= {stream.integrity_counter for stream in policy.streams}
+    metric_names |= {stream.lag_expr for stream in policy.streams if stream.lag_expr}
+    metric_names.add(policy.projection.lag_expr)
+    seen_deadman: set[str] = set()
+    unproved = 0
+    for signal in policy.deadman.signals:
+        location = f"{where}#deadman/{signal.name}"
+        if signal.name in seen_deadman:
+            findings.append(
+                Finding("DEADMAN-DUPLICATE", location, "two deadman signals share one name")
+            )
+        seen_deadman.add(signal.name)
+        if signal.sensitivity.last_proved is None:
+            unproved += 1
+        mentions_own = any(name in signal.expr for name in metric_names)
+        mentions_meta = bool(_UP_SERIES.search(signal.expr)) or any(
+            prefix in signal.expr for prefix in _META_SERIES_PREFIXES
+        )
+        if not (mentions_own or mentions_meta):
+            findings.append(
+                Finding(
+                    "DEADMAN-NOT-META",
+                    location,
+                    "the expression names neither a series this document declares nor a "
+                    "control-plane series; assembly is not authorship (AGENTS.md rule 5), and "
+                    "a deadman is legitimate here only because it is about the observability "
+                    "plane's own liveness, which no product is in a position to observe",
+                )
+            )
+    if unproved != policy.deadman.unproved_declared:
+        findings.append(
+            Finding(
+                "DEADMAN-UNPROVED-COUNT",
+                f"{where}#deadman",
+                f"{unproved} signals carry no sensitivity proof and the document declares "
+                f"{policy.deadman.unproved_declared}. The count is a two-directional ratchet: "
+                "it fails when a new unproved deadman arrives uncounted, and when one is "
+                "proved without the number being lowered, so the number is always edited "
+                "deliberately",
+            )
+        )
+
+    # ── the projection is never the evidence ────────────────────────────────
+    projection = policy.projection
+    location = f"{where}#projection"
+    if projection.retention_class not in classes:
+        findings.append(
+            Finding(
+                "PROJECTION-RETENTION-UNDECLARED",
+                location,
+                f"names retention class {projection.retention_class!r}, which nothing declares",
+            )
+        )
+    else:
+        used_classes.add(projection.retention_class)
+        held = classes[projection.retention_class]
+        if duration_seconds(held.duration) > duration_seconds(projection.source_retention):
+            findings.append(
+                Finding(
+                    "PROJECTION-OUTLIVES-SOURCE",
+                    location,
+                    f"the projection is kept {held.duration} and the rows it derives from are "
+                    f"kept {projection.source_retention}. On the day the source ages a row out "
+                    "the projection is the last copy of it, and a last copy is authoritative "
+                    "whatever this document says",
+                )
+            )
+    rebuild = projection.rebuild
+    if rebuild.last_rebuilt is None and rebuild.verdict != "UNMEASURED":
+        findings.append(
+            Finding(
+                "REBUILD-OVERCLAIMED",
+                f"{location}/rebuild",
+                f"verdict {rebuild.verdict!r} with no recorded rebuild. A comparison that "
+                "never ran and a comparison that agreed are the same silence, and only one of "
+                "them is evidence — `rebuildable` is a property nobody has, not a property "
+                "everybody assumes",
+            )
+        )
+    if rebuild.last_rebuilt is not None and rebuild.verdict == "UNMEASURED":
+        findings.append(
+            Finding(
+                "REBUILD-UNDERCLAIMED",
+                f"{location}/rebuild",
+                f"a rebuild is recorded on {rebuild.last_rebuilt} and the verdict is still "
+                "UNMEASURED; the ratchet runs in both directions so a completed proof is "
+                "recorded rather than left looking like an outstanding one",
+            )
+        )
+    notice = projection.non_authority_notice.lower()
+    if "authoritative" not in notice or not ("not " in notice or "never " in notice):
+        findings.append(
+            Finding(
+                "PROJECTION-NOTICE-SILENT",
+                location,
+                "the notice carried in the lag alert does not say the projection is not "
+                "authoritative. The natural response to `projection is behind` is to trust the "
+                "projection less, and the correct response is that nothing about what is TRUE "
+                "has changed — only what fleet search can currently find",
+            )
+        )
+    if projection.derived_from not in projection.non_authority_notice:
+        findings.append(
+            Finding(
+                "PROJECTION-NOTICE-NO-SOURCE",
+                location,
+                f"the notice does not name {projection.derived_from!r}. An operator told that "
+                "a surface is not authoritative and not told what IS goes looking, and the "
+                "thing they find will be another projection",
+            )
+        )
+
+    # ── retention and access ────────────────────────────────────────────────
+    for entry in policy.retention:
+        if entry.kind == "audit_projection" and entry.last_copy:
+            findings.append(
+                Finding(
+                    "PROJECTION-DECLARED-LAST-COPY",
+                    f"{where}#retention/{entry.name}",
+                    "an audit projection that may be the last surviving copy of what it holds "
+                    "IS the record; calling it a projection does not change that. Checked over "
+                    "every declared class rather than only the one the projection currently "
+                    "names, because the class outlives the reference",
+                )
+            )
+    for name in sorted(set(classes) - used_classes):
+        findings.append(
+            Finding(
+                "RETENTION-CLASS-UNUSED",
+                f"{where}#retention/{name}",
+                "no stream and no projection is kept under this class; an unused retention "
+                "decision is one nobody will notice has drifted from the store that actually "
+                "applies it",
+            )
+        )
+    logs = next((stream for stream in policy.streams if stream.signal == "logs"), None)
+    if logs is not None and logs.retention_class in classes:
+        declared = classes[logs.retention_class].duration
+        if declared != state.bundle.loki.retention:
+            findings.append(
+                Finding(
+                    "RETENTION-DISAGREES-WITH-STORE",
+                    f"{where}#retention/{logs.retention_class}",
+                    f"log retention is declared {declared} here and "
+                    f"{state.bundle.loki.retention} in inventory/bundle.toml. Two documents "
+                    "describing one store's retention is one of them being wrong, and the "
+                    "store enforces whichever is rendered",
+                )
+            )
+    return findings
+
+
 def semantic_findings(state: DesiredState) -> tuple[Finding, ...]:
     """Every check that needs more than one PUBLIC document to answer.
 
@@ -1176,6 +1883,7 @@ def semantic_findings(state: DesiredState) -> tuple[Finding, ...]:
         + _routing_findings(state)
         + _target_findings(state)
         + _bundle_findings(state)
+        + _ingestion_findings(state)
     )
 
 

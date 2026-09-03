@@ -38,6 +38,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TypeAlias, cast
 
+from .ingestion import duration_seconds
 from .model import (
     DesiredState,
     Federation,
@@ -59,6 +60,7 @@ __all__ = [
     "EXPOSURE_IPV6",
     "GRAFANA_DASHBOARDS",
     "GRAFANA_DATASOURCES",
+    "INGESTION_RULES",
     "LOGROTATE_CONFIG",
     "LOKI_CONFIG",
     "META_RULES",
@@ -84,6 +86,13 @@ PROMETHEUS_CONFIG = "prometheus/prometheus.yml"
 # observe, and the ingestion gate is exactly one of those — a product cannot see
 # that the samples it emitted were refused at this evaluator's append path.
 META_RULES = "prometheus/rules/00-control-plane-meta.yml"
+# The ingestion boundary's own alerts (ADR-0011). A SECOND rules file rather
+# than more entries in the first, because the two answer different questions
+# and are read at different moments: `00-` is what a promotion is accepted
+# against, `01-` is what tells an operator months later that a shipper stopped.
+# They also fail differently — a gate that never fires means a promotion is
+# clean, and a deadman that never fires means nobody knows whether it works.
+INGESTION_RULES = "prometheus/rules/01-ingestion-meta.yml"
 ALERTMANAGER_CONFIG = "alertmanager/alertmanager.yml"
 LOKI_CONFIG = "loki/loki.yml"
 PROMTAIL_CONFIG = "promtail/promtail.yml"
@@ -553,6 +562,185 @@ def _gate_alert_name(name: str) -> str:
     return "".join(part.capitalize() for part in name.replace(".", "-").split("-"))
 
 
+def _ingestion_rules(state: DesiredState) -> str:
+    """The ingestion boundary's alerts: silence, drops, unmeasured, lag, deadman.
+
+    Four alerts per stream, and the reason there are four rather than one is
+    the defect this whole lane exists to repair: states that look alike.
+
+    ``ShipperSilent`` is written with ``absent_over_time`` and NOT with a rate
+    threshold. ``rate(arrivals[5m]) == 0`` looks like the same question and is
+    not: when a shipper stops, its series stops existing, and a comparison
+    against a series that does not exist matches no rows and produces no alert.
+    Absence is the one query shape that survives the thing it watches going
+    away.
+
+    ``IntegrityUnmeasured`` exists because a drop counter reading zero because
+    nothing was shipped and one reading zero because nothing was lost are the
+    same number and opposite news. Giving the first its own alert is the only
+    way an operator can tell them apart, and it is the same
+    :data:`~dotmac_observability.ingestion.UNMEASURED` distinction the read-back
+    and the health surface keep.
+
+    ``IngestionDropping`` is delta-shaped over the declared window (AGENTS.md
+    rule 30): a bare ``counter == 0`` is satisfiable by a reset, by a fresh
+    store or by a restart, and a predicate made true that way cannot be told
+    from one made true by a repair.
+
+    Every deadman carries its sensitivity in its own annotations, INCLUDING
+    when it has none. An operator reading an alert during an incident should
+    not have to go and find out whether anybody has ever watched it fire; a
+    deadman that has never fired is indistinguishable from one whose expression
+    matches no series at all, which is the commonest way an alert is silently
+    wrong.
+    """
+    policy = state.ingestion
+    rules: list[YamlValue] = []
+    for stream in policy.streams:
+        signal = stream.signal
+        rules.append(
+            {
+                "alert": _gate_alert_name(f"{signal}-shipper-silent"),
+                "expr": f"absent_over_time({stream.arrival_counter}[{stream.silence_budget}])",
+                "labels": {"severity": "critical", "owner": "observability-control-plane"},
+                "annotations": {
+                    "summary": (f"{signal}: nothing has arrived for {stream.silence_budget}"),
+                    "description": (
+                        "Written as an ABSENCE rather than a rate threshold. A stopped shipper "
+                        "takes its series with it, and a comparison against a series that no "
+                        "longer exists matches no rows and fires nothing — which is the "
+                        "failure mode a metrics pipeline is worst at noticing."
+                    ),
+                },
+            }
+        )
+        rules.append(
+            {
+                "alert": _gate_alert_name(f"{signal}-integrity-unmeasured"),
+                "expr": f"absent({stream.integrity_counter})",
+                "labels": {"severity": "warning", "owner": "observability-control-plane"},
+                "annotations": {
+                    "summary": (
+                        f"{signal}: {stream.integrity_counter} has never been observed, so "
+                        "nothing is known about whether records are being dropped"
+                    ),
+                    "description": (
+                        "UNMEASURED is not zero. A drop counter reading zero because nothing "
+                        "was shipped and one reading zero because nothing was lost are the "
+                        "same number and opposite news; this alert is what keeps them apart."
+                    ),
+                },
+            }
+        )
+        rules.append(
+            {
+                "alert": _gate_alert_name(f"{signal}-ingestion-dropping"),
+                "expr": (f"increase({stream.integrity_counter}[{stream.integrity_window}]) > 0"),
+                "for": stream.integrity_window,
+                "labels": {"severity": "critical", "owner": "observability-control-plane"},
+                "annotations": {
+                    "summary": f"{signal}: records arrived and were not stored",
+                    "description": (
+                        "Delta-shaped over the declared window, never `== 0` against the "
+                        "absolute counter: a bare zero is satisfiable by a reset, a fresh "
+                        "store or a restart, and a predicate made true that way cannot be "
+                        "told from one made true by a repair (AGENTS.md rule 30)."
+                    ),
+                },
+            }
+        )
+        if stream.lag_expr is None or stream.lag_budget is None:
+            # Deliberately no alert. A stream whose lag nothing measures gets a
+            # declared `lag_unmeasured` in the contract instead, because the
+            # alternative — an expression over a metric nothing emits — renders
+            # a rule that can never fire, and a rule that can never fire reads
+            # on every dashboard exactly like one that is quietly passing.
+            continue
+        rules.append(
+            {
+                "alert": _gate_alert_name(f"{signal}-ingestion-lag"),
+                "expr": f"{stream.lag_expr} > {_seconds(stream.lag_budget)}",
+                "for": stream.lag_budget,
+                "labels": {"severity": "warning", "owner": "observability-control-plane"},
+                "annotations": {
+                    "summary": (f"{signal}: the store is more than {stream.lag_budget} behind"),
+                    "description": (
+                        "Lag is a third fact, separate from arrival and from integrity. A "
+                        "stream can be arriving and storing cleanly and still be far enough "
+                        "behind that a query answers about a system that no longer exists."
+                    ),
+                },
+            }
+        )
+
+    for deadman in policy.deadman.signals:
+        proved = deadman.sensitivity.last_proved
+        rules.append(
+            {
+                "alert": _gate_alert_name(deadman.name),
+                "expr": deadman.expr,
+                "for": deadman.hold,
+                "labels": {"severity": "critical", "owner": "observability-control-plane"},
+                "annotations": {
+                    "summary": deadman.summary,
+                    "sensitivity": (
+                        f"planted condition last proved {proved}: "
+                        f"{deadman.sensitivity.planted_condition}"
+                        if proved is not None
+                        else (
+                            "UNPROVED — this deadman has never been observed to fire, so it "
+                            "is not known to work. It is indistinguishable from one whose "
+                            "expression matches no series at all. Planted condition: "
+                            f"{deadman.sensitivity.planted_condition}"
+                        )
+                    ),
+                    "procedure": deadman.sensitivity.procedure_ref,
+                },
+            }
+        )
+
+    projection = policy.projection
+    # A `planned` projection renders no lag alert, for the same reason an
+    # unmeasured stream renders none: the metric does not exist, so the rule
+    # would be permanently silent and permanently silent is what all-clear
+    # looks like. Everything else about the projection — its retention bound,
+    # its rebuild verdict, its non-authority notice — is declared and gated
+    # while the status is `planned`, because those are the decisions that get
+    # argued about rather than declared once the thing exists.
+    if projection.status == "live":
+        rules.append(
+            {
+                "alert": _gate_alert_name(f"{projection.name}-lag"),
+                "expr": f"{projection.lag_expr} > {_seconds(projection.lag_budget)}",
+                "for": projection.lag_budget,
+                "labels": {"severity": "warning", "owner": "observability-control-plane"},
+                "annotations": {
+                    "summary": (
+                        f"{projection.name}: the audit projection is more than "
+                        f"{projection.lag_budget} behind {projection.derived_from}"
+                    ),
+                    "description": projection.non_authority_notice,
+                },
+            }
+        )
+
+    document: dict[str, YamlValue] = {
+        "groups": [{"name": "ingestion-meta", "rules": rules}],
+    }
+    return emit(document, header=_HEADER)
+
+
+def _seconds(duration: str) -> str:
+    """A declared duration as the integer seconds a PromQL comparison needs.
+
+    Rendered from the SAME string the alert's `for` clause carries, so the
+    threshold and the hold cannot drift apart into an alert that fires on one
+    budget and holds for another.
+    """
+    value = duration_seconds(duration)
+    return str(int(value)) if value.is_integer() else str(value)
+
+
 def _loki(state: DesiredState) -> str:
     loki = state.bundle.loki
     document: dict[str, YamlValue] = {
@@ -599,6 +787,14 @@ def _loki(state: DesiredState) -> str:
             "ingestion_rate_mb": loki.ingestion_rate_mb,
             "ingestion_burst_size_mb": loki.ingestion_burst_mb,
             "retention_period": loki.retention,
+            # The ingestion contract's label budget, rendered into the store's
+            # own limit rather than restated. A label is an index dimension and
+            # the product of every label's value set is how many streams the
+            # store keeps open, so the number a reviewer reads in
+            # `inventory/ingestion.toml` and the number the store enforces have
+            # to be one number — otherwise the document describes a policy the
+            # store has never been told about.
+            "max_label_names_per_series": state.ingestion.labels.max_stream_labels,
         },
         "compactor": {
             "working_directory": "/loki/compactor",
@@ -932,6 +1128,7 @@ def render_control_plane(state: DesiredState, resolution: Resolution) -> Rendere
     return (
         (PROMETHEUS_CONFIG, _prometheus(state, resolution)),
         (META_RULES, _meta_rules(state)),
+        (INGESTION_RULES, _ingestion_rules(state)),
         (ALERTMANAGER_CONFIG, _alertmanager(state, resolution)),
         (LOKI_CONFIG, _loki(state)),
         (PROMTAIL_CONFIG, _promtail(state)),

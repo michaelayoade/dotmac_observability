@@ -336,7 +336,7 @@ def test_the_retirement_gate_reads_a_tree_that_is_not_empty():
     tree would have failed the render first.
     """
     tree = render_control_plane(load(REFERENCE, contracts=CONTRACTS), resolved(REFERENCE))
-    assert len(tree) == 14
+    assert len(tree) == 15
     assert all(text.strip() for _, text in tree)
     assert sum(len(text) for _, text in tree) > 5000
 

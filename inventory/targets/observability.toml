@@ -11,3 +11,42 @@ scheme = "http"
 metrics_path = "/metrics"
 authenticated = false
 expected = 1
+
+# ── A service this control plane DEPLOYS and did not observe ───────────────
+#
+# Measured 2026-09-03 from this tree. `inventory/bundle.toml` rosters five
+# services; the scrape jobs across `inventory/targets/` cover Prometheus and
+# Loki (the latter under `fleet-infrastructure`, which is where the duplicate
+# gate found it when this file first tried to declare it a second time).
+# Alertmanager, Grafana and promtail were rostered and unscraped, so no
+# `alertmanager_*` series existed anywhere and any alert written over the
+# notification path would have been permanently silent — which reads on a
+# dashboard exactly like all-clear (AGENTS.md rule 8).
+#
+# Only Alertmanager is added, because `inventory/ingestion.toml` has a reader
+# for it: the `notification-path-silent` deadman is written over
+# `alertmanager_alerts_received_total` and `alertmanager_notifications_total`.
+# Grafana and promtail stay unscraped and are recorded in
+# `docs/CONTROL_EXCEPTIONS.md` instead — adding a job whose series nothing
+# reads is the other half of the same mistake, and this repository already
+# refuses a binding nothing reaches (`RESOLUTION-UNUSED`).
+#
+# It carries a PUBLICATION rather than a private binding, and the exception is
+# narrower than the one `status.toml` takes. The endpoint is a service name on
+# this control plane's own Compose network, which `inventory/bundle.toml`
+# already publishes as a roster entry with this port because the datasource
+# URLs are derived from those entries. There is nothing here a reader of that
+# file does not already have; it names no host and resolves nowhere outside a
+# network the renderer itself creates.
+
+[[jobs]]
+job = "alertmanager"
+target_id = "alertmanager"
+scheme = "http"
+metrics_path = "/metrics"
+authenticated = false
+expected = 1
+
+  [jobs.publication]
+  endpoints = ["alertmanager:9093"]
+  rationale = "A service name on this control plane's own Compose network, already published as a roster entry with this port in inventory/bundle.toml because the Grafana datasource URLs are derived from those entries. Scraped because the notification-path deadman is written over alertmanager_alerts_received_total and alertmanager_notifications_total, and an alert over a series nothing emits is permanently silent and indistinguishable from all-clear."

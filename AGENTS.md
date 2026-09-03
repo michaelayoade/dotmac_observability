@@ -398,6 +398,99 @@ review discipline, not a guard, and it is a defect to describe it as enforced.
     — `tests/architecture/test_ci_matches_the_makefile.py`,
       `tests/architecture/test_supersession_workflow_cannot_leak.py`
 
+33. **The ingestion boundary is a versioned contract, and a field accepted
+    without validation is a field nobody owns.**
+    `observability-telemetry-ingestion.v1` declares the resource identity every
+    record carries, the accepted attribute vocabulary and what each attribute
+    is validated against, which attributes may become stream labels, and what
+    is refused. Anything not named is not accepted: an open vocabulary at the
+    boundary is how a store acquires an index dimension with a million values
+    and how a header nobody meant to ship becomes permanently searchable, and a
+    store cannot un-receive a credential.
+
+    Every rejection rule carries planted material the LOADER runs the
+    classifier over, and the gate compares the rule NAME rather than the
+    outcome — a probe refused by the vocabulary check instead would leave its
+    rule inert while every assertion still passed. The negative suite carries
+    positive controls in the same document, because a classifier that refuses
+    everything satisfies every rejection probe ever written and only a control
+    record can tell the two apart. Planted material is BUILT rather than
+    committed, so proving that credential-shaped strings are refused never
+    requires committing one.
+    — `contracts/telemetry-ingestion.schema.json`,
+      `src/dotmac_observability/ingestion.py`, `validate._ingestion_findings`,
+      `tests/unit/test_ingestion.py`,
+      `tests/mutations/test_ingestion_gates_bite.py` (ADR-0011).
+      What is NOT enforced is the RUNTIME application: the policy is complete
+      and proved against planted material, and nothing applies it to bytes on
+      the wire, because no ingestion-edge stage is deployed. Calling the
+      rejection enforced in production would be the overclaim rule 29 exists to
+      prevent. enforcement of the runtime half: `none yet (ingestion-edge lane)`
+
+34. **Dropped, never sent and never measured are three facts, and silence is
+    detected by ABSENCE.** A drop counter reading zero because nothing was
+    shipped and one reading zero because nothing was lost are the same number
+    and opposite news, so every stream declares a separate arrival counter and
+    integrity counter and the renderer emits `<Signal>IntegrityUnmeasured`
+    beside `<Signal>IngestionDropping`. `UNMEASURED` is a verdict, never a
+    missing value: a counter never observed, a baseline never recorded and a
+    counter that went backwards under a reset are all unmeasured rather than
+    stable.
+
+    Silence is `absent_over_time`, never a rate threshold. The two read like
+    the same question: when a shipper stops its series stops existing, and
+    `rate(x[5m]) == 0` over a series that does not exist matches no rows and
+    fires nothing at all. A stream whose lag nothing measures renders NO lag
+    alert and declares `lag_unmeasured` with a rationale and an owner — naming
+    a plausible metric instead renders a rule that can never fire, which reads
+    on every dashboard exactly like one quietly passing (rule 8 by another
+    route).
+    — `ingestion.integrity_state`, `render._ingestion_rules`,
+      `tests/mutations/test_ingestion_gates_bite.py`, whose second half writes
+      the obvious version of each check and shows it reporting the fault as
+      healthy
+
+35. **A deadman that has never fired is not known to work.** Each one declares
+    the planted condition that makes it fire, where the procedure is written,
+    and the date it was last observed to fire — or the literal `never`, which
+    is counted by a two-directional ratchet and stamped into the rendered
+    alert's own annotations. An unproved deadman is indistinguishable from one
+    whose expression matches no series at all, and the moment that matters is
+    the moment somebody is relying on it. A `procedure_ref` resolves to a
+    tracked file or the build fails: a dangling reference in an alert is
+    discovered during an incident and costs its first minutes.
+
+    A deadman is control-plane meta only. Assembly is not authorship (rule 5),
+    and an expression naming neither a series this contract declares nor a
+    control-plane series is a product's alert wearing a deadman's name.
+    — `validate._ingestion_findings` (`DEADMAN-UNPROVED-COUNT`,
+      `DEADMAN-NOT-META`), `tests/architecture/test_ingestion_procedures.py`,
+      `tests/mutations/test_ingestion_gates_bite.py`
+
+36. **The audit projection is never authoritative, and `rebuildable` is proved
+    rather than asserted.** The evidence is the audit row a product writes in
+    the same transaction as the decision, in its own database; a central
+    projection exists so the fleet can be searched. `authoritative` is a
+    `const false`, so no document can express the other value — a projection
+    that CAN be declared authoritative eventually is, usually in the hour when
+    the application database is the thing that is down.
+
+    Its retention is bounded from ABOVE by its source's, because a projection
+    retained longer than the rows it derives from becomes the last copy of one,
+    and a last copy is authoritative whatever any document says. It cannot
+    claim a rebuild that never ran — `last_rebuilt: never` admits only
+    `UNMEASURED` — and the ratchet runs the other way too, so a completed proof
+    is recorded rather than left looking outstanding. The lag alert's own text
+    says the projection is not authoritative and NAMES what is, because an
+    operator told only the first goes looking, and what they find will be
+    another projection. A comparison against a side that could not be read, or
+    between two empty sides, is `UNMEASURED` and never agreement.
+    — `contracts/telemetry-ingestion.schema.json`,
+      `ingestion.compare_rebuild`, `validate._ingestion_findings`
+      (`PROJECTION-OUTLIVES-SOURCE`, `REBUILD-OVERCLAIMED`,
+      `REBUILD-UNDERCLAIMED`, `PROJECTION-NOTICE-NO-SOURCE`),
+      `tests/unit/test_ingestion.py`
+
 ---
 
 ## The line this repository must not cross
