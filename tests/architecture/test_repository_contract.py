@@ -21,6 +21,7 @@ from dotmac_observability.render import (
     EXPOSURE_IPV6,
     GRAFANA_DASHBOARDS,
     GRAFANA_DATASOURCES,
+    INGESTION_RULES,
     LOGROTATE_CONFIG,
     LOKI_CONFIG,
     META_RULES,
@@ -65,6 +66,11 @@ def test_the_declared_contracts_are_all_present():
         # it, and the only tool that reads it produces an accepted-contract
         # document.
         "private-inventory-capture.schema.json",
+        # The ingestion boundary (ADR-0011): what the one fleet shipper may put
+        # into this control plane and what is refused. Public and topology-free
+        # like the rest — it carries a vocabulary and a policy, never an
+        # address, a store path or a credential basename.
+        "telemetry-ingestion.schema.json",
     }
     # `deployment-authorization.schema.json` is deliberately ABSENT. Defining
     # one here would make an adopter into a second deployment control plane;
@@ -208,6 +214,7 @@ def test_the_renderer_produces_exactly_its_declared_files():
     assert produced == {
         PROMETHEUS_CONFIG,
         META_RULES,
+        INGESTION_RULES,
         ALERTMANAGER_CONFIG,
         LOKI_CONFIG,
         PROMTAIL_CONFIG,

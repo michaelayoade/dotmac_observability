@@ -1,0 +1,756 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dotmac.io/schemas/observability/telemetry-ingestion.v1.json",
+  "title": "observability-telemetry-ingestion.v1",
+  "description": "What this control plane ACCEPTS from the fleet shipper, and what it refuses.  The layering it sits inside has three owners and one seam. A product writes its authoritative audit row in the same transaction as the decision, into its own database. The kernel emits operational telemetry — logs, metrics, traces — over stdout and a loopback OTLP receiver. `dotmac-deployment-foundation` installs Grafana Alloy and enforces one shipping path off the host (ADR-0009). Everything downstream of the wire is this repository's, and this document is the wire's contract: which resource identity every record carries, which attributes are accepted and what each one is validated against, which attributes may become stream labels, what is REFUSED, and what a stream's integrity, silence and lag are measured by.  Three properties are what make it a contract rather than a description.  A FIELD ACCEPTED AND NEVER VALIDATED IS A FIELD NOBODY OWNS. Every accepted attribute declares a validation — an enum, a shape, or `opaque` with a rationale someone can disagree with. Acceptance is a decision here, not a default.  A REJECTION CARRIES ITS OWN PLANTED PROOF. Each rejection rule names synthetic material that MUST be refused, and the loader runs the classifier over that material as a gate: a rule that has stopped biting fails `make check` rather than passing silently. The negative suite carries positive controls in the same document (`accepted_control`), because a classifier that refuses everything satisfies every negative test ever written.  DROPPED AND NEVER SENT ARE DIFFERENT FACTS. A drop counter reading zero because nothing was shipped and one reading zero because nothing was lost are the same number, and only one of them is good news. Every stream declares an `unmeasured` predicate over the ABSENCE of its own counter, rendered as its own alert, so the unmeasured state has a name instead of borrowing the healthy one.  LOGICAL ONLY, like every other public document (ADR-0004). No address, no store path, no credential basename, no destination.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "resource",
+    "identifiers",
+    "attribution",
+    "labels",
+    "attributes",
+    "rejected",
+    "accepted_control",
+    "streams",
+    "deadman",
+    "projection",
+    "retention"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "observability-telemetry-ingestion.v1"
+    },
+    "resource": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/resource_field"
+      },
+      "description": "The resource identity every accepted record carries, in stable OpenTelemetry spelling. A record that cannot say which service and which environment it came from cannot be attributed, cannot be missed when it stops arriving, and cannot be routed — so the silence detector below is only as good as this list."
+    },
+    "identifiers": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/identifier"
+      },
+      "description": "The identifiers that must not collapse into one another. A request, a cross-service business flow, a telemetry trace and a durable audit event are four different things, and a deployment that spells them all `request_id` has lost the ability to ask three of the four questions. Each declares what it MEANS; two identifiers meaning the same thing is a refusal."
+    },
+    "attribution": {
+      "$ref": "#/$defs/attribution"
+    },
+    "labels": {
+      "$ref": "#/$defs/labels"
+    },
+    "attributes": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/attribute"
+      },
+      "description": "The accepted attribute vocabulary. Anything not named here is not accepted: an open vocabulary at the ingestion boundary is how a store acquires a label with a million values and how a header nobody meant to ship becomes searchable."
+    },
+    "rejected": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/rejection"
+      },
+      "description": "What is refused at ingestion rather than by convention upstream. A sender that is asked politely not to include an Authorization header is a sender that will include one on the day its framework changes a default, and the material is then in the log store, which is the one place it cannot be taken back out of."
+    },
+    "accepted_control": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/control_record"
+      },
+      "description": "Records that MUST be accepted, checked in the same pass as the rejections. This is the positive control for a negative suite: a classifier that refuses every record passes every rejection probe ever written, and the failure is invisible until a fleet stops shipping. A negative suite with no positive control is not evidence."
+    },
+    "streams": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/stream"
+      }
+    },
+    "deadman": {
+      "$ref": "#/$defs/deadman"
+    },
+    "projection": {
+      "$ref": "#/$defs/projection"
+    },
+    "retention": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/retention_class"
+      }
+    }
+  },
+  "$defs": {
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$"
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$"
+    },
+    "otel_name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*(?:\\.[a-z0-9_]+)*$",
+      "description": "A dotted OpenTelemetry attribute or resource name, lower case. The spelling is the contract: `client.address` and `clientAddress` are two vocabularies, and a store holding both can answer questions about neither."
+    },
+    "signal": {
+      "enum": [
+        "logs",
+        "metrics",
+        "traces"
+      ]
+    },
+    "resource_field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "field",
+        "required",
+        "cardinality",
+        "rationale"
+      ],
+      "properties": {
+        "field": {
+          "$ref": "#/$defs/otel_name"
+        },
+        "required": {
+          "type": "boolean",
+          "description": "Whether a record missing this field is refused. `false` means the field is accepted when present and its absence is not a fault — which is a decision, not a default."
+        },
+        "cardinality": {
+          "enum": [
+            "bounded",
+            "unbounded"
+          ],
+          "description": "Whether the set of values this field can take is closed. Bounded means a reviewer can name every value it will ever hold; unbounded means it cannot become a stream label, whatever anyone would prefer."
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 40
+        }
+      }
+    },
+    "identifier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "means",
+        "transport",
+        "signals"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/slug"
+        },
+        "means": {
+          "enum": [
+            "one_request",
+            "one_business_flow",
+            "one_telemetry_trace",
+            "one_telemetry_span",
+            "one_durable_audit_event"
+          ],
+          "description": "An enum rather than prose, because the whole property being defended is that no two of these mean the same thing, and free text cannot be compared."
+        },
+        "transport": {
+          "enum": [
+            "native",
+            "attribute"
+          ],
+          "description": "How the identifier reaches the store. `native` means the signal's own wire format carries it — a log record's trace and span ids are fields of the record, not attributes copied alongside it. Copying a native field into an attribute creates a second spelling that drifts from the first the moment a sampler, a processor or a retry rewrites one and not the other."
+        },
+        "signals": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/signal"
+          }
+        }
+      }
+    },
+    "attribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "values",
+        "unresolved",
+        "rationale"
+      ],
+      "description": "How a record says where it believes its client address came from. Forwarding headers are accepted only when the immediate peer is trusted, and the resolver that walks the chain lives in the kernel; what this contract owns is that its verdict survives the wire intact.",
+      "properties": {
+        "values": {
+          "type": "array",
+          "minItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "direct",
+              "trusted_forwarded",
+              "unknown"
+            ]
+          }
+        },
+        "unresolved": {
+          "const": "unknown",
+          "description": "A `const`, so the shape cannot express the mistake. `unknown` is a first-class verdict and must never degrade to `direct`: a resolver that reports `direct` when it could not establish the peer has manufactured an attribution, and every later reader treats a manufactured one exactly like an observed one."
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 40
+        }
+      }
+    },
+    "labels": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_stream_labels",
+        "rationale"
+      ],
+      "description": "The stream-label budget. A label is an index dimension, and the product of every label's value set is the number of streams the log store has to keep open; one unbounded label is enough to make a store unqueryable and then unwritable. The budget is declared here and RENDERED into the store's own limit, so the number a reviewer reads and the number the store enforces are one number.",
+      "properties": {
+        "max_stream_labels": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 40
+        }
+      }
+    },
+    "attribute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "signals",
+        "disposition",
+        "cardinality",
+        "validation",
+        "rationale"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/otel_name"
+        },
+        "signals": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/signal"
+          }
+        },
+        "disposition": {
+          "enum": [
+            "label",
+            "structured"
+          ],
+          "description": "`label` promotes the attribute to a stream label and therefore to an index dimension; `structured` keeps it in the record, searchable but not indexed. There is deliberately no `dropped` disposition: an attribute nobody wants is left out of this list, and leaving it out is what refuses it."
+        },
+        "cardinality": {
+          "enum": [
+            "bounded",
+            "unbounded"
+          ]
+        },
+        "validation": {
+          "$ref": "#/$defs/validation"
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 40
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "description": "What the value is checked against. An accepted attribute with no validation is a field this control plane has taken responsibility for and does not look at, which is the shape every one of the disclosures in this repository's history had.",
+      "properties": {
+        "kind": {
+          "enum": [
+            "enum",
+            "shape",
+            "opaque"
+          ]
+        },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Required for `enum`. The complete set of accepted values."
+        },
+        "shape": {
+          "enum": [
+            "ip_address",
+            "hex32",
+            "hex16",
+            "uuid",
+            "printable_short",
+            "duration_ms",
+            "http_status"
+          ],
+          "description": "Required for `shape`. A named form the classifier checks, not a regular expression typed into a document: a pattern in a data file is code nobody reviews as code, and two documents spelling `uuid` differently is exactly the drift this contract exists to remove."
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 40,
+          "description": "Required for `opaque`, which is the only kind that accepts a value without looking at it. Saying why, in words a reviewer can disagree with, is the whole of the check."
+        }
+      }
+    },
+    "rejection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind",
+        "match",
+        "rationale",
+        "planted"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/slug"
+        },
+        "kind": {
+          "enum": [
+            "attribute_name",
+            "attribute_prefix",
+            "value_shape"
+          ],
+          "description": "`attribute_name` refuses one exact attribute; `attribute_prefix` refuses a family, which is how a whole header namespace is closed rather than the three members somebody remembered; `value_shape` refuses material by what it LOOKS like, wherever it appears, which is the only rule that survives a sender renaming its field."
+        },
+        "match": {
+          "type": "string",
+          "minLength": 3,
+          "description": "For a name or prefix rule, the attribute name or prefix. For a value-shape rule, the named shape from the classifier's own table — never a regular expression, for the reason `validation.shape` gives."
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 40
+        },
+        "planted": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/planted_probe"
+          },
+          "description": "Material this rule MUST refuse, run by the loader as a gate. A rejection rule with no planted probe is a rule nobody has watched bite; a rule whose probe stops being refused fails the build in the same run that broke it, rather than in an incident."
+        }
+      }
+    },
+    "planted_probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attribute",
+        "value_shape"
+      ],
+      "properties": {
+        "attribute": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The attribute the synthetic material arrives on. A free string rather than an `otel_name`, because half the point is to plant a name this contract does NOT accept."
+        },
+        "value_shape": {
+          "enum": [
+            "bearer",
+            "basic",
+            "cookie",
+            "api_key",
+            "session_id",
+            "pem_private_key",
+            "json_body",
+            "query_string",
+            "clean_short_text"
+          ],
+          "description": "A named synthetic shape the classifier's own table materialises at check time. The material is BUILT rather than written down, so a tracked document never has to carry a string that looks like a credential in order to prove that strings looking like credentials are refused — which is a rule this repository has already broken once by writing a basename into prose."
+        }
+      }
+    },
+    "control_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "signal",
+        "attributes"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/slug"
+        },
+        "signal": {
+          "$ref": "#/$defs/signal"
+        },
+        "attributes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "value_shape"
+            ],
+            "properties": {
+              "name": {
+                "$ref": "#/$defs/otel_name"
+              },
+              "value_shape": {
+                "enum": [
+                  "clean_short_text",
+                  "loopback_address",
+                  "hex32",
+                  "hex16",
+                  "uuid",
+                  "log_level"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "stream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "signal",
+        "arrival_counter",
+        "integrity_counter",
+        "integrity_window",
+        "silence_budget",
+        "retention_class",
+        "rationale"
+      ],
+      "description": "One signal's ingestion health, expressed as three separate facts that a single counter cannot separate: material is arriving, material that arrived was stored, and material that arrived was stored PROMPTLY.",
+      "properties": {
+        "signal": {
+          "$ref": "#/$defs/signal"
+        },
+        "arrival_counter": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A counter that moves when a record is ACCEPTED. Separate from the integrity counter and load-bearing: silence is detected here and nowhere else, because a drop counter that is not moving describes a healthy pipeline and a stopped one identically."
+        },
+        "integrity_counter": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A counter that moves when a record that arrived was NOT stored. Asserted as a delta from a recorded baseline, never as `== 0`: a bare zero is satisfiable by a reset, a fresh store or a restart (AGENTS.md rule 30)."
+        },
+        "integrity_window": {
+          "$ref": "#/$defs/duration"
+        },
+        "lag_budget": {
+          "$ref": "#/$defs/duration"
+        },
+        "silence_budget": {
+          "$ref": "#/$defs/duration",
+          "description": "How long the arrival counter may stay absent before the stream is declared silent. Not a threshold on a rate — a rate over a series that has stopped existing is not zero, it is nothing, and `rate(x[5m]) == 0` over a vanished series matches no rows and fires no alert. Silence is detected by ABSENCE, which is the one query shape that survives the series going away."
+        },
+        "retention_class": {
+          "$ref": "#/$defs/slug"
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 40
+        },
+        "lag_expr": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A PromQL expression yielding SECONDS of lag. An expression rather than a metric name because the honest measurements are differences between two timestamps, and a contract that accepted only a name would push the subtraction into the renderer where no reviewer reads it. Present together with `lag_budget`, or absent together with a declared `lag_unmeasured`."
+        },
+        "lag_unmeasured": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "rationale",
+            "monitored_by"
+          ],
+          "description": "Why this stream's lag is not measured, and what will measure it. The alternative was naming a metric nothing emits, which renders an alert that can never fire and is indistinguishable from one that is quietly passing — the exact defect AGENTS.md rule 8 names. An unmeasured region declared with its owner is worse news and better evidence.",
+          "properties": {
+            "rationale": {
+              "type": "string",
+              "minLength": 40
+            },
+            "monitored_by": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "deadman": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unproved_declared",
+        "signals"
+      ],
+      "description": "The signals that fire when the observability plane itself stops working, and the record of which of them have been WATCHED to fire.",
+      "properties": {
+        "unproved_declared": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many signals below carry no sensitivity proof. A two-directional ratchet, like the unmonitored ledger: it fails when the number rises without being written down, and when it falls without being celebrated. A deadman that has never fired is not known to work — it is indistinguishable from one whose expression matches no series at all, which is the most common way an alert is silently wrong."
+        },
+        "signals": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/deadman_signal"
+          }
+        }
+      }
+    },
+    "deadman_signal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "expr",
+        "for",
+        "summary",
+        "sensitivity"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/slug"
+        },
+        "expr": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Control-plane meta only. This repository never authors a product's alert expression (AGENTS.md rule 5); a deadman over the observability plane's own liveness is an alert no product is in a position to write."
+        },
+        "for": {
+          "$ref": "#/$defs/duration"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 40
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        }
+      }
+    },
+    "sensitivity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "planted_condition",
+        "procedure_ref",
+        "last_proved"
+      ],
+      "properties": {
+        "planted_condition": {
+          "type": "string",
+          "minLength": 40,
+          "description": "What is deliberately broken to make this signal fire. Written even when the proof has never been run, because the alternative is discovering at the moment of need that nobody knows how to test it."
+        },
+        "procedure_ref": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Where the procedure is written down."
+        },
+        "last_proved": {
+          "anyOf": [
+            {
+              "const": "never"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+            }
+          ],
+          "description": "The date the planted condition was last observed to make this signal fire, or the literal `never`. A NAMED sentinel rather than an omitted key: TOML has no null, and 'the field is absent' would then mean both 'never proved' and 'somebody forgot the field', which is the exact collapse this document exists to prevent everywhere else. `never` is counted by `unproved_declared` and stamped into the rendered alert's own annotations, so an operator reading the alert during an incident learns that nobody has watched it work."
+        }
+      }
+    },
+    "projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "status",
+        "authoritative",
+        "derived_from",
+        "lag_expr",
+        "lag_budget",
+        "source_retention",
+        "retention_class",
+        "non_authority_notice",
+        "rebuild"
+      ],
+      "description": "The central audit projection: a fleet-wide search surface derived from application audit rows, which are the evidence.  Audit is durable evidence owned by each application's own database, written in the same transaction as the decision it records. Logs, metrics and traces are operational observations. A projection may exist to make evidence searchable across the fleet, and it may never become the thing anybody trusts: the row in the application database is the record, and this is a copy with a lag.",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/slug"
+        },
+        "authoritative": {
+          "const": false,
+          "description": "A `const`, so no document can express the other value. A projection that can be declared authoritative eventually is, usually in the hour when the application database is the thing that is down."
+        },
+        "derived_from": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The logical name of the authoritative source it is derived from."
+        },
+        "lag_budget": {
+          "$ref": "#/$defs/duration"
+        },
+        "source_retention": {
+          "$ref": "#/$defs/duration",
+          "description": "How long the AUTHORITATIVE store keeps the rows this projection derives from. Declared here so the comparison below can be made: a projection retained longer than its source becomes, on the day the source ages a row out, the last copy of that row — and a last copy is authoritative whatever any document says."
+        },
+        "retention_class": {
+          "$ref": "#/$defs/slug"
+        },
+        "non_authority_notice": {
+          "type": "string",
+          "minLength": 60,
+          "description": "The sentence carried in the lag alert's own text. It exists because the natural response to `projection is behind` is to trust the projection less, and the correct response is the opposite of what that instinct produces: the projection was never the evidence, so falling behind changes nothing about what is true — it changes only what fleet search can currently find. An alert that does not say so invites an operator to go looking for a second source of truth."
+        },
+        "rebuild": {
+          "$ref": "#/$defs/rebuild"
+        },
+        "lag_expr": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A PromQL expression yielding SECONDS by which the projection trails its source."
+        },
+        "status": {
+          "enum": [
+            "planned",
+            "live"
+          ],
+          "description": "Whether the projection exists. `planned` renders NO lag alert: an alert over a metric that nothing emits is permanently silent, and permanently silent is indistinguishable from all-clear to every reader of a dashboard. The retention, rebuild and non-authority decisions are still declared and still gated while the status is `planned`, because those are the decisions that are expensive to take later — after a projection exists, `authoritative` is argued about rather than declared."
+        }
+      }
+    },
+    "rebuild": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "procedure_ref",
+        "compare",
+        "last_rebuilt",
+        "verdict"
+      ],
+      "description": "Whether `rebuildable` is a property or a hope. A projection that has never been rebuilt is a projection nobody knows is rebuildable, and the discovery that it is not is always made at the worst moment.",
+      "properties": {
+        "procedure_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "compare": {
+          "enum": [
+            "row_digest",
+            "count_only"
+          ],
+          "description": "How a rebuilt projection is compared with the source. `count_only` compares how many rows there are, which agrees whenever two different sets happen to be the same size; `row_digest` compares a digest per row, which is the only one of the two that can disagree about CONTENT."
+        },
+        "last_rebuilt": {
+          "anyOf": [
+            {
+              "const": "never"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+            }
+          ],
+          "description": "The date the projection was last rebuilt from its source and compared, or the literal `never`. Same named sentinel, same reason."
+        },
+        "verdict": {
+          "enum": [
+            "UNMEASURED",
+            "MATCHED",
+            "DIVERGED"
+          ],
+          "description": "`UNMEASURED` is a first-class verdict and the only one a projection with `last_rebuilt: null` may carry — the gate refuses `MATCHED` without a date, because a comparison that never ran and a comparison that agreed are the same silence and only one of them is evidence."
+        }
+      }
+    },
+    "retention_class": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind",
+        "duration",
+        "access",
+        "last_copy",
+        "rationale"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/slug"
+        },
+        "kind": {
+          "enum": [
+            "telemetry",
+            "audit_projection"
+          ],
+          "description": "Telemetry and an audit projection answer to different requirements and must not share a retention decision. Telemetry is kept for as long as it is operationally useful and may be shortened freely. An audit projection's retention is bounded from ABOVE by its source's, which is the opposite kind of constraint."
+        },
+        "duration": {
+          "$ref": "#/$defs/duration"
+        },
+        "access": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/slug"
+          },
+          "description": "The logical roles that may read this class. Logical, like everything else public here: which humans hold the role is not written down in this repository."
+        },
+        "last_copy": {
+          "type": "boolean",
+          "description": "Whether this store may be the last surviving copy of what it holds. An `audit_projection` declaring `true` is refused: a projection that is the last copy is the record, and calling it a projection does not change that."
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 40
+        }
+      }
+    }
+  }
+}

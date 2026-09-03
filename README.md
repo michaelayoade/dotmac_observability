@@ -19,7 +19,14 @@ its rendered alert rules.
 - Alertmanager routes, inhibition, receiver policy and templates
 - Deterministic configuration rendering and validation
 - Promotion, reload verification, rollback and drift detection
-- Deadman and delivery canaries
+- Deadman and delivery canaries, each carrying the planted condition that
+  proves it fires — or the record that nobody has yet watched it
+- The telemetry ingestion contract: what the fleet shipper may put into this
+  control plane, what is refused, and how arrival, integrity, silence and lag
+  are told apart (ADR-0011)
+- Telemetry retention and access, and the audit projection's retention — which
+  is bounded from above by the application rows it derives from, because a
+  projection is never the evidence
 - Deployment receipts and operational runbooks
 
 ## What it does NOT own
@@ -93,6 +100,20 @@ evaluators, reading them back and restoring on failure — is a method on
 installable, so `.github/workflows/promote.yml` stops at the step that probes
 for one. `docs/adr/0010-the-promotion-executor-and-the-facility-contract.md`
 states what it must provide.
+
+ADR-0011 adds the ingestion boundary: the contract
+(`contracts/telemetry-ingestion.schema.json`), the classifier that decides one
+record and says WHICH rule refused it (`ingestion.py`), the gates that run that
+classifier over planted material as part of `make check`, and the rendered
+ingestion alerts. Its policy is enforced; the runtime stage that would apply it
+to bytes on the wire is not deployed, and that half is recorded as unmonitored
+rather than described as working.
+
+The audit projection is declared and does not exist. `compare_rebuild` is the
+rebuild-and-compare path and is complete; both of its readers — application
+audit rows on one side, a deployed projection on the other — are not, so the
+contract carries `status = "planned"` and `verdict = "UNMEASURED"` and refuses
+any more optimistic value.
 
 Bundle fetching (`bundle.py`) also does not exist.
 

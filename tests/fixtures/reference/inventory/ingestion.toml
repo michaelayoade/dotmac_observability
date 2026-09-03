@@ -1,0 +1,712 @@
+# The SYNTHETIC ingestion contract the reference fixture renders against.
+#
+# Deliberately the same shape as `inventory/ingestion.toml`, and deliberately
+# not a reduced one. The fixture is what `make render-check` compares bytes
+# against and what CI hands to promtool, so a fixture carrying a simpler
+# document would prove the renderer works on a document production does not
+# have. Only the evaluator deadman's expression differs: this tree declares no
+# `prometheus` scrape job, and an expression naming a job that does not exist
+# here would be exactly the permanently-silent rule this contract refuses.
+
+schema_version = "observability-telemetry-ingestion.v1"
+
+# ── Resource identity ───────────────────────────────────────────────────────
+#
+# Stable OpenTelemetry spelling, because the spelling IS the contract: a store
+# holding both `service.name` and `serviceName` can answer questions about
+# neither. Every one of these is bounded, which is what lets them be stream
+# labels; the unbounded fields live under `[[attributes]]` and stay out of the
+# index.
+
+[[resource]]
+field = "service.name"
+required = true
+cardinality = "bounded"
+rationale = """
+Every downstream question is asked BY this field. Silence is detected per \
+service, an alert is routed by it and a retention decision is explained by it, \
+so a record that cannot say which service produced it is a record no deadman \
+can ever miss.\
+"""
+
+[[resource]]
+field = "deployment.environment.name"
+required = true
+cardinality = "bounded"
+rationale = """
+Retention, access and alert severity are all per environment, and a fleet that \
+cannot separate a canary's telemetry from production's will eventually page \
+somebody about the canary or, worse, not page them about production.\
+"""
+
+[[resource]]
+field = "host.id"
+required = true
+cardinality = "bounded"
+rationale = """
+The stable logical host, supplied by the shipper's protected environment file \
+rather than by a hostname the guest can change. It is what makes a missing \
+agent attributable to one machine instead of to a count that went down by one.\
+"""
+
+[[resource]]
+field = "dotmac.fleet"
+required = true
+cardinality = "bounded"
+rationale = """
+Which fleet a host belongs to. Bounded and small, and carried because the \
+provider census and the guest census answer different questions: reconciling \
+them needs a field that both sides agree on before anything is compared.\
+"""
+
+# ── The five identifiers that must not collapse ─────────────────────────────
+#
+# `means` is an enum rather than prose, because the property being defended is
+# that no two of these mean the same thing, and free text cannot be compared.
+# A deployment that spells all five `request_id` can ask one of the five
+# questions and will not notice which four it lost.
+
+[[identifiers]]
+name = "request-id"
+means = "one_request"
+transport = "attribute"
+signals = ["logs"]
+
+[[identifiers]]
+name = "correlation-id"
+means = "one_business_flow"
+transport = "attribute"
+signals = ["logs"]
+
+# NATIVE, not an attribute, and the contract refuses the other choice for these
+# two. A log record carries its trace and span ids as fields of the record;
+# copying them into an attribute alongside creates a second spelling, and the
+# first sampler, processor or retry that rewrites one and not the other makes
+# the two disagree with nothing anywhere reporting it.
+[[identifiers]]
+name = "trace-id"
+means = "one_telemetry_trace"
+transport = "native"
+signals = ["logs"]
+
+[[identifiers]]
+name = "span-id"
+means = "one_telemetry_span"
+transport = "native"
+signals = ["logs"]
+
+[[identifiers]]
+name = "audit-event-id"
+means = "one_durable_audit_event"
+transport = "attribute"
+signals = ["logs"]
+
+# ── Attribution ─────────────────────────────────────────────────────────────
+#
+# The kernel's resolver walks the forwarding chain and only trusts it when the
+# immediate peer is trusted. What this document owns is that the resolver's
+# verdict survives the wire intact — including the verdict that it could not
+# tell.
+
+[attribution]
+values = ["direct", "trusted_forwarded", "unknown"]
+unresolved = "unknown"
+rationale = """
+`unknown` is a first-class verdict and the contract makes `unresolved` a \
+constant so no document can express the alternative. A resolver that reports \
+`direct` when it could not establish the peer has manufactured an attribution, \
+and every later reader treats a manufactured one exactly like an observed one.\
+"""
+
+# ── The stream-label budget ─────────────────────────────────────────────────
+
+[labels]
+max_stream_labels = 12
+rationale = """
+A label is an index dimension and the product of every label's value set is \
+how many streams the store keeps open, so one unbounded label is enough to \
+make the store unqueryable and then unwritable. Twelve leaves room above the \
+five currently declared without leaving room for a careless one; the number is \
+rendered into Loki's own `max_label_names_per_series`, so the figure a \
+reviewer reads here and the figure the store enforces are one figure.\
+"""
+
+# ── The accepted vocabulary ─────────────────────────────────────────────────
+#
+# Anything not named below is not accepted. The signals are `logs` throughout:
+# metric label sets are governed by the scrape and federation documents rather
+# than by this vocabulary, and there is no trace store in this bundle to accept
+# span attributes into (see `docs/CONTROL_EXCEPTIONS.md`).
+#
+# Every entry declares a validation. A field accepted and never validated is a
+# field this control plane has taken responsibility for and does not look at,
+# which is the shape both of this repository's real disclosures had.
+
+[[attributes]]
+name = "client.address"
+signals = ["logs"]
+disposition = "structured"
+cardinality = "unbounded"
+rationale = """
+The resolved original client, in stable OpenTelemetry spelling. Structured \
+rather than a label and the contract refuses the other choice, because the set \
+of client addresses is the least bounded set in the system.\
+"""
+
+  [attributes.validation]
+  kind = "shape"
+  shape = "ip_address"
+
+[[attributes]]
+name = "network.peer.address"
+signals = ["logs"]
+disposition = "structured"
+cardinality = "unbounded"
+rationale = """
+The immediate socket peer, which is a different fact from the client address \
+and is what decides whether a forwarding header may be trusted at all. Keeping \
+both is what makes an attribution auditable after the fact.\
+"""
+
+  [attributes.validation]
+  kind = "shape"
+  shape = "ip_address"
+
+[[attributes]]
+name = "user_agent.original"
+signals = ["logs"]
+disposition = "structured"
+cardinality = "unbounded"
+rationale = """
+Carried verbatim because a normalised user agent answers a different question \
+from the one an incident asks, and normalising at ingestion destroys the only \
+copy.\
+"""
+
+  [attributes.validation]
+  kind = "opaque"
+  rationale = """
+A user agent is attacker-controlled free text with no grammar worth asserting, \
+so it is accepted without being looked at — stated here rather than left as \
+the default, so a reviewer can disagree with the one field in this document \
+that nothing checks.\
+"""
+
+[[attributes]]
+name = "http.request.method"
+signals = ["logs"]
+disposition = "structured"
+cardinality = "bounded"
+rationale = """
+Bounded and useful, and kept out of the index anyway: it partitions traffic \
+into eight roughly equal parts, which multiplies stream count without \
+narrowing any query anybody actually runs.\
+"""
+
+  [attributes.validation]
+  kind = "enum"
+  values = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE"]
+
+[[attributes]]
+name = "http.response.status_code"
+signals = ["logs"]
+disposition = "structured"
+cardinality = "bounded"
+rationale = """
+The status the application returned. Validated as a real status rather than as \
+any integer, because a status of 0 is what a client library reports when the \
+request never completed and it must not be stored as though the server said it.\
+"""
+
+  [attributes.validation]
+  kind = "shape"
+  shape = "http_status"
+
+[[attributes]]
+name = "attribution"
+signals = ["logs"]
+disposition = "structured"
+cardinality = "bounded"
+rationale = """
+The resolver's own verdict about where the client address came from, carried \
+so a later reader can tell an observed address from an inferred one without \
+re-deriving the trust decision from headers that are no longer here.\
+"""
+
+  [attributes.validation]
+  kind = "enum"
+  values = ["direct", "trusted_forwarded", "unknown"]
+
+[[attributes]]
+name = "request.id"
+signals = ["logs"]
+disposition = "structured"
+cardinality = "unbounded"
+rationale = """
+One request. Distinct from the correlation id, the trace id and the audit \
+event id, and structurally validated so that a value which is none of those \
+four cannot arrive under this name.\
+"""
+
+  [attributes.validation]
+  kind = "shape"
+  shape = "uuid"
+
+[[attributes]]
+name = "correlation.id"
+signals = ["logs"]
+disposition = "structured"
+cardinality = "unbounded"
+rationale = """
+One cross-service business flow, which outlives any single request and is the \
+identifier an incident is actually reconstructed along.\
+"""
+
+  [attributes.validation]
+  kind = "shape"
+  shape = "uuid"
+
+[[attributes]]
+name = "audit.event.id"
+signals = ["logs"]
+disposition = "structured"
+cardinality = "unbounded"
+rationale = """
+The id of the durable audit row this log line accompanies. It is a POINTER \
+into the application's database, never a copy of the evidence: the row written \
+in the same transaction as the decision is the record, and this is how a \
+reader gets from an observation to it.\
+"""
+
+  [attributes.validation]
+  kind = "shape"
+  shape = "uuid"
+
+[[attributes]]
+name = "log.level"
+signals = ["logs"]
+disposition = "label"
+cardinality = "bounded"
+rationale = """
+The one attribute promoted to a stream label. Five values, every query filters \
+on it, and indexing it is what stops a severity filter reading every chunk in \
+the retention window.\
+"""
+
+  [attributes.validation]
+  kind = "enum"
+  values = ["debug", "info", "warn", "error", "fatal"]
+
+# ── What is refused, and the planted material that proves it ────────────────
+#
+# Refused HERE, at ingestion, rather than upstream by convention. A sender
+# asked politely not to include an Authorization header is a sender that will
+# include one the day its framework changes a default, and the log store is the
+# one place material cannot be taken back out of.
+#
+# Every rule carries planted material the loader RUNS the classifier over, and
+# the gate compares the rule NAME rather than the outcome. A probe refused by
+# the vocabulary check instead of by its own rule would leave that rule inert
+# while every assertion about it still passed, which is the failure this
+# comparison exists to prevent.
+
+[[rejected]]
+name = "request-headers"
+kind = "attribute_prefix"
+match = "http.request.header."
+rationale = """
+The whole namespace, not the three members somebody remembered. Authorization \
+and Cookie are the two that matter today and neither is the one that will \
+arrive next; closing the family is the only form of this rule that survives a \
+framework adding a header nobody here has heard of.\
+"""
+
+  [[rejected.planted]]
+  attribute = "http.request.header.authorization"
+  value_shape = "bearer"
+
+  [[rejected.planted]]
+  attribute = "http.request.header.cookie"
+  value_shape = "cookie"
+
+[[rejected]]
+name = "response-headers"
+kind = "attribute_prefix"
+match = "http.response.header."
+rationale = """
+The other direction, and the one more often forgotten: Set-Cookie carries a \
+freshly minted session identifier, and a response header family left open \
+ships credentials the request never contained.\
+"""
+
+  [[rejected.planted]]
+  attribute = "http.response.header.set_cookie"
+  value_shape = "cookie"
+
+[[rejected]]
+name = "request-body"
+kind = "attribute_name"
+match = "http.request.body"
+rationale = """
+A body is arbitrary user data with no schema this control plane can reason \
+about, and the fields inside it that matter most — a password being changed, a \
+token being exchanged — are exactly the ones a body carries.\
+"""
+
+  [[rejected.planted]]
+  attribute = "http.request.body"
+  value_shape = "json_body"
+
+[[rejected]]
+name = "response-body"
+kind = "attribute_name"
+match = "http.response.body"
+rationale = """
+Same reasoning as the request body, and the response is where a newly issued \
+credential appears for the first and only time in plain form.\
+"""
+
+  [[rejected.planted]]
+  attribute = "http.response.body"
+  value_shape = "json_body"
+
+[[rejected]]
+name = "query-parameters"
+kind = "attribute_name"
+match = "url.query"
+rationale = """
+Arbitrary query data. A reset token, a signed URL and a session handle are all \
+routinely carried in a query string, and a query string is the part of a URL \
+that ends up in every log line by default.\
+"""
+
+  [[rejected.planted]]
+  attribute = "url.query"
+  value_shape = "query_string"
+
+# The rules below match on what a value LOOKS like rather than on where it
+# sits, which is the only form that survives a sender renaming its field. They
+# do not apply to an accepted attribute whose declared validation is a strict
+# structural shape and whose value satisfies it: a UUID is 36 characters of
+# hex and dashes and matches an opaque-token heuristic exactly, and the
+# positive control below is what found that.
+
+[[rejected]]
+name = "credential-shaped-values"
+kind = "value_shape"
+match = "authorization_credential"
+rationale = """
+A value beginning Bearer, Basic or Digest is a credential wherever it appears, \
+including inside a message somebody formatted by hand. Field-name rules cannot \
+reach that and this one can.\
+"""
+
+  [[rejected.planted]]
+  attribute = "log.message"
+  value_shape = "bearer"
+
+[[rejected]]
+name = "private-key-material"
+kind = "value_shape"
+match = "pem_private_key"
+rationale = """
+An armoured private key in a log line is the single worst thing this boundary \
+can accept, and it arrives through exception handlers that print a \
+configuration object rather than through any field designed to carry one.\
+"""
+
+  [[rejected.planted]]
+  attribute = "log.message"
+  value_shape = "pem_private_key"
+
+[[rejected]]
+name = "api-key-shaped-values"
+kind = "value_shape"
+match = "api_key"
+rationale = """
+The conventional vendor prefixes. Matched before the generic opaque-token rule \
+below, because a value that is both should be reported as the more specific \
+thing an operator can act on.\
+"""
+
+  [[rejected.planted]]
+  attribute = "log.message"
+  value_shape = "api_key"
+
+[[rejected]]
+name = "opaque-session-tokens"
+kind = "value_shape"
+match = "long_opaque_token"
+rationale = """
+A long run of token-alphabet characters with no internal structure. The \
+broadest rule here and deliberately last among the credential shapes, so a \
+value it catches is one the more specific rules did not recognise.\
+"""
+
+  [[rejected.planted]]
+  attribute = "log.message"
+  value_shape = "session_id"
+
+[[rejected]]
+name = "cookie-shaped-values"
+kind = "value_shape"
+match = "cookie_pair"
+rationale = """
+A name=value pair with attributes after it is a cookie whatever field carried \
+it, and cookies reach logs through request loggers that stringify a whole \
+header map.\
+"""
+
+  [[rejected.planted]]
+  attribute = "log.message"
+  value_shape = "cookie"
+
+[[rejected]]
+name = "query-shaped-values"
+kind = "value_shape"
+match = "query_string"
+rationale = """
+A query string pasted into a message carries exactly what the `url.query` rule \
+refuses, and arrives there because somebody logged a whole request line.\
+"""
+
+  [[rejected.planted]]
+  attribute = "log.message"
+  value_shape = "query_string"
+
+[[rejected]]
+name = "structured-documents"
+kind = "value_shape"
+match = "json_document"
+rationale = """
+A serialised object in a log attribute is a body under another name. Refusing \
+it keeps the boundary's promise honest: the field rules above would otherwise \
+be one rename away from being bypassed.\
+"""
+
+  [[rejected.planted]]
+  attribute = "log.message"
+  value_shape = "json_body"
+
+# ── The positive control for the negative suite ─────────────────────────────
+#
+# A classifier that refuses everything satisfies every planted probe above and
+# nothing about its refusals says so. These records MUST be accepted, checked
+# in the same pass, and the first draft of this document failed here: a UUID
+# request id matched the opaque-token heuristic and a perfectly ordinary log
+# line was refused. A negative suite with no positive control would have
+# shipped that.
+
+[[accepted_control]]
+name = "ordinary-request-log"
+signal = "logs"
+
+  [[accepted_control.attributes]]
+  name = "client.address"
+  value_shape = "loopback_address"
+
+  [[accepted_control.attributes]]
+  name = "network.peer.address"
+  value_shape = "loopback_address"
+
+  [[accepted_control.attributes]]
+  name = "request.id"
+  value_shape = "uuid"
+
+  [[accepted_control.attributes]]
+  name = "correlation.id"
+  value_shape = "uuid"
+
+  [[accepted_control.attributes]]
+  name = "audit.event.id"
+  value_shape = "uuid"
+
+  [[accepted_control.attributes]]
+  name = "log.level"
+  value_shape = "log_level"
+
+[[accepted_control]]
+name = "minimal-record"
+signal = "logs"
+
+  [[accepted_control.attributes]]
+  name = "client.address"
+  value_shape = "loopback_address"
+
+# ── Streams: arrival, integrity and lag are three separate facts ────────────
+
+[[streams]]
+signal = "logs"
+arrival_counter = "loki_distributor_lines_received_total"
+integrity_counter = "loki_discarded_samples_total"
+integrity_window = "15m"
+silence_budget = "15m"
+retention_class = "telemetry-logs"
+rationale = """
+Arrival and integrity are different series on purpose. A discard counter that \
+is not moving describes a healthy pipeline and a stopped one identically, so \
+silence is detected on arrivals and only on arrivals.\
+"""
+
+  # Declared unmeasured rather than pointed at a metric nothing emits. Loki
+  # exposes no ingestion-lag gauge, and the honest measurement is a delivery
+  # canary whose line is stamped at send and compared at read — which needs
+  # something that can inject into the fleet and read back, and that is the
+  # promotion facility (ADR-0010). Naming a plausible metric here would have
+  # rendered an alert that can never fire, and a rule that can never fire reads
+  # on every dashboard exactly like one that is quietly passing.
+  [streams.lag_unmeasured]
+  rationale = """
+Loki publishes no ingestion-lag gauge, and the measurement that would be \
+truthful is a stamped delivery canary compared at read. Declaring the gap is \
+worse news and better evidence than an expression over a series nothing emits.\
+"""
+  monitored_by = "delivery-canary lane (ADR-0010 facility)"
+
+[[streams]]
+signal = "metrics"
+arrival_counter = "prometheus_tsdb_head_samples_appended_total"
+integrity_counter = "prometheus_target_scrapes_sample_duplicate_timestamp_total"
+integrity_window = "15m"
+lag_expr = "max by (host_id) (prometheus_remote_storage_highest_timestamp_in_seconds) - max by (host_id) (prometheus_remote_storage_queue_highest_sent_timestamp_seconds)"
+lag_budget = "5m"
+silence_budget = "10m"
+retention_class = "telemetry-metrics"
+rationale = """
+The lag is the shipper's own view of how far its send queue trails the samples \
+it has collected, which is the one measurement that notices a queue draining \
+slower than it fills before the queue overflows and the drop counter finally \
+moves.\
+"""
+
+# ── Deadman signals ─────────────────────────────────────────────────────────
+#
+# Two, and both carry a planted condition that neither has been watched to
+# satisfy. `unproved_declared` is a two-directional ratchet: it fails when a
+# new unproved deadman arrives uncounted, and when one is proved without the
+# number being lowered, so the figure is always edited deliberately.
+#
+# The limit is stated rather than left to be discovered. Neither of these can
+# detect the evaluator being DEAD, because the evaluator is what evaluates
+# them. That case needs a watcher outside this host, which does not exist; it
+# is recorded in `docs/CONTROL_EXCEPTIONS.md` rather than papered over with a
+# heartbeat rule that would page continuously and be silenced within a week.
+
+[deadman]
+unproved_declared = 2
+
+  [[deadman.signals]]
+  name = "notification-path-silent"
+  expr = "(increase(alertmanager_alerts_received_total[30m]) > 0) unless (increase(alertmanager_notifications_total[30m]) > 0)"
+  for = "30m"
+  summary = """
+Alerts reached Alertmanager and nothing was notified. Delivery failing is \
+indistinguishable from a quiet fleet on every dashboard there is, and this is \
+the only rule that separates them.\
+"""
+
+    [deadman.signals.sensitivity]
+    planted_condition = """
+Point the receiver's credential file at an unreadable path on a disposable \
+host, fire a canary alert, and confirm this signal fires within its hold. The \
+control is the same pass with the credential restored, which must NOT fire.\
+"""
+    procedure_ref = "docs/runbooks/README.md"
+    last_proved = "never"
+
+  [[deadman.signals]]
+  name = "evaluator-self-scrape-missing"
+  expr = "absent_over_time(up[10m])"
+  for = "10m"
+  summary = """
+The evaluator has stopped scraping itself, so every rule written over its own \
+series is now evaluating against nothing and reporting no failures.\
+"""
+
+    [deadman.signals.sensitivity]
+    planted_condition = """
+Remove the self-scrape job on a disposable host and confirm this fires within \
+its hold; then restore it as the positive control. It does NOT detect the \
+evaluator being dead — nothing evaluated by the evaluator can — and that gap \
+is the unmonitored region recorded in docs/CONTROL_EXCEPTIONS.md.\
+"""
+    procedure_ref = "docs/runbooks/README.md"
+    last_proved = "never"
+
+# ── The audit projection ────────────────────────────────────────────────────
+#
+# Declared before it exists, deliberately. Retention, rebuild and non-authority
+# are the decisions that get argued about rather than declared once a thing is
+# running and somebody is depending on it.
+
+[projection]
+name = "fleet-audit-search"
+status = "planned"
+authoritative = false
+derived_from = "application-audit-rows"
+lag_expr = "time() - max(dotmac_audit_projection_last_event_timestamp_seconds)"
+lag_budget = "15m"
+source_retention = "8760h"
+retention_class = "audit-projection"
+non_authority_notice = """
+This projection is NOT authoritative and lag does not make it less so. The \
+evidence is the audit row written in the same transaction as the decision, in \
+the application's own database (application-audit-rows); what is behind here \
+is fleet SEARCH, and nothing about what actually happened has changed. Do not \
+respond by looking for a second source of truth — there is one source, and it \
+is not this.\
+"""
+
+  [projection.rebuild]
+  procedure_ref = "docs/runbooks/README.md"
+  compare = "row_digest"
+  last_rebuilt = "never"
+  verdict = "UNMEASURED"
+
+# ── Retention and access ────────────────────────────────────────────────────
+#
+# Telemetry and an audit projection answer to opposite constraints. Telemetry
+# is kept while it is operationally useful and may be shortened freely. The
+# projection's retention is bounded from ABOVE by its source's, because a
+# projection retained longer than the rows it derives from becomes, on the day
+# the source ages one out, the last copy of that row — and a last copy is
+# authoritative whatever this document says.
+
+[[retention]]
+name = "telemetry-logs"
+kind = "telemetry"
+duration = "720h"
+access = ["platform-oncall", "platform-operations"]
+last_copy = false
+rationale = """
+Thirty days, matching the log store's own configured retention in \
+inventory/bundle.toml — the gate compares the two, because two documents \
+describing one store's retention is one of them being wrong and the store \
+enforces whichever is rendered.\
+"""
+
+[[retention]]
+name = "telemetry-metrics"
+kind = "telemetry"
+duration = "90d"
+access = ["platform-oncall", "platform-operations"]
+last_copy = false
+rationale = """
+Ninety days, matching the evaluator's own `--storage.tsdb.retention.time` \
+knob. Longer than logs because a capacity trend is read over quarters while a \
+log line is read during an incident and then never again.\
+"""
+
+[[retention]]
+name = "audit-projection"
+kind = "audit_projection"
+duration = "2160h"
+access = ["platform-operations"]
+last_copy = false
+rationale = """
+Ninety days against a source kept a year, so the projection can never be the \
+last surviving copy of an audit row. Access is narrower than telemetry's \
+because the projection carries decision records rather than observations, and \
+the population that needs to search them during an incident is smaller than \
+the population that needs to read a log.\
+"""

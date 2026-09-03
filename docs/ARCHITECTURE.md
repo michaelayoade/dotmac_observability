@@ -74,6 +74,7 @@ The typed desired state is assembled from a fixed set of documents, located by
 | Path | Contract | Becomes |
 | --- | --- | --- |
 | `inventory/control-plane.toml` | `contracts/control-plane.schema.json` | `model.ControlPlane` |
+| `inventory/ingestion.toml` | `contracts/telemetry-ingestion.schema.json` | `model.Ingestion` |
 | `inventory/targets/*.toml` | `contracts/target.schema.json`, `kind = "targets"` | `model.TargetSet` |
 | `inventory/federations/*.toml` | `contracts/target.schema.json`, `kind = "federation"` | `model.Federation` |
 | `routing/receivers.toml` | `contracts/routing.schema.json`, `kind = "receivers"` | `model.Receiver` |
@@ -158,6 +159,16 @@ claimed the same job name, or that an email receiver was declared while
 | `CREDENTIAL-REF-SHARED` | Two integrations citing one credential, which cannot then be revoked for one of them |
 | `METRICS-PATH-UNEXPLAINED` | A non-default `metrics_path` with no `path_rationale` |
 | `LISTEN-NOT-LOOPBACK` | An evaluator bound to something other than a loopback address |
+| `ATTRIBUTE-UNBOUNDED-LABEL` | An unbounded attribute promoted to a stream label |
+| `REJECTION-UNPROVEN` | A rejection rule that no longer refuses its own planted material |
+| `CONTROL-REFUSED` | A record that must be accepted, refused — the positive control |
+| `STREAM-COUNTERS-CONFLATED` | Arrival and integrity read off one counter |
+| `STREAM-LAG-UNDECLARED` | A stream that measures no lag and does not say why |
+| `DEADMAN-UNPROVED-COUNT` | The unproved-deadman ratchet disagrees with the signals |
+| `DEADMAN-NOT-META` | A product's alert expression wearing a deadman's name |
+| `PROJECTION-OUTLIVES-SOURCE` | A projection kept longer than the rows it derives from |
+| `REBUILD-OVERCLAIMED` | A comparison that never ran, recorded as agreement |
+| `RETENTION-DISAGREES-WITH-STORE` | Two documents describing one store's retention |
 
 Findings are returned, never raised one at a time. A gate that stops at the
 first problem makes an operator re-run it once per mistake; `cli._report`
@@ -219,7 +230,14 @@ It returns the whole tree in one fixed-order call:
 
 ```
 prometheus/prometheus.yml
+prometheus/rules/00-control-plane-meta.yml
+prometheus/rules/01-ingestion-meta.yml
 alertmanager/alertmanager.yml
+loki/loki.yml
+promtail/promtail.yml
+grafana/provisioning/datasources/datasources.yml
+grafana/provisioning/dashboards/dashboards.yml
+host/…
 docker-compose.yml
 ```
 
@@ -571,6 +589,122 @@ which is the state `INTEGRITY-BASELINE-ZERO` refuses, and its first release has
 no rollback target. Applying the production conjunction to a rehearsal would
 make the rehearsal permanently unpassable, which teaches a lane to skip it.
 
+## The ingestion boundary
+
+ADR-0011. Between the one fleet agent (ADR-0009) and the stores this repository
+configures (ADR-0008) there was no contract: what arrived was whatever the
+sender emitted, and what was accepted was whatever the store did not reject.
+`inventory/ingestion.toml` is that contract, and it is a required input — a
+control plane cannot be loaded without declaring what it accepts.
+
+The kernel decides what to EMIT and this decides what is ACCEPTED. Two
+documents in two repositories, deliberately: a wire contract only one end can
+read is a convention, and a convention is what a framework default change
+overrides silently.
+
+### Three facts one counter cannot separate
+
+Each stream declares a separate `arrival_counter` and `integrity_counter`, and
+`render._ingestion_rules` emits four rules from them.
+
+| Rendered alert | Says | Written as |
+| --- | --- | --- |
+| `<Signal>ShipperSilent` | nothing has arrived for the declared budget | `absent_over_time(arrival[budget])` |
+| `<Signal>IntegrityUnmeasured` | the drop counter has never been observed | `absent(integrity)` |
+| `<Signal>IngestionDropping` | records arrived and were not stored | `increase(integrity[window]) > 0` |
+| `<Signal>IngestionLag` | the store is behind by more than the budget | the declared expression, against the budget in seconds |
+
+Silence is an ABSENCE and never a rate threshold, and the difference is not
+stylistic. When a shipper stops, its series stops existing; `rate(x[5m]) == 0`
+over a series that does not exist matches no rows and produces no alert at all.
+Absence is the only query shape that survives the thing it watches going away,
+which is precisely why a metrics pipeline is worst at noticing this.
+
+`UNMEASURED` is a verdict rather than a missing value, in
+`ingestion.integrity_state` and in its own rendered alert. A counter never
+observed, a baseline never recorded, and a counter that went backwards under a
+reset are all unmeasured — not stable. The obvious alternative, `value or 0`,
+agrees with the correct reading on every input where something is actually
+being measured, which is why nobody notices it collapsing a dead pipeline into
+a clean one; `tests/mutations/test_ingestion_gates_bite.py` writes that version
+out and shows it reporting the fault as healthy.
+
+A stream whose lag nothing measures renders NO lag alert and declares
+`lag_unmeasured` with a rationale and an owner. Naming a plausible metric
+instead renders a rule that can never fire, which reads on every dashboard
+exactly like one quietly passing — `AGENTS.md` rule 8 arrived at from the other
+direction. The same reasoning makes a `planned` projection render no lag alert.
+
+### Rejection is proved by rule, and the negative suite has a positive control
+
+Every rejection rule carries planted material, and the LOADER runs the
+classifier over it as a gate — so a rule that has stopped biting fails
+`make check` in the run that broke it. The gate compares the rule NAME rather
+than the outcome: a planted probe usually carries a field the contract does not
+accept anyway, so a classifier checking the vocabulary first would refuse every
+probe for the wrong reason while every rule sat inert.
+
+`accepted_control` records must be ACCEPTED in the same pass. A classifier that
+refuses everything satisfies every rejection probe ever written and looks, from
+the negative suite alone, like a boundary working perfectly. It earned its
+place on the first run: an ordinary request log line was refused, because a
+UUID is thirty-six characters of hex and dashes and matches an opaque-token
+heuristic exactly. The repair is that a value-shape rule does not apply to an
+accepted attribute whose declared validation is a strict structural shape and
+whose value satisfies it; name and prefix rules are never exempted, because a
+forbidden field is forbidden however tidy its contents are.
+
+Planted material is BUILT, not committed. Nothing in the contract or the
+classifier is a string that looks like a credential.
+
+**What is enforced and what is not.** The policy, its gates and its proofs run
+in `make check`. Nothing applies the classifier to bytes on the wire: no
+ingestion-edge stage is deployed, and that is rule 33's unmonitored half in
+`docs/CONTROL_EXCEPTIONS.md`.
+
+### The audit projection
+
+Audit is durable evidence owned by each application's own database, written in
+the same transaction as the decision it records. Logs, metrics and traces are
+operational observations. A central projection exists so the fleet can be
+searched and is never the evidence: `authoritative` is a `const false`, so no
+document can express the other value.
+
+`ingestion.compare_rebuild` is the rebuild-and-compare path, over row digests
+rather than counts — two sets of equal size agree on every count anybody would
+think to check. Two empty sides, or a side that could not be read, report
+`UNMEASURED` rather than agreement; a comparison that cannot fail is not a
+comparison, the same refusal the live-observation contract makes about an empty
+tree read-back.
+
+**Which half exists, plainly.** The comparison is complete and exercised. Its
+two readers are not: the source side means reading audit rows out of each
+application's own database, which is that application's boundary; the
+projection side means reading back a projection that is not deployed. So the
+contract ships `status = "planned"` and `verdict = "UNMEASURED"`, and neither
+can be quietly improved — `REBUILD-OVERCLAIMED` refuses a verdict without a
+date and `REBUILD-UNDERCLAIMED` refuses a date without a verdict.
+
+### Retention and access
+
+Telemetry and an audit projection answer to opposite constraints. Telemetry is
+kept while it is operationally useful and may be shortened freely. The
+projection's retention is bounded from ABOVE by its source's, because a
+projection retained longer than the rows it derives from becomes, on the day
+the source ages one out, the last copy of that row.
+
+| class | kind | duration | may read | may be the last copy |
+| --- | --- | --- | --- | --- |
+| `telemetry-logs` | telemetry | 720h, compared against the log store's own configured retention | platform on-call, platform operations | no |
+| `telemetry-metrics` | telemetry | 90d, matching the evaluator's retention knob | platform on-call, platform operations | no |
+| `audit-projection` | audit projection | 2160h against a source kept 8760h | platform operations | no, and the contract refuses `true` |
+
+`RETENTION-DISAGREES-WITH-STORE` compares the log class against
+`inventory/bundle.toml`, because two documents describing one store's retention
+is one of them being wrong and the store enforces whichever was rendered. The
+label budget is rendered into Loki's own `max_label_names_per_series` for the
+same reason.
+
 ## Three independently comparable artifacts
 
 Drift is detectable only because three descriptions of the same control plane
@@ -717,3 +851,4 @@ review discipline.
 | `receipt.py` | Build a promotion receipt from what was observed, and refuse one that claims more than it proved | shipped |
 | `drift.py` | Three-way comparison of desired state, live state and the last verified receipt, grouped by which pair disagrees | shipped |
 | `promote.py` | The promotion state machine, and the `PromotionFacility` Protocol the Foundation must implement. Declares every host effect and performs none | shipped |
+| `ingestion.py` | The ingestion boundary's decision authority: what is accepted, which rule refused a record, whether a counter reading is UNMEASURED, and the rebuild comparison. Performs no I/O | shipped |

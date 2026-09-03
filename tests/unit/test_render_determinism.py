@@ -17,6 +17,7 @@ from dotmac_observability.render import (
     EXPOSURE_IPV6,
     GRAFANA_DASHBOARDS,
     GRAFANA_DATASOURCES,
+    INGESTION_RULES,
     LOGROTATE_CONFIG,
     LOKI_CONFIG,
     META_RULES,
@@ -55,6 +56,7 @@ def test_every_declared_file_is_produced_exactly_once():
     assert paths == [
         PROMETHEUS_CONFIG,
         META_RULES,
+        INGESTION_RULES,
         ALERTMANAGER_CONFIG,
         LOKI_CONFIG,
         PROMTAIL_CONFIG,
