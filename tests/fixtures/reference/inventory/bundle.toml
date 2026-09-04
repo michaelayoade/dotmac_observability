@@ -71,6 +71,13 @@ ingestion_burst_mb = 24
   service = "loki"
   default = false
 
+  [[grafana.datasources]]
+  name = "status-metrics"
+  uid = "status-metrics"
+  kind = "prometheus"
+  target_id = "status-page"
+  default = false
+
   [[grafana.dashboard_providers]]
   name = "control-plane"
   folder = "Control plane"

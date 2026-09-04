@@ -251,12 +251,33 @@
             "required": [
               "name",
               "kind",
-              "service",
               "default"
             ],
+            "if": {
+              "required": [
+                "service"
+              ]
+            },
+            "then": {
+              "not": {
+                "required": [
+                  "target_id"
+                ]
+              }
+            },
+            "else": {
+              "required": [
+                "target_id",
+                "uid"
+              ]
+            },
             "properties": {
               "name": {
                 "$ref": "#/$defs/slug"
+              },
+              "uid": {
+                "$ref": "#/$defs/slug",
+                "description": "A stable Grafana datasource identity for dashboards and API callers. Optional for a local service datasource and required for a target-bound datasource so provisioning updates rather than duplicates an existing external datasource."
               },
               "kind": {
                 "enum": [
@@ -267,7 +288,11 @@
               },
               "service": {
                 "$ref": "#/$defs/slug",
-                "description": "A roster entry of kind `service`. The URL is derived from that entry's declared listen port on the compose network, so a datasource can never point somewhere the bundle does not also deploy."
+                "description": "A roster entry of kind `service`. Exactly one of `service` and `target_id` is required. The URL is derived from that entry's declared listen port on the compose network."
+              },
+              "target_id": {
+                "$ref": "#/$defs/slug",
+                "description": "A logical target declared by exactly one public scrape job. Exactly one of `service` and `target_id` is required. Its scheme comes from that job and its single endpoint comes from the reviewed publication or private inventory, so this public bundle never carries or invents a resolved address."
               },
               "default": {
                 "type": "boolean"

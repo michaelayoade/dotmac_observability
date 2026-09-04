@@ -58,8 +58,10 @@ __all__ = [
     "COMPOSE_FILE",
     "EXPOSURE_IPV4",
     "EXPOSURE_IPV6",
+    "GRAFANA_ALERTING",
     "GRAFANA_DASHBOARDS",
     "GRAFANA_DATASOURCES",
+    "GRAFANA_PLUGINS",
     "INGESTION_RULES",
     "LOGROTATE_CONFIG",
     "LOKI_CONFIG",
@@ -98,6 +100,8 @@ LOKI_CONFIG = "loki/loki.yml"
 PROMTAIL_CONFIG = "promtail/promtail.yml"
 GRAFANA_DATASOURCES = "grafana/provisioning/datasources/datasources.yml"
 GRAFANA_DASHBOARDS = "grafana/provisioning/dashboards/dashboards.yml"
+GRAFANA_PLUGINS = "grafana/provisioning/plugins/plugins.yml"
+GRAFANA_ALERTING = "grafana/provisioning/alerting/alerting.yml"
 # Host-level artefacts. Under `host/` rather than at the root so that the
 # release directory's shape says which files are mounted into a container and
 # which are installed onto the machine — a distinction the operator has to get
@@ -843,23 +847,28 @@ def _promtail(state: DesiredState) -> str:
     return emit(document, header=_HEADER)
 
 
-def _grafana_datasources(state: DesiredState) -> str:
+def _grafana_datasources(state: DesiredState, resolution: Resolution) -> str:
     ports = {entry.name: entry.port for entry in state.bundle.roster if entry.kind == "service"}
     sources: list[YamlValue] = []
     for source in state.bundle.grafana.datasources:
-        sources.append(
-            {
-                "name": source.name,
-                "type": source.kind,
-                "access": "proxy",
-                # Derived from the roster, never typed in. A datasource URL an
-                # author writes by hand is the one artefact in this tree that
-                # can point somewhere the bundle does not deploy.
-                "url": f"http://{source.service}:{ports[source.service]}",
-                "isDefault": source.default,
-                "editable": False,
-            }
-        )
+        if source.service is not None:
+            url = f"http://{source.service}:{ports[source.service]}"
+        else:
+            url = resolution.datasources[source.name].url
+        entry: dict[str, YamlValue] = {
+            "name": source.name,
+            "type": source.kind,
+            "access": "proxy",
+            # Derived from the local roster or from the already-proved private
+            # target resolution, never typed in. Both paths have one owner and
+            # neither lets this public bundle disclose or invent an endpoint.
+            "url": url,
+            "isDefault": source.default,
+            "editable": False,
+        }
+        if source.uid is not None:
+            entry["uid"] = source.uid
+        sources.append(entry)
     return emit({"apiVersion": 1, "datasources": sources}, header=_HEADER)
 
 
@@ -884,6 +893,16 @@ def _grafana_dashboards(state: DesiredState) -> str:
             }
         )
     return emit({"apiVersion": 1, "providers": providers}, header=_HEADER)
+
+
+def _grafana_plugins() -> str:
+    """Materialize Grafana's optional plugin provisioning directory cleanly."""
+    return emit({"apiVersion": 1, "apps": []}, header=_HEADER)
+
+
+def _grafana_alerting() -> str:
+    """Materialize Grafana's optional alerting provisioning directory cleanly."""
+    return emit({"apiVersion": 1}, header=_HEADER)
 
 
 def _timezone(state: DesiredState) -> str:
@@ -1132,8 +1151,10 @@ def render_control_plane(state: DesiredState, resolution: Resolution) -> Rendere
         (ALERTMANAGER_CONFIG, _alertmanager(state, resolution)),
         (LOKI_CONFIG, _loki(state)),
         (PROMTAIL_CONFIG, _promtail(state)),
-        (GRAFANA_DATASOURCES, _grafana_datasources(state)),
+        (GRAFANA_DATASOURCES, _grafana_datasources(state, resolution)),
         (GRAFANA_DASHBOARDS, _grafana_dashboards(state)),
+        (GRAFANA_PLUGINS, _grafana_plugins()),
+        (GRAFANA_ALERTING, _grafana_alerting()),
         (RSYSLOG_CONFIG, _rsyslog(state)),
         (LOGROTATE_CONFIG, _logrotate(state)),
         (TMPFILES_CONFIG, _tmpfiles(state)),

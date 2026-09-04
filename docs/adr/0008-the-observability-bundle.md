@@ -63,7 +63,7 @@ a renderer that emits only the evaluators has no seam to check.
 provisioning, the Observer-owned syslog and rotation contract, the declared
 infrastructure timezone, the roster of owned resources, the retired-product
 list, the exposure policy and the verification gates. `render_control_plane`
-emits **fourteen** files in a fixed order, in one call, and `tree_digest`
+emits **seventeen** files in a fixed order, in one call, and `tree_digest`
 covers all of them.
 
 It is part of the same `DesiredState` rather than a second one because a
@@ -79,9 +79,12 @@ URL. Neither is written here.
 
 A source is a **named, typed set** — `management`, `tunnel_interface` — and what
 it resolves to is a `source_set_binding` in the private inventory. A datasource
-URL is **derived from the roster**, so it cannot point somewhere the bundle does
-not also deploy. Resolution checks source sets in both directions and refuses a
-kind mismatch, which is a disagreement only the join can see: a set declared
+URL is derived either from a local rostered service or from a logical
+`target_id` already owned by one public scrape job and resolved through the
+private inventory. The datasource never carries an endpoint, and resolution
+refuses an undeclared, authenticated, ambiguous, missing or multi-endpoint
+target rather than choosing one by order. Resolution also checks source sets in
+both directions and refuses a kind mismatch, which is a disagreement only the join can see: a set declared
 `tunnel_interface` and bound to prefixes renders a source match where an
 interface match was intended, and validates cleanly on both sides.
 
@@ -217,6 +220,21 @@ every surface the bundle produces rather than the subset somebody thought to
 search. And it cannot read nothing: a sweep over a tree it failed to load
 reports "no references" identically to a sweep over a clean one, whereas an
 empty rendered tree would have failed the render first.
+
+### 7. Amendment — 2026-09-04: remote datasources reuse target resolution
+
+The live Selfcare dashboard datasource had an address typed directly into
+Grafana and drifted to another product's VictoriaMetrics host. A remote
+datasource now names the same logical `target_id` as its Prometheus scrape.
+That scrape owns the public scheme, private inventory owns the single resolved
+endpoint, and the datasource owns only its Grafana name and stable UID. This is
+one endpoint decision with two consumers, not a second topology map.
+
+Grafana also logs startup errors when the mounted provisioning root omits its
+optional `plugins/` and `alerting/` directories. The rendered tree now emits a
+valid empty provisioning document in each directory. A Grafana 13.0.1 image
+probe accepted both documents without a provisioning error; placeholder files
+were rejected because alerting warns on unsupported suffixes.
 
 ## Consequences
 
