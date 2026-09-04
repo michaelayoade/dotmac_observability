@@ -144,8 +144,9 @@ review discipline, not a guard, and it is a defect to describe it as enforced.
 
 17. **Branch before committing; never commit to `main`.** Merge only on green.
     Only an explicitly authorized promotion touches a live host, and the target
-    host must be named by a human in the authorizing request — never inferred
-    from an inventory row.
+    may be named directly or resolved from the authoritative fleet inventory
+    when the authorizing request permits that resolution. Verify the reached
+    host's identity against the inventory before any mutation.
     — branch protection on `main`: linear history required, force-push and
       deletion refused, every change through a pull request
 

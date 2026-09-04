@@ -432,14 +432,14 @@ that has not yet finished getting the property it describes.
 
 ## Promotion authority
 
-A promotion targets a host a human named in the authorizing request
-(`AGENTS.md` rule 17). It is never inferred from an inventory row, and this is
-worth stating precisely because a resolvable target now exists in the private
-inventory: `host.identity` and `host.ssh_alias` live there, under the logical
-`host.target_id` the public control-plane document declares. Those fields exist
-so the receipt can record which host was promoted to and so an operator can
-check that the named target and the declared one agree. They are not an
-instruction to connect anywhere.
+A promotion targets a host covered by the authorizing request (`AGENTS.md`
+rule 17). The request may name the host directly or explicitly permit resolving
+it from the authoritative fleet inventory. In either case, the operator must
+verify the reached host's identity against the inventory before any mutation.
+The private inventory's `host.identity` and `host.ssh_alias`, under the logical
+`host.target_id` declared by the public control-plane document, provide that
+resolution and verification evidence; their presence alone does not authorize
+a connection or promotion.
 
 The binding that makes those four things one decision — release, inventory,
 render and images — is real, and it belongs to `dotmac-deployment-control`,
