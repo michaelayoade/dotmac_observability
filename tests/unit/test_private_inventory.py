@@ -83,6 +83,7 @@ def test_the_reference_inventory_resolves_cleanly():
     assert resolution.inventory.document == "reference-private-inventory"
     assert resolution.jobs["dotmac-erp-app"].credential is not None
     assert resolution.jobs["dotmac-erp-worker"].credential is None
+    assert resolution.datasources["status-metrics"].url == "https://status.dotmac.invalid:443"
 
 
 def test_a_resolution_is_read_only():
@@ -90,6 +91,15 @@ def test_a_resolution_is_read_only():
     # be mutated, "the resolution" would depend on the order the emitters ran.
     with pytest.raises(TypeError):
         resolved(REFERENCE).jobs["dotmac-erp-app"] = None  # type: ignore[index]
+
+
+def test_a_datasource_target_must_resolve_to_exactly_one_endpoint(reference_copy):
+    edit(
+        reference_copy / "inventory" / "bundle.toml",
+        'target_id = "status-page"',
+        'target_id = "erp-workers"',
+    )
+    assert "DATASOURCE-TARGET-CARDINALITY" in _codes(reference_copy)
 
 
 def test_a_target_with_no_binding_is_refused(reference_copy):

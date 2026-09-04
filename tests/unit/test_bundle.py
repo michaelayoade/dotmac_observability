@@ -271,10 +271,30 @@ def test_a_placeholder_owner_is_refused(reference_copy: Path):
     assert "ROSTER-UNOWNED" in _codes(reference_copy)
 
 
-def test_a_datasource_url_is_derived_from_the_roster_rather_than_written_by_hand():
+def test_datasource_urls_are_derived_from_their_declared_owners():
     datasources = _tree()["grafana/provisioning/datasources/datasources.yml"]
     assert "http://prometheus:9090" in datasources
     assert "http://loki:3100" in datasources
+    assert "https://status.dotmac.invalid:443" in datasources
+    assert "uid: status-metrics" in datasources
+
+
+def test_an_undeclared_datasource_target_is_refused(reference_copy: Path):
+    edit(
+        reference_copy / "inventory" / "bundle.toml",
+        'target_id = "status-page"',
+        'target_id = "missing-target"',
+    )
+    assert "DATASOURCE-TARGET-UNDECLARED" in _codes(reference_copy)
+
+
+def test_an_authenticated_datasource_target_is_refused(reference_copy: Path):
+    edit(
+        reference_copy / "inventory" / "bundle.toml",
+        'target_id = "status-page"',
+        'target_id = "erp-production"',
+    )
+    assert "DATASOURCE-TARGET-AUTHENTICATED" in _codes(reference_copy)
 
 
 def test_two_default_datasources_are_refused(reference_copy: Path):
@@ -336,7 +356,7 @@ def test_the_retirement_gate_reads_a_tree_that_is_not_empty():
     tree would have failed the render first.
     """
     tree = render_control_plane(load(REFERENCE, contracts=CONTRACTS), resolved(REFERENCE))
-    assert len(tree) == 15
+    assert len(tree) == 17
     assert all(text.strip() for _, text in tree)
     assert sum(len(text) for _, text in tree) > 5000
 

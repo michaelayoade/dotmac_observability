@@ -1027,6 +1027,63 @@ federation scrape use. Two addresses for one logical upstream, with nothing
 comparing them. Not investigated here; recorded so it is not discovered again
 from scratch.
 
+### 16.11 Grafana datasource repair and Loki query-path boundary — 2026-09-04
+
+The VictoriaMetrics mismatch above is repaired on the live Observer host. The
+provisioned `DotMac-Sub-VictoriaMetrics` datasource now resolves to the same
+private-inventory target as the `dotmac-sub-victoriametrics` scrape instead of
+the unrelated Academy host. After a Grafana-only restart, Grafana's datasource
+health endpoint successfully queried the Prometheus-compatible API. The
+pre-change datasource file and a consistent Grafana SQLite backup are retained
+in the host's restricted operations backup directory.
+
+The reported Loki failure was a diagnostic API-boundary mismatch, not a
+production caller. Loki health and label queries succeeded, and stored Grafana
+queries use lowercase `backward`. Requests authenticated as
+`sa-1-logs-read` came only from a non-Fleet source inside the documented
+workstation/NOC range during the compatibility probes. They
+mixed legacy or duplicated datasource-proxy paths with Grafana 13's
+`/api/ds/query` plugin path and sent uppercase `BACKWARD`; the plugin rejected
+that value before contacting Loki. The native plugin request succeeds with
+lowercase `backward`, and direct Loki accepts the uppercase wire value. No bad
+request recurred after the probes. A global server-side rewrite would hide a
+malformed caller and was not introduced.
+
+The durable bundle now declares that datasource by its stable Grafana UID and
+the existing logical `dotmac-sub-victoriametrics` target. Its URL is derived
+from the target's public scheme and private single-endpoint binding; the
+resolved address does not enter this public repository. The renderer also
+materializes valid empty plugin and alerting provisioning documents, closing
+the missing-directory errors observed after the Grafana restart.
+
+### 16.12 Fleet coverage is declared but not deployed — 2026-09-04
+
+The authoritative fleet registry lists **25 active hosts**, 24 marked
+production. Observer currently has 18 healthy Prometheus targets, but those are
+service/exporter targets rather than one host record per fleet member. Joining
+the target instance labels and Loki `host` labels back to fleet identity shows
+direct central evidence for only **7 active hosts**: `academy`, `db-primary`,
+`erp`, `observe`, `s3`, `seabone`, and `sub-prod`. Only five of those appear in
+Loki's current host-label set; `db-primary` and `s3` have metrics without a
+central host log stream.
+
+No direct host-level Prometheus or Loki evidence exists for 17 active
+production hosts: `control-runner`, `idp-ha-1`, `idp-ha-2`, `idp-ha-3`,
+`idp-live`, `integrator-vendor-control`, `mail-dotmac`, `mail-nhia`,
+`nhia-moh-cloud`, `ns1`, `ns2`, `ns3`, `proxmox`, `son-erp`, `web-cache`,
+`workspace`, and `zabbix`. The non-production `test-server` is also absent.
+The healthy `identity-probe` is service-level evidence and does not prove host
+metrics or logs for any identity node. Loki still lists `academy-labs` and
+retired `crm`; retained labels are not active fleet coverage.
+
+This is deployment debt, not a missing decision. ADR-0009 already requires one
+Grafana Alloy agent per Linux VM, with a host-only or Docker profile and a
+no-overlap cutover from legacy writers. The profiles and architecture tests
+exist under `fleet/alloy/`; no per-host activation receipts exist. Start with
+`test-server` as the non-production canary, then a low-risk production cohort.
+DNS, mail, database and orchestration hosts remain later cohorts as ADR-0009
+requires.
+
 ## 17. The verdict is `rendered_guarded`, not `deployed_repaired` — 2026-08-30
 
 The four faults of §16 are closed **in the renderer**. Each is now

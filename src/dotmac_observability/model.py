@@ -85,6 +85,7 @@ __all__ = [
     "ReceiverBinding",
     "RejectionRule",
     "Resolution",
+    "ResolvedDatasource",
     "ResolvedEndpoint",
     "ResolvedReceiver",
     "ResourceField",
@@ -527,6 +528,13 @@ class ResolvedReceiver:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedDatasource:
+    """One Grafana datasource URL joined from public policy and private topology."""
+
+    url: str
+
+
+@dataclass(frozen=True, slots=True)
 class Resolution:
     """A desired state joined to one private inventory, with every lookup proved.
 
@@ -544,6 +552,7 @@ class Resolution:
 
     inventory: PrivateInventory
     jobs: Mapping[str, ResolvedEndpoint]
+    datasources: Mapping[str, ResolvedDatasource]
     federations: Mapping[str, ResolvedEndpoint]
     integrations: Mapping[str, ResolvedReceiver]
     source_sets: Mapping[str, SourceSetBinding]
@@ -617,8 +626,10 @@ class Promtail:
 @dataclass(frozen=True, slots=True)
 class GrafanaDatasource:
     name: str
+    uid: str | None
     kind: str
-    service: str
+    service: str | None
+    target_id: str | None
     default: bool
 
 

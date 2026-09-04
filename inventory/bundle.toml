@@ -113,6 +113,16 @@ ingestion_burst_mb = 24
   service = "loki"
   default = false
 
+  # One endpoint owner: the same logical target used by Prometheus. The
+  # resolved address remains in private inventory and the stable UID adopts
+  # the datasource the Selfcare dashboard already references.
+  [[grafana.datasources]]
+  name = "dotmac-sub-victoriametrics"
+  uid = "dotmac-sub-vm"
+  kind = "prometheus"
+  target_id = "dotmac-sub-victoriametrics"
+  default = false
+
   # DELIBERATE DELTA, and the largest one in this document. The host's
   # dashboards live in `grafana/data/grafana.db` — a SQLite file that no
   # release describes, no review has seen and no rollback can restore to a

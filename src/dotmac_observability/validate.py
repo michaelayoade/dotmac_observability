@@ -93,6 +93,7 @@ from .model import (
     ReceiverBinding,
     RejectionRule,
     Resolution,
+    ResolvedDatasource,
     ResolvedEndpoint,
     ResolvedReceiver,
     ResourceField,
@@ -533,8 +534,10 @@ def _bundle(document: Document) -> Bundle:
             datasources=tuple(
                 GrafanaDatasource(
                     name=str(row["name"]),
+                    uid=(str(row["uid"]) if "uid" in row else None),
                     kind=str(row["kind"]),
-                    service=str(row["service"]),
+                    service=(str(row["service"]) if "service" in row else None),
+                    target_id=(str(row["target_id"]) if "target_id" in row else None),
                     default=bool(row["default"]),
                 )
                 for row in _rows(grafana["datasources"])
@@ -1238,7 +1241,7 @@ def _bundle_findings(state: DesiredState) -> list[Finding]:
                 )
             )
 
-    # ── a datasource points at a service the bundle actually deploys ────────
+    # ── a datasource has one declared local or resolved owner ───────────────
     defaults = [source for source in bundle.grafana.datasources if source.default]
     if len(defaults) != 1:
         findings.append(
@@ -1250,24 +1253,63 @@ def _bundle_findings(state: DesiredState) -> list[Finding]:
             )
         )
     for source in bundle.grafana.datasources:
-        rostered = services.get(source.service)
-        if rostered is None:
+        if source.service is not None:
+            rostered = services.get(source.service)
+            if rostered is None:
+                findings.append(
+                    Finding(
+                        "DATASOURCE-UNROSTERED",
+                        f"inventory/bundle.toml#grafana/{source.name}",
+                        f"datasource points at service {source.service!r}, which the roster "
+                        "does not own; a datasource URL is derived from the rostered port, "
+                        "so this one could only be rendered by inventing an address",
+                    )
+                )
+            elif rostered.port is None:
+                findings.append(
+                    Finding(
+                        "DATASOURCE-NO-PORT",
+                        f"inventory/bundle.toml#roster/{source.service}",
+                        "a service a datasource names must declare the port it listens on "
+                        "inside the compose network",
+                    )
+                )
+            continue
+
+        matches = [
+            job
+            for target_set in state.targets
+            for job in target_set.jobs
+            if job.target_id == source.target_id
+        ]
+        if not matches:
             findings.append(
                 Finding(
-                    "DATASOURCE-UNROSTERED",
+                    "DATASOURCE-TARGET-UNDECLARED",
                     f"inventory/bundle.toml#grafana/{source.name}",
-                    f"datasource points at service {source.service!r}, which the roster does "
-                    "not own; a datasource URL is derived from the rostered port, so this one "
-                    "could only be rendered by inventing an address",
+                    f"datasource target_id {source.target_id!r} is not declared by a scrape "
+                    "job; the scrape contract owns the target's protocol and the private "
+                    "inventory owns its endpoint, so no third answer may be invented here",
                 )
             )
-        elif rostered.port is None:
+        elif len(matches) > 1:
             findings.append(
                 Finding(
-                    "DATASOURCE-NO-PORT",
-                    f"inventory/bundle.toml#roster/{source.service}",
-                    "a service a datasource names must declare the port it listens on inside "
-                    "the compose network",
+                    "DATASOURCE-TARGET-AMBIGUOUS",
+                    f"inventory/bundle.toml#grafana/{source.name}",
+                    f"datasource target_id {source.target_id!r} is declared by "
+                    f"{len(matches)} scrape jobs; one Grafana URL cannot choose between "
+                    "multiple public protocol owners",
+                )
+            )
+        elif matches[0].authenticated:
+            findings.append(
+                Finding(
+                    "DATASOURCE-TARGET-AUTHENTICATED",
+                    f"inventory/bundle.toml#grafana/{source.name}",
+                    f"datasource target_id {source.target_id!r} requires a scrape credential, "
+                    "but the Grafana datasource contract has no credential binding; silently "
+                    "dropping authentication would render a URL that can never work",
                 )
             )
 
@@ -2105,6 +2147,32 @@ def resolution_findings(state: DesiredState, inventory: PrivateInventory) -> tup
                     )
                 )
 
+    jobs_by_target = {job.target_id: job for target_set in state.targets for job in target_set.jobs}
+    for datasource in state.bundle.grafana.datasources:
+        if datasource.target_id is None:
+            continue
+        datasource_job = jobs_by_target.get(datasource.target_id)
+        if datasource_job is None:
+            # The public semantic gate reports the undeclared relationship.
+            # Resolution does not duplicate that finding.
+            continue
+        binding = targets.get(datasource_job.target_id)
+        endpoints = (
+            datasource_job.publication.endpoints
+            if datasource_job.publication is not None
+            else (binding.endpoints if binding is not None else ())
+        )
+        if len(endpoints) != 1:
+            findings.append(
+                Finding(
+                    "DATASOURCE-TARGET-CARDINALITY",
+                    f"inventory/bundle.toml#grafana/{datasource.name}",
+                    f"datasource target_id {datasource.target_id!r} resolves to "
+                    f"{len(endpoints)} endpoints; Grafana accepts one URL, so selecting one "
+                    "would turn inventory order into routing policy",
+                )
+            )
+
     for federation in state.federations:
         location = f"inventory/federations#{federation.name}"
         upstream = federations.get(federation.target_id)
@@ -2301,6 +2369,7 @@ def resolve(state: DesiredState, inventory: PrivateInventory) -> Resolution:
     receivers = {binding.credential_ref: binding for binding in inventory.receivers}
 
     jobs: dict[str, ResolvedEndpoint] = {}
+    jobs_by_target = {job.target_id: job for target_set in state.targets for job in target_set.jobs}
     for target_set in state.targets:
         for job in target_set.jobs:
             if job.publication is not None:
@@ -2312,6 +2381,18 @@ def resolve(state: DesiredState, inventory: PrivateInventory) -> Resolution:
                 jobs[job.job] = ResolvedEndpoint(
                     endpoints=binding.endpoints, credential=binding.credential
                 )
+
+    datasources: dict[str, ResolvedDatasource] = {}
+    for datasource in state.bundle.grafana.datasources:
+        if datasource.target_id is None:
+            continue
+        job = jobs_by_target[datasource.target_id]
+        endpoints = (
+            job.publication.endpoints
+            if job.publication is not None
+            else targets[job.target_id].endpoints
+        )
+        datasources[datasource.name] = ResolvedDatasource(url=f"{job.scheme}://{endpoints[0]}")
 
     resolved_federations = {
         federation.name: ResolvedEndpoint(
@@ -2332,6 +2413,7 @@ def resolve(state: DesiredState, inventory: PrivateInventory) -> Resolution:
     return Resolution(
         inventory=inventory,
         jobs=MappingProxyType(jobs),
+        datasources=MappingProxyType(datasources),
         federations=MappingProxyType(resolved_federations),
         integrations=MappingProxyType(integrations),
         source_sets=MappingProxyType(source_sets),
