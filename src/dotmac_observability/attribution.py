@@ -46,18 +46,13 @@ from typing import Final, NoReturn
 
 __all__ = [
     "ATTRIBUTION_SCHEMA_VERSION",
-    "ATTRIBUTION_SCHEMA_VERSION_V2",
     "CLASSIFIED_FIELDS",
-    "CLASSIFIED_FIELDS_BY_VERSION",
-    "CLASSIFIED_FIELDS_V2",
     "DECLARED_FAMILIES",
     "ENVELOPE_FIELDS",
-    "ENVELOPE_FIELDS_BY_VERSION",
-    "ENVELOPE_FIELDS_V2",
-    "ENVELOPE_VERSIONS",
     "NEVER_READ",
     "Custody",
     "FamilyScan",
+    "InterlockVerdict",
     "LeakRefusal",
     "RedactionVault",
     "Target",
@@ -76,15 +71,22 @@ __all__ = [
 ]
 
 ATTRIBUTION_SCHEMA_VERSION: Final = "observability-consumer-attribution-envelope.v1"
-ATTRIBUTION_SCHEMA_VERSION_V2: Final = "observability-consumer-attribution-envelope.v2"
 
-# The envelope versions this module can project into. A caller names one; there
-# is deliberately no "latest" alias, because a document whose shape depends on
-# when it was produced cannot be compared with one produced last month.
-ENVELOPE_VERSIONS: Final[tuple[str, ...]] = (
-    ATTRIBUTION_SCHEMA_VERSION,
-    ATTRIBUTION_SCHEMA_VERSION_V2,
-)
+# There is ONE envelope version and it stays v1. An envelope v2 briefly existed
+# here carrying a copy of the observation's `source_artifact_digest`, and it was
+# removed rather than superseded because no instance was ever produced, signed
+# or accepted -- nothing emits an envelope but `attribution-project`, no
+# workflow or Make target invokes it, and no document of that shape exists in
+# any ref.
+#
+# The reason it was wrong is worth keeping where the next person will look. The
+# envelope carries `observation_digest`, which transitively binds the COMPLETE
+# observation, including both artifact digests. Copying one of them up into the
+# envelope creates a second place the same truth lives, and the copy is the one
+# that goes stale. An envelope-only reader that needs provider identity must
+# resolve the retained observation or answer UNKNOWN -- which is the identical
+# discipline `derive_verdict` already enforces one level down, where "we could
+# not look" is never spelled the same way as "there is nothing there".
 
 # Every place a Postgres consumer can be launched from on the estate's hosts.
 # `systemd_dropin` and `anacron` are here because the v1 design omitted them,
@@ -377,19 +379,6 @@ ENVELOPE_FIELDS: Final[tuple[str, ...]] = (
     "counts",
 )
 
-# v2 adds `source_artifact_digest`: the `HostSource` implementation that read
-# the host, and the remote helper it executed, as one digest over the artifact
-# containing both. It is here in the ENVELOPE rather than only in the private
-# observation because a gate reads the envelope, and a reader deciding whether
-# an attribution claim is trustworthy should not have to fetch a private
-# document to learn which implementation decided that a path was `missing`.
-ENVELOPE_FIELDS_V2: Final[tuple[str, ...]] = (*ENVELOPE_FIELDS, "source_artifact_digest")
-
-ENVELOPE_FIELDS_BY_VERSION: Final[Mapping[str, tuple[str, ...]]] = {
-    ATTRIBUTION_SCHEMA_VERSION: ENVELOPE_FIELDS,
-    ATTRIBUTION_SCHEMA_VERSION_V2: ENVELOPE_FIELDS_V2,
-}
-
 # Names a projection input may carry and what happens to each. `False` means
 # the field is private material: it is accepted as an INPUT so a collector need
 # not pre-filter, and it is dropped rather than published. Anything not named
@@ -421,43 +410,69 @@ CLASSIFIED_FIELDS: Final[Mapping[str, bool]] = {
 }
 
 
-# Version-SPECIFIC, and that is the whole point of the mapping rather than one
-# shared table. A single `CLASSIFIED_FIELDS` would widen v1 the moment v2
-# landed: `project_envelope` would start accepting `source_artifact_digest` for
-# a v1 projection, and v1 -- a published, closed contract with no such field --
-# would have silently gained one. The failure would be invisible, because the
-# field would simply be dropped rather than rejected, and a v1 envelope would
-# then exist that a v1 reader believes was produced under v1 rules.
-CLASSIFIED_FIELDS_V2: Final[Mapping[str, bool]] = {
-    **CLASSIFIED_FIELDS,
-    "source_artifact_digest": True,
-}
+class InterlockVerdict(str, Enum):
+    """Three-valued, because "we could not look" is not "it does not qualify".
 
-CLASSIFIED_FIELDS_BY_VERSION: Final[Mapping[str, Mapping[str, bool]]] = {
-    ATTRIBUTION_SCHEMA_VERSION: CLASSIFIED_FIELDS,
-    ATTRIBUTION_SCHEMA_VERSION_V2: CLASSIFIED_FIELDS_V2,
-}
+    The same distinction `derive_verdict` enforces for coverage, applied to the
+    binding question. Collapsing `UNKNOWN` into `REFUSED` would be safe for the
+    interlock -- both block -- and would still be wrong, because the two call
+    for different actions: one is repaired by resolving the observation, the
+    other by re-running the census with a source that identifies itself.
+    """
+
+    DISCHARGED = "DISCHARGED"
+    REFUSED = "REFUSED"
+    UNKNOWN = "UNKNOWN"
 
 
-def discharges_rotation_interlock(envelope: Mapping[str, object]) -> bool:
-    """Whether this envelope can release the thing rotation waits on.
+def discharges_rotation_interlock(
+    envelope: Mapping[str, object],
+    observation: Mapping[str, object] | None = None,
+) -> InterlockVerdict:
+    """Whether the RETAINED OBSERVATION identifies both artifacts that ran.
 
-    Exactly one question, and deliberately not more: does the envelope identify
-    BOTH artifacts whose behaviour the coverage claim depends on? A v1 envelope
-    cannot, because it has no field naming the `HostSource` implementation that
-    decided which failures were reported as `missing` -- and that decision is
-    what separates a clean host from an unreadable one.
+    The envelope carries `observation_digest` and nothing else about the
+    artifacts, deliberately: that digest transitively binds the complete
+    observation, and a copy of any field beneath it would be a second place the
+    same truth lives. So this cannot be answered from the envelope alone, and
+    it does not pretend to be -- without the observation the answer is
+    ``UNKNOWN``, and a caller that needs a real answer resolves the retained
+    document from the private store.
+
+    Resolving means CHECKING: the supplied observation is digested and compared
+    with the one the envelope names. A mismatch is ``UNKNOWN`` rather than
+    ``REFUSED``, because being handed the wrong document tells us nothing about
+    the right one -- exactly as an errored scan derives UNKNOWN rather than a
+    confident zero.
+
+    ``REFUSED`` is reserved for the determinate case: we resolved the correct
+    observation and it does not identify both artifacts. A v1 observation lands
+    here -- not because it is old, but because it has no field in which the
+    `HostSource` implementation could be named, and that implementation decides
+    which failures are reported as `missing`, which is the single code that
+    separates a clean host from an unreadable one.
 
     What this does NOT decide: whether coverage is complete, whether every
-    consumer has been migrated, or whether any given verdict is good enough.
-    Those belong to the rotation lane, which owns the interlock. This answers
-    only the version-and-binding half, which is the half that lives here.
+    consumer has been migrated, or whether any verdict is good enough. Those
+    belong to the rotation lane, which owns the interlock. This answers only
+    the binding half, which is the half that lives here.
     """
-    if envelope.get("schema_version") != ATTRIBUTION_SCHEMA_VERSION_V2:
-        return False
-    return all(
-        isinstance(envelope.get(name), str) and bool(envelope.get(name))
-        for name in ("collector_artifact_digest", "source_artifact_digest")
+    from .validate import canonical_digest
+
+    named = envelope.get("observation_digest")
+    if not isinstance(named, str) or not named:
+        return InterlockVerdict.UNKNOWN
+    if observation is None:
+        return InterlockVerdict.UNKNOWN
+    if f"sha256:{canonical_digest(observation)}" != named:
+        return InterlockVerdict.UNKNOWN
+    return (
+        InterlockVerdict.DISCHARGED
+        if all(
+            isinstance(observation.get(name), str) and bool(observation.get(name))
+            for name in ("collector_artifact_digest", "source_artifact_digest")
+        )
+        else InterlockVerdict.REFUSED
     )
 
 
@@ -513,7 +528,6 @@ def project_envelope(
     scans: Mapping[str, FamilyScan],
     *,
     vault: RedactionVault,
-    version: str = ATTRIBUTION_SCHEMA_VERSION,
 ) -> dict[str, object]:
     """Build the PUBLIC envelope from private observation, then prove it clean.
 
@@ -524,21 +538,17 @@ def project_envelope(
     finished payload is walked against the vault, so a poisoned value that
     reached a public field through any route at all aborts the run.
 
-    ``version`` selects the field allowlist, and the default is v1 so that
-    adding v2 cannot widen v1 by accident. A v1 projection handed
-    `source_artifact_digest` raises :class:`UnclassifiedField` exactly as it
-    would for any other field v1 does not know about -- which is the correct
-    answer, because v1 is a published closed contract with no such property.
+    `source_artifact_digest` is deliberately NOT classified, so handing it here
+    raises rather than being quietly dropped. It belongs to the observation,
+    which the envelope binds by digest; a projection that accepted it would be
+    building the copy this design removed.
     """
-    if version not in ENVELOPE_VERSIONS:
-        raise ValueError(f"{version!r} is not an envelope version; known: {ENVELOPE_VERSIONS}")
-    classified = CLASSIFIED_FIELDS_BY_VERSION[version]
-    unclassified = sorted(set(observed) - set(classified))
+    unclassified = sorted(set(observed) - set(CLASSIFIED_FIELDS))
     if unclassified:
         raise UnclassifiedField(
-            f"{unclassified} reached the projection with no publication decision under "
-            f"{version}. Classify each in CLASSIFIED_FIELDS_BY_VERSION[{version!r}] as public "
-            "or private; a field is never published because nobody said otherwise"
+            f"{unclassified} reached the projection with no publication decision. "
+            "Classify each in CLASSIFIED_FIELDS as public or private; a field is "
+            "never published because nobody said otherwise"
         )
 
     declared = set(DECLARED_FAMILIES)
@@ -550,7 +560,7 @@ def project_envelope(
         )
 
     envelope: dict[str, object] = {
-        "schema_version": version,
+        "schema_version": ATTRIBUTION_SCHEMA_VERSION,
         "target_id": observed["target_id"],
         "observation_digest": observed["observation_digest"],
         "collector_artifact_digest": observed["collector_artifact_digest"],
@@ -580,8 +590,6 @@ def project_envelope(
             "consumers_unattributed": _count(observed, "consumers_unattributed"),
         },
     }
-    if version == ATTRIBUTION_SCHEMA_VERSION_V2:
-        envelope["source_artifact_digest"] = observed["source_artifact_digest"]
     envelope.update(
         verify_request(
             authorization_digest=str(observed["authorization_digest"]),
@@ -589,14 +597,13 @@ def project_envelope(
             authority_ref=str(observed["authority_ref"]),
         )
     )
-    expected = set(ENVELOPE_FIELDS_BY_VERSION[version])
+    expected = set(ENVELOPE_FIELDS)
     if set(envelope) != expected:
         # A structural check on the OUTPUT, not just the input. The field list
         # and the builder are two spellings of one shape, and the published one
         # is always the stale one.
         raise ValueError(
-            f"the {version} envelope must carry exactly {sorted(expected)}; "
-            f"built {sorted(envelope)}"
+            f"the envelope must carry exactly {sorted(expected)}; built {sorted(envelope)}"
         )
     vault.assert_clean(envelope)
     return envelope
