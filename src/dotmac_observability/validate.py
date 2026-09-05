@@ -135,6 +135,7 @@ __all__ = [
     "canonical_bytes",
     "canonical_digest",
     "classify_stored_inventory",
+    "contract_findings",
     "load",
     "load_capture_inventory",
     "load_private_inventory",
@@ -261,6 +262,20 @@ def _validate_document(
         path = "/".join(str(part) for part in error.absolute_path) or "<root>"
         findings.append(Finding("SCHEMA", f"{location}#{path}", error.message))
     return findings
+
+
+def contract_findings(
+    contracts: Path, name: str, document: Document, location: str
+) -> tuple[Finding, ...]:
+    """Validate any document against a named contract in ``contracts``.
+
+    The public spelling of the private helper above, added so a caller outside
+    this module validates through the SAME code path rather than constructing
+    its own `Draft202012Validator`. A second validator is how one caller starts
+    accepting a document another refuses, and the divergence surfaces as a
+    document that was "already validated".
+    """
+    return tuple(_validate_document(contracts, name, document, location))
 
 
 def _read_toml(path: Path) -> Document:
