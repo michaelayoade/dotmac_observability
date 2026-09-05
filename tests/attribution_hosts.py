@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 
 from dotmac_observability.attribution_enumerators import (
+    HOST_SOURCE_CONTRACT_VERSION,
     SourceDenied,
     SourceMissing,
     SourceTimeout,
@@ -57,6 +58,11 @@ class FakeHost:
     mismatch there would make an enumerator look thorough while reading
     nothing.
     """
+
+    # A source ADVERTISES which `HostSource` contract it implements, and the
+    # collector refuses a mismatch. The double carries it as an instance
+    # attribute so a test can set a wrong one without subclassing.
+    host_source_contract_version = HOST_SOURCE_CONTRACT_VERSION
 
     def __init__(
         self,

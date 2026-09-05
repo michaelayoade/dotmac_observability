@@ -83,6 +83,18 @@ def test_the_declared_contracts_are_all_present():
         # of Git.
         "postgres-consumer-attribution-envelope.schema.json",
         "postgres-consumer-attribution-observation.schema.json",
+        # v2 of both, which exists because v1 could not be extended. An
+        # optional field would make one version name two shapes; a required one
+        # would change what an already-stored document's digest means. v2
+        # requires BOTH `collector_artifact_digest` and `source_artifact_digest`
+        # -- the coverage claim depends on two artifacts, this collector and the
+        # separately released `HostSource` implementation that decides which
+        # failures are reported as `missing`, and naming only one leaves the
+        # half that can turn a denial into an absence unidentified. v1 is
+        # retained and not deprecated: it stays readable historical evidence,
+        # and it cannot discharge the rotation interlock.
+        "postgres-consumer-attribution-envelope-v2.schema.json",
+        "postgres-consumer-attribution-observation-v2.schema.json",
     }
     # `consumer-attribution-authorization.schema.json` and
     # `attribution-challenge.schema.json` are deliberately ABSENT, and for two

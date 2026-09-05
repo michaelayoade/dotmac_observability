@@ -17,7 +17,15 @@ import json
 
 import pytest
 
-from dotmac_observability.attribution import DECLARED_FAMILIES, ENVELOPE_FIELDS, RedactionVault
+from dotmac_observability.attribution import (
+    ATTRIBUTION_SCHEMA_VERSION,
+    ATTRIBUTION_SCHEMA_VERSION_V2,
+    DECLARED_FAMILIES,
+    ENVELOPE_FIELDS,
+    ENVELOPE_FIELDS_V2,
+    RedactionVault,
+    discharges_rotation_interlock,
+)
 from dotmac_observability.attribution_enumerators import build_observation, enumerate_all
 from dotmac_observability.cli import main
 from tests.attribution_fixtures import DIGEST_C, DIGEST_D
@@ -40,11 +48,38 @@ def _observation(tmp_path, **overrides: object):
         target_id="erp-production",
         observed_at="2026-09-05T09:00:00Z",
         host_identity_digest="sha256:" + "ab" * 32,
+        collector_artifact_digest="sha256:" + "cd" * 32,
+        source_artifact_digest="sha256:" + "ef" * 32,
     )
     document.update(overrides)
     path = tmp_path / "observation.json"
     path.write_text(json.dumps(document, indent=2), encoding="utf-8")
     return path, document
+
+
+def _v1_observation(tmp_path):
+    """A v1 document, built by hand because `build_observation` only writes v2.
+
+    Hand-built deliberately: the point is to exercise a document produced by an
+    older collector, and generating it from today's builder would prove only
+    that today's builder can be downgraded.
+    """
+    _, document = _observation(tmp_path)
+    legacy = {
+        "schema_version": "observability-consumer-attribution-observation.v1",
+        "target_id": document["target_id"],
+        "observed_at": document["observed_at"],
+        "host_identity_digest": document["host_identity_digest"],
+        "consumers": document["consumers"],
+        # v1's `errors` enum has neither `missing` nor `unknown`, so a v1
+        # document cannot carry them. Emptied rather than translated: inventing
+        # a v1 spelling for a v2 code is exactly the flattening v2 exists to
+        # undo.
+        "families": [{**entry, "errors": []} for entry in document["families"]],
+    }
+    path = tmp_path / "observation-v1.json"
+    path.write_text(json.dumps(legacy, indent=2), encoding="utf-8")
+    return path
 
 
 def _run(path, capsys, *extra: str):
@@ -67,7 +102,8 @@ def test_a_valid_observation_projects_to_a_publishable_envelope(tmp_path, capsys
     code, captured = _run(path, capsys)
     assert code == 0
     envelope = json.loads(captured.out)
-    assert set(envelope) == set(ENVELOPE_FIELDS)
+    assert set(envelope) == set(ENVELOPE_FIELDS_V2)
+    assert envelope["schema_version"] == ATTRIBUTION_SCHEMA_VERSION_V2
     assert envelope["target_id"] == "erp-production"
     assert len(envelope["coverage"]) == len(DECLARED_FAMILIES)
 
@@ -155,25 +191,70 @@ def test_a_missing_reference_is_refused_because_each_names_a_different_authority
         )
 
 
-def test_the_collector_digest_changes_when_the_collector_changes(tmp_path, capsys):
-    """A coverage claim is only as good as the code that made it.
+def test_both_artifact_digests_are_read_from_the_document_never_recomputed(tmp_path, capsys):
+    """The artifacts that ran are not this checkout, and must not be assumed to be.
 
-    Identified by CONTENT rather than by a version string, because a version
-    string is the thing nobody bumps. Asserted as a real digest of the two
-    modules that decide what is looked for and how a verdict is reached.
+    A collector released last month produced the observation; the `HostSource`
+    implementation is built in another repository entirely. Recomputing either
+    here would answer "what is installed now" while claiming to answer "what
+    produced this" -- a binding that can never disagree with itself, and
+    therefore proves nothing. It would also be silently WRONG the first time an
+    operator ran a published collector against a newer checkout.
+
+    The previous version of this test asserted the local recomputation, and it
+    passed for exactly that reason.
     """
-    import hashlib
-    from pathlib import Path
+    path, document = _observation(tmp_path)
+    code, captured = _run(path, capsys)
+    assert code == 0
+    envelope = json.loads(captured.out)
+    assert envelope["collector_artifact_digest"] == document["collector_artifact_digest"]
+    assert envelope["source_artifact_digest"] == document["source_artifact_digest"]
+    assert envelope["collector_artifact_digest"] != envelope["source_artifact_digest"], (
+        "the two artifacts are reported as one; reaching for the near-miss binding is how "
+        "a pair that could never be equal for any input ships reading as correct"
+    )
 
-    from dotmac_observability import attribution, attribution_enumerators
 
+def test_a_v2_envelope_discharges_the_interlock_and_a_v1_one_does_not(tmp_path, capsys):
+    """Both halves in one test, so neither can be satisfied by a constant."""
     path, _ = _observation(tmp_path)
     code, captured = _run(path, capsys)
     assert code == 0
-    expected = hashlib.sha256()
-    for module in (attribution, attribution_enumerators):
-        expected.update(Path(module.__file__ or "").read_bytes())
-    assert json.loads(captured.out)["collector_artifact_digest"] == f"sha256:{expected.hexdigest()}"
+    assert discharges_rotation_interlock(json.loads(captured.out)) is True
+
+    legacy = _v1_observation(tmp_path)
+    code, captured = _run(legacy, capsys)
+    assert code == 0
+    envelope = json.loads(captured.out)
+    assert envelope["schema_version"] == ATTRIBUTION_SCHEMA_VERSION
+    assert set(envelope) == set(ENVELOPE_FIELDS)
+    assert discharges_rotation_interlock(envelope) is False
+
+
+def test_a_v1_observation_is_still_readable_rather_than_refused(tmp_path, capsys):
+    """v1 is historical evidence. Refusing it would destroy the record.
+
+    It is not deprecated and not deleted -- it simply cannot discharge what
+    rotation waits on, because it has no field in which the `HostSource`
+    implementation could be named.
+    """
+    legacy = _v1_observation(tmp_path)
+    code, captured = _run(legacy, capsys)
+    assert code == 0
+    envelope = json.loads(captured.out)
+    assert "source_artifact_digest" not in envelope
+    assert len(envelope["coverage"]) == len(DECLARED_FAMILIES)
+
+
+def test_an_unknown_observation_version_is_refused_rather_than_guessed(tmp_path, capsys):
+    path, document = _observation(tmp_path)
+    document["schema_version"] = "observability-consumer-attribution-observation.v9"
+    path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+    code, captured = _run(path, capsys)
+    assert code == 1
+    assert captured.out == ""
+    assert "v9" in captured.err
 
 
 def test_a_short_private_value_can_abort_a_correct_run(tmp_path, capsys):
