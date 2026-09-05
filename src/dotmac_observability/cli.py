@@ -17,11 +17,22 @@ things depending on an argument nobody can see in the output.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from .attribution import (
+    DECLARED_FAMILIES,
+    FamilyScan,
+    LeakRefusal,
+    RedactionVault,
+    install_leak_guards,
+    project_envelope,
+    safe_error,
+)
 from .drift import compare
 from .live_verify import load_live_observation, render_verification, verify
 from .receipt import load_receipt, receipt_findings
@@ -33,7 +44,9 @@ from .validate import (
     InventoryError,
     apply_supersession,
     canonical_bytes,
+    canonical_digest,
     classify_stored_inventory,
+    contract_findings,
     load,
     load_capture_inventory,
     load_private_inventory,
@@ -480,6 +493,140 @@ def _cmd_drift(
     return _report(report.findings, heading="drift")
 
 
+# The two consumer fields that are declared VOCABULARY rather than resolved
+# material: they appear verbatim in the public envelope's coverage array. The
+# first cut of this command poisoned every string in the consumer, which
+# poisoned `"systemd_service"` and then refused every correct envelope for
+# containing it -- a guard that fires on correct input, which is the failure
+# mode that gets guards switched off.
+_PUBLIC_CONSUMER_KEYS = frozenset({"family", "custody"})
+
+# The envelope is REQUIRED to emit this vocabulary, so a private value that
+# happens to be a substring of it cannot be told apart from the vocabulary in
+# the output. Poisoning such a value makes the vault abort every correct run:
+# a database user named `anac` is a substring of the family name `anacron`, and
+# `agent` is a family name outright -- both are entirely plausible on a real
+# host, and both would have made this command permanently unusable there.
+#
+# The residual risk is named rather than hidden: a private value that is a
+# substring of this vocabulary is not protected by the vault. It is at most a
+# few lowercase letters, and the only place it could "appear" is inside a
+# vocabulary term the envelope was always going to emit -- so nothing is
+# disclosed that a reader did not already have. Everything else stays poisoned,
+# and the substring match that catches an embedded DSN is untouched.
+_VOCABULARY = " ".join(
+    (*DECLARED_FAMILIES, "SCANNED", "ABSENT", "UNKNOWN", "ATTRIBUTED", "UNATTRIBUTED")
+)
+
+
+def _cmd_attribution_project(
+    contracts: Path,
+    observation: Path,
+    *,
+    authorization_digest: str,
+    challenge_digest: str,
+    authority_ref: str,
+) -> int:
+    """Project a PRIVATE attribution observation into its PUBLIC envelope.
+
+    The private document is produced by whatever holds the host seam
+    (`attribution_enumerators.HostSource`, declared here and implemented
+    elsewhere) and lives in an approved private store. This command reads it,
+    derives every coverage verdict from the evidence rather than reading one
+    off the document, and writes the envelope -- which is publishable, and
+    which is the ONLY thing that leaves this command.
+
+    Every value in the private document is poisoned into a vault before the
+    projection runs, so the envelope is checked against the actual material it
+    was derived from rather than against a list of field names somebody
+    remembered. A refusal aborts with no output at all: a partially written
+    envelope on stdout is the one artifact that would be pasted into a ticket.
+    """
+    install_leak_guards()
+    try:
+        document = json.loads(observation.read_text(encoding="utf-8"))
+    except BaseException as error:
+        print(f"observation is unreadable ({safe_error(error)})", file=sys.stderr)
+        return 1
+
+    findings = contract_findings(
+        contracts,
+        "postgres-consumer-attribution-observation",
+        document,
+        observation.name,
+    )
+    if findings:
+        return _report(findings, heading="observation does not match its contract")
+
+    vault = RedactionVault()
+    for consumer in document["consumers"]:
+        for key, value in consumer.items():
+            if key in _PUBLIC_CONSUMER_KEYS or not isinstance(value, str):
+                continue
+            if value and value in _VOCABULARY:
+                continue
+            vault.poison(value)
+    scans = {
+        entry["family"]: FamilyScan(
+            family=entry["family"],
+            attempted=entry["attempted"],
+            completed=entry["completed"],
+            errors=tuple(entry["errors"]),
+            found=entry["found"],
+        )
+        for entry in document["families"]
+    }
+    attributed = sum(1 for c in document["consumers"] if c["custody"] == "ATTRIBUTED")
+    unattributed = sum(1 for c in document["consumers"] if c["custody"] == "UNATTRIBUTED")
+
+    try:
+        envelope = project_envelope(
+            {
+                "target_id": document["target_id"],
+                "observation_digest": f"sha256:{canonical_digest(document)}",
+                "collector_artifact_digest": f"sha256:{_collector_digest()}",
+                "authorization_digest": authorization_digest,
+                "challenge_digest": challenge_digest,
+                "authority_ref": authority_ref,
+                "host_identity_digest": document["host_identity_digest"],
+                "observed_at": document["observed_at"],
+                "consumers_attributed": attributed,
+                "consumers_unattributed": unattributed,
+            },
+            scans,
+            vault=vault,
+        )
+    except LeakRefusal as error:
+        # Named separately from every other failure because it means something
+        # different: not "the input was wrong" but "the output would have
+        # disclosed". Nothing is printed to stdout on this path.
+        print(f"REFUSED: {error}", file=sys.stderr)
+        return 2
+    except BaseException as error:
+        print(f"projection refused ({safe_error(error)})", file=sys.stderr)
+        return 1
+
+    print(json.dumps(envelope, indent=2, sort_keys=True))
+    return 0
+
+
+def _collector_digest() -> str:
+    """The enumerators' own source digest.
+
+    A coverage claim is only as good as the code that made it, so the code is
+    identified by content rather than by a version string somebody forgot to
+    bump. Taken over the two modules that decide what is looked for and how a
+    verdict is reached -- changing either changes what "ABSENT" meant.
+    """
+    from . import attribution, attribution_enumerators
+
+    accumulator = hashlib.sha256()
+    for module in (attribution, attribution_enumerators):
+        source = Path(module.__file__ or "")
+        accumulator.update(source.read_bytes())
+    return accumulator.hexdigest()
+
+
 def _cmd_secret_scan(root: Path) -> int:
     findings = scan_for_secret_material(root, _tracked_files(root))
     return _report(findings, heading="secret material in tracked files")
@@ -650,6 +797,44 @@ def main(argv: Sequence[str] | None = None) -> int:
     drift_command.add_argument("--observation", type=Path, default=None)
     drift_command.add_argument("--receipt", type=Path, default=None)
 
+    attribution = commands.add_parser(
+        "attribution-project",
+        help="project a private consumer-attribution observation into its public envelope",
+        description=(
+            "Reads a `postgres-consumer-attribution-observation` document from an approved "
+            "PRIVATE store and writes the PUBLIC envelope on stdout. Coverage verdicts are "
+            "DERIVED from the recorded evidence, never read off the document, so a family "
+            "that was denied, unfinished or errored cannot report as a host with nothing on "
+            "it. The three references name three different authorities and are recorded, "
+            "not adjudicated: `ConsumerAttributionAuthorizationV1` belongs to "
+            "dotmac-deployment-control, `AttributionChallengeV1` to the observation "
+            "authority, and both are verified upstream by their owners (AGENTS.md rule 20). "
+            "Nothing from the private document reaches stdout: it is poisoned into a vault "
+            "and the envelope is refused, with no output at all, if any of it survived."
+        ),
+    )
+    attribution.add_argument(
+        "--observation",
+        type=Path,
+        required=True,
+        help="the PRIVATE observation document; never a path inside this checkout",
+    )
+    attribution.add_argument(
+        "--authorization-digest",
+        required=True,
+        help="ConsumerAttributionAuthorizationV1 digest, issued by dotmac-deployment-control",
+    )
+    attribution.add_argument(
+        "--challenge-digest",
+        required=True,
+        help="AttributionChallengeV1 digest, issued by the observation authority",
+    )
+    attribution.add_argument(
+        "--authority-ref",
+        required=True,
+        help="opaque pointer, resolvable in the system that took the decision",
+    )
+
     commands.add_parser("secret-scan", help="refuse secret material in tracked files")
     commands.add_parser(
         "private-material-scan", help="refuse resolved material in tracked files (ADR-0004)"
@@ -711,6 +896,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.command == "drift":
         return _cmd_drift(
             root, contracts, arguments.private_inventory, arguments.observation, arguments.receipt
+        )
+    if arguments.command == "attribution-project":
+        return _cmd_attribution_project(
+            contracts,
+            arguments.observation,
+            authorization_digest=arguments.authorization_digest,
+            challenge_digest=arguments.challenge_digest,
+            authority_ref=arguments.authority_ref,
         )
     if arguments.command == "secret-scan":
         return _cmd_secret_scan(root)
