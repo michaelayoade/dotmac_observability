@@ -26,6 +26,7 @@ a reviewer can read into code that a reviewer cannot.
 from __future__ import annotations
 
 import ast
+import re
 
 import pytest
 
@@ -194,3 +195,87 @@ def test_that_seam_detector_would_notice_an_implementation():
     methods = {i.name for i in node.body if isinstance(i, ast.FunctionDef)}
     assert {"exists", "list_dir", "read_text", "run"} <= methods
     assert not {b.id for b in node.bases if isinstance(b, ast.Name)}
+
+
+# ── Failures are values, not classes (ruling 1) ─────────────────────────────
+#
+# The seam's failure half must survive an artifact boundary. It did not: a
+# `HostSource` implementation lives in another distribution, so an `isinstance`
+# check against a class defined here is always False and its failure mode is
+# silent -- the exception falls through to the catch-all and is misclassified.
+# The concrete consequence was a clean host with no `/etc/cron.d` reporting a
+# parse error on `cron`.
+#
+# These checks are static and structural because the behavioural proofs live in
+# `tests/mutations/test_attribution_seam_is_structural.py`. The pair is
+# deliberate: the battery proves the current code classifies correctly, and
+# these prove the SHAPE that made it wrong cannot come back.
+
+_NOMINAL_MATCH = re.compile(r"isinstance\s*\(\s*(?:error|exc|exception)\b")
+_SOURCE_EXCEPT = re.compile(r"except\s+\(?\s*Source[A-Za-z]*")
+
+
+def test_no_attribution_module_matches_an_exception_by_class():
+    for name in ATTRIBUTION_MODULES:
+        text = (SRC / name).read_text(encoding="utf-8")
+        for number, line in enumerate(text.splitlines(), start=1):
+            if line.lstrip().startswith("#"):
+                continue
+            assert not _NOMINAL_MATCH.search(line), (
+                f"{name}:{number} matches an exception by CLASS. A `HostSource` lives in "
+                "another artifact, so its exceptions are different classes and this check is "
+                "always False -- silently. Read the `error_class` attribute instead."
+            )
+            assert not _SOURCE_EXCEPT.search(line), (
+                f"{name}:{number} catches a Source* exception by name. Same reason: a "
+                "foreign `SourceMissing` is a different class, so a clean host with no "
+                "/etc/cron.d was classified `parse`."
+            )
+
+
+def test_that_detector_would_catch_both_shapes():
+    """Planted positives. Both scans above run over a clean corpus."""
+    assert _NOMINAL_MATCH.search("    if isinstance(error, SourceError):")
+    assert _NOMINAL_MATCH.search("        if isinstance(exc, Foo):")
+    assert _SOURCE_EXCEPT.search("    except SourceMissing:")
+    assert _SOURCE_EXCEPT.search("    except (SourceDenied, SourceTimeout):")
+    # Near-misses that must NOT trip it: classifying a VALUE, and catching the
+    # broad boundary exception the ruling requires.
+    assert not _NOMINAL_MATCH.search("    if isinstance(code, str) and code in CLASSES:")
+    assert not _SOURCE_EXCEPT.search("    except Exception as error:")
+
+
+def test_the_seam_boundary_never_catches_baseexception():
+    """`Exception`, never `BaseException`, at every `HostSource` call site.
+
+    A `KeyboardInterrupt` or `SystemExit` is not a source failure. Swallowing
+    one at the boundary files a document reporting a failure on every family
+    the walk had not yet reached -- a complete-looking census produced by
+    someone pressing Ctrl-C.
+
+    Scoped to the enumerators. `attribution.run_guarded` still catches
+    `BaseException` and must: it is a CONTAINMENT boundary whose job is to stop
+    a traceback reaching stderr, not a classification boundary that decides
+    what a document says.
+    """
+    text = (SRC / "attribution_enumerators.py").read_text(encoding="utf-8")
+    offenders = [
+        number
+        for number, line in enumerate(text.splitlines(), start=1)
+        if "except BaseException" in line and not line.lstrip().startswith("#")
+    ]
+    assert not offenders, f"attribution_enumerators.py catches BaseException at {offenders}"
+
+
+def test_the_containment_boundary_still_catches_baseexception():
+    """The other half, so the check above cannot be satisfied by deleting it.
+
+    If `run_guarded` were narrowed to `Exception`, a `KeyboardInterrupt` raised
+    mid-parse would unwind through frames holding the DSN and the default
+    handler would print them.
+    """
+    text = (SRC / "attribution.py").read_text(encoding="utf-8")
+    assert "except BaseException as exc:" in text, (
+        "the process-level containment boundary was narrowed; a cancelled run now prints a "
+        "traceback carrying the parsed DSN"
+    )

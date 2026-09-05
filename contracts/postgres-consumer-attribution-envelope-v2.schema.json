@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dotmac.io/schemas/observability/postgres-consumer-attribution-envelope.v2.json",
+  "title": "observability-postgres-consumer-attribution-envelope.v2",
+  "description": "The PUBLIC envelope, v2. Identical to v1 but for one added required property, `source_artifact_digest`, and it is added here rather than left in the private observation because a gate reads the ENVELOPE.  The v2 observation binds both artifacts; if the envelope carried only `collector_artifact_digest`, a reader deciding whether an attribution claim is trustworthy would have to fetch the private document to learn which `HostSource` produced it -- which most readers cannot do, and which defeats the point of a publishable artifact that stands on its own.  v1 is retained unchanged and is not deprecated. It stays readable, and it cannot discharge the rotation interlock: it has no field naming the implementation that decided which failures were reported as `missing`, and that decision is what separates a clean host from an unreadable one.  Everything else v1 says still holds. There is no `db_host`, `db_port`, `db_user`, `db_name`, `launch_path`, `secret_pointers` or `env_var_names` property, every object closes, coverage carries exactly one DERIVED verdict per declared family, and the three authority references name three different authorities, none of which is defined here (AGENTS.md rule 20).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "target_id",
+    "observation_digest",
+    "collector_artifact_digest",
+    "authorization_digest",
+    "challenge_digest",
+    "authority_ref",
+    "host_identity_digest",
+    "observed_at",
+    "coverage",
+    "counts",
+    "source_artifact_digest"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "observability-consumer-attribution-envelope.v2"
+    },
+    "target_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$",
+      "description": "The LOGICAL target, spelled as the public inventory spells it (`erp-production`). Its resolved address, port and credential binding are private inventory and never appear here."
+    },
+    "observation_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Digest of the PRIVATE observation instance this envelope was projected from (`postgres-consumer-attribution-observation.schema.json`). The values stay in the private store; this is how a reader with access re-derives them and how a reader without access still knows exactly which document was summarized."
+    },
+    "collector_artifact_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "The collector binary or script that produced the observation. A coverage claim is only as good as the code that made it, so the code is identified by digest rather than by version name."
+    },
+    "authorization_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "`ConsumerAttributionAuthorizationV1`, issued by `dotmac-deployment-control`: permission to inspect ONE target, with scope, expiry and its own approval reference. Compared as an opaque string in the owner's canonical form and never re-derived here. Deliberately NOT the same term as `challenge_digest` below -- a single request object would let the issuer of permission also define what counts as proof of the result, and reaching for one of these when the other was meant is exactly how a binding that can never be equal for any input ships reading as correct."
+    },
+    "challenge_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "`AttributionChallengeV1`, issued by the observation authority: nonce, freshness window, target binding and output-signature semantics. A challenge is not permission and permission is not a challenge; two issuers, two documents, neither able to close the loop alone."
+    },
+    "authority_ref": {
+      "type": "string",
+      "minLength": 1,
+      "description": "An opaque pointer, resolvable in the system that took the decision, naming the authority under which this observation ran. Opaque on purpose: parsing it here would make this repository a second reader of somebody else's decision record, and a forked parser surfaces later as a disagreement nobody can explain."
+    },
+    "host_identity_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "The identity the collector actually reached, as a digest. A NAME here would be a resolved host, which rule 18 keeps out of public Git; a digest still lets a reader check that two observations came from the same machine, which is the only question this field has to answer."
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "coverage": {
+      "type": "array",
+      "minItems": 11,
+      "maxItems": 11,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/family_result"
+      },
+      "description": "EXACTLY ONE result per declared family, all of them, every time. A family omitted because it was never attempted reads to every consumer as a family with nothing in it, and 'we did not look' must not be spelled the same way as 'there is nothing there'. `systemd_dropin` and `anacron` are declared because a design that omitted them would have filed a host as clean while two real launch paths went unscanned."
+    },
+    "counts": {
+      "$ref": "#/$defs/counts"
+    },
+    "source_artifact_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "The `HostSource` implementation that read the host, and the remote helper it executed, as one digest over the artifact that contains both. Copied from the v2 observation and never re-derived here: this repository does not build that artifact and is in no position to recompute its identity."
+    }
+  },
+  "$defs": {
+    "family_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "family",
+        "verdict",
+        "found",
+        "error_count"
+      ],
+      "properties": {
+        "family": {
+          "enum": [
+            "systemd_service",
+            "systemd_timer",
+            "systemd_dropin",
+            "cron",
+            "anacron",
+            "at",
+            "docker",
+            "compose",
+            "ci_runner",
+            "script",
+            "agent"
+          ]
+        },
+        "verdict": {
+          "enum": [
+            "SCANNED",
+            "ABSENT",
+            "UNKNOWN"
+          ],
+          "description": "Derived by `dotmac_observability.attribution.derive_verdict`, never assigned. `ABSENT` is reachable through exactly one path -- attempted, completed, no errors, nothing found -- so a denied `sudo` and a genuinely clean host cannot file the same answer."
+        },
+        "found": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Consumers this family contributed. A count, never a list: a list would need somewhere to put a launch path."
+        },
+        "error_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "A COUNT, not messages. An error string on this path carries the DSN it failed to parse in most real failures, which is the leak the error path is famous for; the classification lives in the private observation and the count is what a public reader needs to know the verdict is `UNKNOWN` for a reason."
+        }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "families_declared",
+        "families_scanned",
+        "families_absent",
+        "families_unknown",
+        "consumers_attributed",
+        "consumers_unattributed"
+      ],
+      "properties": {
+        "families_declared": {
+          "type": "integer",
+          "const": 11
+        },
+        "families_scanned": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "families_absent": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "families_unknown": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "consumers_attributed": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Consumers with custody someone can be asked about -- an owning unit, job, container or principal."
+        },
+        "consumers_unattributed": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Consumers found with NO attributable custody. A bare `DATABASE_URL` in an environment with no owning unit lands here, and it is a finding rather than an absence: the connection is real and nobody is answerable for it. Zero here is a claim, not a default."
+        }
+      }
+    }
+  }
+}

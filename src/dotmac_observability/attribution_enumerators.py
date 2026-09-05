@@ -55,7 +55,12 @@ from .attribution import (
 
 __all__ = [
     "DEGRADING_SOURCES",
-    "ERROR_CLASSES",
+    "HOST_SOURCE_CONTRACT_VERSION",
+    "OBSERVATION_ERROR_CLASSES_V1",
+    "OBSERVATION_ERROR_CLASSES_V2",
+    "OBSERVATION_SCHEMA_VERSION_V2",
+    "SOURCE_ERROR_CLASSES",
+    "UNKNOWN_SOURCE_ERROR",
     "Budget",
     "ConsumerRecord",
     "Degradation",
@@ -66,19 +71,55 @@ __all__ = [
     "SourceMissing",
     "SourceTimeout",
     "SourceUnsupported",
+    "UnsupportedHostSource",
     "apply_degradations",
     "build_observation",
+    "check_contract_version",
     "classify",
     "custody_counts",
     "degradations",
     "enumerate_all",
     "enumerate_family",
+    "observation_error",
 ]
 
-# The observation contract's `errors` vocabulary, and nothing outside it. A
-# free-text reason on this path carries the DSN it failed to parse, which is
-# the leak the error path is famous for.
-ERROR_CLASSES: Final[tuple[str, ...]] = (
+# The version of the `HostSource` contract this module speaks. A source
+# ADVERTISES the version it implements and a mismatch is refused outright:
+# running a census against a seam whose failure semantics are unknown is
+# exactly the situation where a wrong answer looks like a clean host.
+HOST_SOURCE_CONTRACT_VERSION: Final = "host-source.v1"
+
+# What a `HostSource` may report, as a closed set of VALUES rather than a
+# hierarchy of classes.
+#
+# This is the whole of ruling 1 and it exists because the first version was
+# NOMINAL: `classify` asked `isinstance(error, SourceError)` and two call sites
+# said `except SourceMissing`. Both work in-process and neither works across an
+# artifact boundary -- a Foundation-local `SourceMissing` is a DIFFERENT class,
+# so it matched nothing, fell through to the catch-all and was classified
+# `parse`. The concrete consequence was that a clean host with no `/etc/cron.d`
+# reported a parse error on `cron`, which is the identical defect this module's
+# own commit message says was found and fixed, reintroduced from the other side
+# of the seam. Nothing here may use `isinstance` on an exception again;
+# `tests/architecture/test_attribution_reaches_nothing.py` enforces that.
+SOURCE_ERROR_CLASSES: Final[tuple[str, ...]] = (
+    "missing",
+    "denied",
+    "timeout",
+    "unsupported",
+    "parse",
+)
+
+# What an unrecognized, absent or malformed `error_class` becomes. It is a
+# CODE rather than a silence, so it reaches the observation, so the family
+# derives UNKNOWN. Inferring anything else -- and `ABSENT` in particular --
+# from "the source said something we do not understand" is the one move this
+# whole design exists to make unavailable.
+UNKNOWN_SOURCE_ERROR: Final = "unknown"
+
+# The v1 observation contract's `errors` vocabulary, kept verbatim because v1
+# documents are still readable historical evidence and their enum is frozen.
+OBSERVATION_ERROR_CLASSES_V1: Final[tuple[str, ...]] = (
     "denied",
     "parse",
     "syntax",
@@ -88,15 +129,47 @@ ERROR_CLASSES: Final[tuple[str, ...]] = (
     "unsupported",
 )
 
+# v2 adds the two codes v1 had no way to spell: a source that reported
+# `missing` for a path the walk had already discovered, and a source whose
+# `error_class` this module does not recognize. Both had to be flattened into
+# `unsupported` under v1, which lost the distinction between "this host cannot
+# answer" and "we could not understand the answer".
+OBSERVATION_ERROR_CLASSES_V2: Final[tuple[str, ...]] = (
+    *OBSERVATION_ERROR_CLASSES_V1,
+    "missing",
+    UNKNOWN_SOURCE_ERROR,
+)
+
+# Source code to observation code. Deliberately total over
+# `SOURCE_ERROR_CLASSES` plus the unknown sentinel, and asserted to be so: a
+# partial map would raise inside an error handler, which is the worst place in
+# this module for a second failure.
+_OBSERVED: Final[dict[str, str]] = {
+    "missing": "missing",
+    "denied": "denied",
+    "timeout": "timeout",
+    "unsupported": "unsupported",
+    "parse": "parse",
+    UNKNOWN_SOURCE_ERROR: UNKNOWN_SOURCE_ERROR,
+}
+
 
 # ── The seam ────────────────────────────────────────────────────────────────
 
 
 class SourceError(Exception):
-    """Base for every way a host read can fail. Carries a CLASS, never a value.
+    """A REFERENCE implementation of the attribute contract, not a base to match.
 
-    A source implementation raises these instead of returning an error string,
-    because a string is what gets logged and a class is what gets counted.
+    An implementation of :class:`HostSource` may raise these, or may raise its
+    own exceptions carrying an `error_class` attribute, or may raise something
+    from a library it wraps. All three are handled identically, because
+    :func:`classify` reads an ATTRIBUTE and never asks what class anything is.
+
+    That is not a stylistic preference. These classes live in this
+    distribution; a `HostSource` implementation lives in another one. An
+    `isinstance` check across that boundary is always False, and its failure
+    mode is silent -- the exception falls through to the catch-all and is
+    misclassified. Subclassing this is convenient and is never required.
     """
 
     error_class = "unsupported"
@@ -111,7 +184,7 @@ class SourceDenied(SourceError):
 class SourceMissing(SourceError):
     """The path or program is not there. A genuine absence, not a refusal."""
 
-    error_class = "unsupported"
+    error_class = "missing"
 
 
 class SourceTimeout(SourceError):
@@ -124,18 +197,59 @@ class SourceUnsupported(SourceError):
     error_class = "unsupported"
 
 
-def classify(error: BaseException) -> str:
-    """Map any failure onto the contract's error vocabulary.
+class UnsupportedHostSource(Exception):
+    """A source advertising a `HostSource` contract version this module cannot speak.
 
-    The default is `parse` rather than `unsupported` for anything that is not a
-    :class:`SourceError`: an unexpected exception mid-read is a failure to
-    UNDERSTAND the host, and calling it "unsupported" would quietly reclassify
-    a bug as a host limitation. The exception itself is reduced to a type name
-    by the caller; nothing of it reaches the observation.
+    Refused rather than degraded. A census run against a seam whose failure
+    semantics are unknown produces a document that looks exactly like a good
+    one, and every downstream reader would take it at face value.
     """
-    if isinstance(error, SourceError):
-        return error.error_class
-    return "parse"
+
+
+def classify(error: BaseException) -> str:
+    """Read the failure's declared `error_class`. Never `isinstance`, ever.
+
+    Four rejections, and each is a real shape rather than a hypothetical: the
+    attribute may be absent (an exception from a wrapped library), not a string
+    (someone passed the class object), or a string outside the closed set (a
+    newer source speaking a vocabulary this module predates). All three, and
+    anything else, become :data:`UNKNOWN_SOURCE_ERROR` -- which is a CODE, so
+    it reaches the observation, so the family derives UNKNOWN.
+
+    What it must never do is guess. `parse` was the old default and it was
+    wrong twice over: it claimed we had failed to understand the HOST when we
+    had actually failed to understand the SOURCE, and it made a foreign
+    `missing` -- the most common thing a clean host produces -- indistinguishable
+    from a corrupt unit file.
+    """
+    code = getattr(error, "error_class", None)
+    if isinstance(code, str) and code in SOURCE_ERROR_CLASSES:
+        return code
+    return UNKNOWN_SOURCE_ERROR
+
+
+def observation_error(source_code: str) -> str:
+    """The observation vocabulary term for a source code, total by construction."""
+    return _OBSERVED.get(source_code, UNKNOWN_SOURCE_ERROR)
+
+
+def check_contract_version(source: object) -> str:
+    """Refuse a source that does not advertise a version this module speaks.
+
+    A source with no `host_source_contract_version` at all is refused too, and
+    that is deliberate: the attribute is how an implementation says which
+    failure semantics it promises, and "it did not say" is not a version this
+    module can speak. An unversioned seam is exactly the one whose `missing`
+    might arrive as anything at all.
+    """
+    advertised = getattr(source, "host_source_contract_version", None)
+    if advertised != HOST_SOURCE_CONTRACT_VERSION:
+        raise UnsupportedHostSource(
+            f"this collector speaks {HOST_SOURCE_CONTRACT_VERSION!r}; the source advertises "
+            f"{advertised!r}. A census against unknown failure semantics produces a document "
+            "indistinguishable from a good one."
+        )
+    return HOST_SOURCE_CONTRACT_VERSION
 
 
 class HostSource(Protocol):
@@ -195,7 +309,7 @@ class _Ledger:
     exhausted: bool = False
 
     def note(self, error_class: str) -> None:
-        if error_class not in ERROR_CLASSES:  # pragma: no cover - guarded by tests
+        if error_class not in OBSERVATION_ERROR_CLASSES_V2:  # pragma: no cover - tested
             raise ValueError(f"{error_class!r} is not in the observation's error vocabulary")
         self.errors.append(error_class)
 
@@ -347,10 +461,17 @@ def _components(dsn: str, vault: RedactionVault) -> _Components:
         port = split.port
         user = unquote(split.username) if split.username else None
         database = unquote(split.path.lstrip("/")) or None
-    except BaseException:
+    except Exception:
         # Deliberately swallowed to a None-tuple, and deliberately NOT
         # re-raised with the DSN in the message: `str(exc)` on a URL failure
         # quotes the URL. The caller notes a `parse` error.
+        #
+        # `Exception` rather than `BaseException` for the same reason as the
+        # seam boundary: a cancelled run must not be recorded as a malformed
+        # connection string. The process-level `attribution.run_guarded` still
+        # catches `BaseException`, and that stays -- it is a CONTAINMENT
+        # boundary whose job is to stop a traceback reaching stderr, not a
+        # classification boundary that decides what a document says.
         return (None, None, None, None)
     for component in (host, user, database):
         vault.poison(component)
@@ -448,17 +569,24 @@ def _read(
         return None
     try:
         text = source.read_text(path)
-    except SourceMissing:
-        if optional:
+    except Exception as error:
+        # `Exception`, never `BaseException`. A `KeyboardInterrupt` or a
+        # `SystemExit` is not a source failure, and swallowing one here is how
+        # a cancelled run files a document reporting a parse error on every
+        # family it had not reached yet.
+        code = classify(error)
+        if code == "missing" and optional:
             # A NAMED path that is not there is a complete answer: this host has
             # no `/etc/crontab`. A path the walk DISCOVERED and then could not
             # read is a different thing and is still an error, which is why this
-            # is a per-call flag rather than a blanket rule for SourceMissing.
+            # is a per-call flag rather than a blanket rule for `missing`.
+            #
+            # Decided on the VALUE the source declared, not on the class it
+            # raised. The nominal version of this branch caught nothing across
+            # an artifact boundary, so a foreign `missing` on a clean host was
+            # classified `parse` -- an error on every host with no `/etc/crontab`.
             return None
-        ledger.note("unsupported")
-        return None
-    except BaseException as error:
-        ledger.note(classify(error))
+        ledger.note(observation_error(code))
         # `safe_error` is called for its discipline, not its value: the type
         # name is discarded here so that nothing at all from the exception can
         # reach the observation. The call documents that the value was never
@@ -481,10 +609,16 @@ def _list(source: HostSource, directory: str, *, ledger: _Ledger, budget: Budget
     """
     try:
         entries = list(source.list_dir(directory))
-    except SourceMissing:
-        return []
-    except BaseException as error:
-        ledger.note(classify(error))
+    except Exception as error:
+        code = classify(error)
+        if code == "missing":
+            # `/etc/cron.d` not existing means this host has no `cron.d`, which
+            # is a real and complete answer. A DENIED `/etc/cron.d` means the
+            # opposite and is recorded, because the two present identically to
+            # a naive reader -- and, before ruling 1, to this one as well
+            # whenever the source lived in another artifact.
+            return []
+        ledger.note(observation_error(code))
         return []
     if len(entries) > budget.max_entries:
         ledger.exhausted = True
@@ -497,8 +631,8 @@ def _run(
 ) -> str | None:
     try:
         output = source.run(argv)
-    except BaseException as error:
-        ledger.note(classify(error))
+    except Exception as error:
+        ledger.note(observation_error(classify(error)))
         return None
     vault.poison(output)
     return output
@@ -976,6 +1110,10 @@ def enumerate_family(
     """One family, by name. Raises on an undeclared name rather than returning empty."""
     if family not in _ENUMERATORS:
         raise KeyError(f"{family!r} is not a declared family; see attribution.DECLARED_FAMILIES")
+    # Checked at every entry point into the seam, not only the aggregate one. A
+    # caller that walks one family is reading the same host through the same
+    # unverified contract.
+    check_contract_version(source)
     return _ENUMERATORS[family](source, vault=vault, budget=budget or Budget())
 
 
@@ -1009,7 +1147,7 @@ def degradations(source: HostSource, *, principals: Iterable[str] = ()) -> tuple
     for path, reason, error_class in candidates:
         try:
             present = source.exists(path)
-        except BaseException:
+        except Exception:
             # A source that cannot answer "does this exist" leaves the question
             # open, and an open question about a credential file degrades
             # coverage exactly as a positive answer does. Failing closed here
@@ -1068,6 +1206,10 @@ def enumerate_all(
     because its enumerator blew up would be read by every consumer as a family
     with nothing in it, which is the one reading this whole design refuses.
     """
+    # Before ANY walk. A source whose failure semantics are unknown produces a
+    # document indistinguishable from a good one, so this is a refusal rather
+    # than a degradation -- there is no partial answer worth having here.
+    check_contract_version(source)
     limit = budget or Budget()
     skipped = set(skip)
     unknown = skipped - set(DECLARED_FAMILIES)
@@ -1083,11 +1225,14 @@ def enumerate_all(
             continue
         try:
             outcomes[family] = enumerate_family(family, source, vault=vault, budget=limit)
-        except BaseException as error:
+        except Exception as error:
             ledger = _Ledger()
-            ledger.note(classify(error))
+            ledger.note(observation_error(classify(error)))
             outcomes[family] = _outcome(family, ledger, (), attempted=True)
     return apply_degradations(outcomes, degradations(source, principals=principals))
+
+
+OBSERVATION_SCHEMA_VERSION_V2: Final = "observability-consumer-attribution-observation.v2"
 
 
 def build_observation(
@@ -1096,20 +1241,46 @@ def build_observation(
     target_id: str,
     observed_at: str,
     host_identity_digest: str,
+    collector_artifact_digest: str,
+    source_artifact_digest: str,
 ) -> dict[str, object]:
-    """The PRIVATE document, matching `postgres-consumer-attribution-observation`.
+    """The PRIVATE document, matching the v2 observation contract.
 
     Returned rather than written. Nothing in this repository puts an instance
     of this on disk: it holds resolved hosts, ports, users, databases and
     launch paths, and ADR-0004 keeps every one of those out of a checkout. A
     caller that persists it is responsible for putting it in an approved
     private store, and the only thing that may travel further is its digest.
+
+    **v2, and both digests are required.** A coverage claim is only as good as
+    the code that made it, and that code is TWO artifacts rather than one: this
+    collector decides what is looked for and how a verdict is reached, and the
+    `HostSource` implementation decides what the host actually said -- including
+    which failures are reported as `missing`, which is precisely the code that
+    separates a clean host from an unreadable one. Identifying only the
+    collector would leave the half that can silently turn a denial into an
+    absence unnamed.
+
+    v1 is not written by this function and is not deleted: it stays readable
+    historical evidence. It cannot discharge the rotation interlock, because it
+    has no field in which either artifact could be identified.
     """
     missing = set(DECLARED_FAMILIES) - set(outcomes)
     if missing:
         raise ValueError(f"an observation carries every declared family; missing {sorted(missing)}")
+    for name, digest in (
+        ("collector_artifact_digest", collector_artifact_digest),
+        ("source_artifact_digest", source_artifact_digest),
+    ):
+        if not digest or not digest.strip():
+            raise ValueError(
+                f"a v2 observation records {name}; it identifies one of the two artifacts the "
+                "coverage claim depends on, and neither is derivable from the other"
+            )
     return {
-        "schema_version": "observability-consumer-attribution-observation.v1",
+        "schema_version": OBSERVATION_SCHEMA_VERSION_V2,
+        "collector_artifact_digest": collector_artifact_digest,
+        "source_artifact_digest": source_artifact_digest,
         "target_id": target_id,
         "observed_at": observed_at,
         "host_identity_digest": host_identity_digest,

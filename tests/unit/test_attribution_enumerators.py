@@ -28,7 +28,9 @@ from dotmac_observability.attribution import (
     refuses_to_read,
 )
 from dotmac_observability.attribution_enumerators import (
-    ERROR_CLASSES,
+    HOST_SOURCE_CONTRACT_VERSION,
+    OBSERVATION_ERROR_CLASSES_V2,
+    OBSERVATION_SCHEMA_VERSION_V2,
     Budget,
     FamilyOutcome,
     HostSource,
@@ -78,6 +80,8 @@ def test_a_family_whose_enumerator_raises_still_appears_as_unknown():
     """
 
     class Hostile:
+        host_source_contract_version = HOST_SOURCE_CONTRACT_VERSION
+
         def exists(self, path: str) -> bool:
             raise SourceDenied(path)
 
@@ -204,7 +208,7 @@ def test_every_error_this_module_emits_is_in_the_contract_vocabulary():
     host.timed_out.add("/etc/systemd/system")
     for outcome in _all(host).values():
         for error in outcome.scan.errors:
-            assert error in ERROR_CLASSES, error
+            assert error in OBSERVATION_ERROR_CLASSES_V2, error
 
 
 # ── Custody ─────────────────────────────────────────────────────────────────
@@ -406,7 +410,10 @@ def test_the_observation_carries_every_family_and_refuses_a_short_one():
         target_id="erp-production",
         observed_at="2026-09-05T09:00:00Z",
         host_identity_digest="sha256:" + "ab" * 32,
+        collector_artifact_digest="sha256:" + "cd" * 32,
+        source_artifact_digest="sha256:" + "ef" * 32,
     )
+    assert document["schema_version"] == OBSERVATION_SCHEMA_VERSION_V2
     families = document["families"]
     assert isinstance(families, list)
     assert [entry["family"] for entry in families] == list(DECLARED_FAMILIES)
@@ -418,6 +425,8 @@ def test_the_observation_carries_every_family_and_refuses_a_short_one():
             target_id="erp-production",
             observed_at="2026-09-05T09:00:00Z",
             host_identity_digest="sha256:" + "ab" * 32,
+            collector_artifact_digest="sha256:" + "cd" * 32,
+            source_artifact_digest="sha256:" + "ef" * 32,
         )
 
 
@@ -429,6 +438,7 @@ def test_the_seam_is_a_protocol_this_repository_does_not_implement():
     with no host at all.
     """
     assert getattr(HostSource, "_is_protocol", False), "the seam stopped being a Protocol"
+    assert HOST_SOURCE_CONTRACT_VERSION
     for method in ("exists", "list_dir", "read_text", "run"):
         assert hasattr(HostSource, method), method
     with pytest.raises(TypeError):
@@ -436,5 +446,5 @@ def test_the_seam_is_a_protocol_this_repository_does_not_implement():
 
 
 def test_a_timeout_class_maps_to_the_contract_vocabulary():
-    assert SourceTimeout.error_class in ERROR_CLASSES
+    assert SourceTimeout.error_class in OBSERVATION_ERROR_CLASSES_V2
     assert SourceDenied.error_class == "denied"

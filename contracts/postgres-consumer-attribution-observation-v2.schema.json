@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dotmac.io/schemas/observability/postgres-consumer-attribution-observation.v2.json",
+  "title": "observability-postgres-consumer-attribution-observation.v2",
+  "description": "The PRIVATE half, v2. Same shape as v1 with one change that is not optional and could not be: BOTH `collector_artifact_digest` and `source_artifact_digest` are required.  A coverage claim is only as good as the code that made it, and that code is TWO artifacts rather than one. This repository's collector decides what is looked for and how a verdict is reached. The `HostSource` implementation -- built and released separately, in another artifact -- decides what the host actually SAID, including which failures are reported as `missing`. That single code is what separates a clean host from an unreadable one, so a source that spells it differently can turn a denial into an absence without this collector being able to tell. Naming only the collector would leave exactly that half unidentified.  v1 was not extended, and the reason matters: adding an optional field to a published contract makes one version name two shapes, and adding a required one changes what an existing document's digest means. v1 documents stay readable historical evidence and are refused nothing -- they simply cannot discharge the rotation interlock, because they have no field in which either artifact could be identified.  `additionalProperties: false` on every object, as in v1, and for the same reason: there must be no field a resolved endpoint could be typed into and no unread extra key it could arrive through. The two new codes in the `errors` vocabulary -- `missing` and `unknown` -- are the two v1 had no way to spell, and both had to be flattened into `unsupported`, which lost the distinction between 'this host cannot answer' and 'we could not understand the answer'.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "target_id",
+    "observed_at",
+    "host_identity_digest",
+    "collector_artifact_digest",
+    "source_artifact_digest",
+    "consumers",
+    "families"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "observability-consumer-attribution-observation.v2"
+    },
+    "target_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$"
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "host_identity_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "consumers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/consumer"
+      }
+    },
+    "families": {
+      "type": "array",
+      "minItems": 11,
+      "maxItems": 11,
+      "items": {
+        "$ref": "#/$defs/family_scan"
+      }
+    },
+    "collector_artifact_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "The collector that decided what to look for and how a verdict is reached. Identified by CONTENT rather than by a version name, because a version name is the thing nobody bumps."
+    },
+    "source_artifact_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "The `HostSource` implementation that actually read the host, and the remote helper it executed. One digest covering BOTH: the helper is embedded in the source artifact, so this identifies the whole of what ran. If a deployment ever supplies the helper separately, that helper's digest becomes a third required binding rather than being folded into this one -- a digest that silently covers a varying set of things is worse than no digest, because it reads as a complete identification."
+    }
+  },
+  "$defs": {
+    "consumer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "family",
+        "custody"
+      ],
+      "properties": {
+        "family": {
+          "enum": [
+            "systemd_service",
+            "systemd_timer",
+            "systemd_dropin",
+            "cron",
+            "anacron",
+            "at",
+            "docker",
+            "compose",
+            "ci_runner",
+            "script",
+            "agent"
+          ]
+        },
+        "custody": {
+          "enum": [
+            "ATTRIBUTED",
+            "UNATTRIBUTED"
+          ],
+          "description": "Derived by `derive_custody`, never assigned. `UNATTRIBUTED` is what a DSN with no owning unit, job, container or principal derives -- it is not `ATTRIBUTED` and it is not clean."
+        },
+        "owner_unit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "PRIVATE. The unit, job or container the consumer launches from."
+        },
+        "owner_principal": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "PRIVATE. The OS principal the consumer runs as."
+        },
+        "launch_path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "PRIVATE. Where the launch was found on disk."
+        },
+        "db_host": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "PRIVATE (rule 18): a resolved hostname or address."
+        },
+        "db_port": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "PRIVATE (rule 18): a resolved port."
+        },
+        "db_user": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "PRIVATE."
+        },
+        "db_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "PRIVATE."
+        },
+        "secret_pointer": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "PRIVATE. Where the credential is CUSTODIED, never the credential. There is no password property in this contract at all: the value is poisoned and dropped at parse time."
+        }
+      }
+    },
+    "family_scan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "family",
+        "attempted",
+        "completed",
+        "errors",
+        "found"
+      ],
+      "properties": {
+        "family": {
+          "enum": [
+            "systemd_service",
+            "systemd_timer",
+            "systemd_dropin",
+            "cron",
+            "anacron",
+            "at",
+            "docker",
+            "compose",
+            "ci_runner",
+            "script",
+            "agent"
+          ]
+        },
+        "attempted": {
+          "type": "boolean"
+        },
+        "completed": {
+          "type": "boolean",
+          "description": "Whether the bounded scan finished rather than hitting its bound. A bounded scan that stopped early has looked at some of the host and knows nothing about the rest."
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "denied",
+              "parse",
+              "syntax",
+              "ambiguous",
+              "dynamic",
+              "timeout",
+              "unsupported",
+              "missing",
+              "unknown"
+            ]
+          },
+          "description": "CLASSIFICATIONS, never messages. A message on this path carries the DSN that failed to parse.  Two codes are new in v2. `missing` is what a source reports for a path that is not there; v1 had to flatten it into `unsupported`, and the flattening is exactly what made a clean host indistinguishable from an unreadable one across an artifact boundary. `unknown` is what an `error_class` this collector does not recognize becomes -- absent, non-string, or from a vocabulary this collector predates. It is a CODE rather than a silence, so it reaches this document, so the family derives UNKNOWN. Nothing is ever guessed at, and ABSENT is never inferred from a failure to understand."
+        },
+        "found": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

@@ -25,6 +25,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .attribution import (
+    ATTRIBUTION_SCHEMA_VERSION,
+    ATTRIBUTION_SCHEMA_VERSION_V2,
     DECLARED_FAMILIES,
     FamilyScan,
     LeakRefusal,
@@ -514,6 +516,22 @@ _PUBLIC_CONSUMER_KEYS = frozenset({"family", "custody"})
 # vocabulary term the envelope was always going to emit -- so nothing is
 # disclosed that a reader did not already have. Everything else stays poisoned,
 # and the substring match that catches an embedded DSN is untouched.
+# Which observation versions this command reads, and what each projects into.
+# v1 is kept readable deliberately -- it is historical evidence and refusing it
+# would destroy the record -- but it projects into a v1 envelope, which carries
+# no `source_artifact_digest` and therefore cannot discharge the rotation
+# interlock. That is a property of the document, not a policy applied to it.
+_OBSERVATION_VERSIONS: dict[str, tuple[str, str]] = {
+    "observability-consumer-attribution-observation.v1": (
+        "postgres-consumer-attribution-observation",
+        ATTRIBUTION_SCHEMA_VERSION,
+    ),
+    "observability-consumer-attribution-observation.v2": (
+        "postgres-consumer-attribution-observation-v2",
+        ATTRIBUTION_SCHEMA_VERSION_V2,
+    ),
+}
+
 _VOCABULARY = " ".join(
     (*DECLARED_FAMILIES, "SCANNED", "ABSENT", "UNKNOWN", "ATTRIBUTED", "UNATTRIBUTED")
 )
@@ -549,12 +567,17 @@ def _cmd_attribution_project(
         print(f"observation is unreadable ({safe_error(error)})", file=sys.stderr)
         return 1
 
-    findings = contract_findings(
-        contracts,
-        "postgres-consumer-attribution-observation",
-        document,
-        observation.name,
-    )
+    version = document.get("schema_version") if isinstance(document, dict) else None
+    if version not in _OBSERVATION_VERSIONS:
+        print(
+            f"{observation.name} declares schema_version {version!r}; this command reads "
+            f"{sorted(_OBSERVATION_VERSIONS)}",
+            file=sys.stderr,
+        )
+        return 1
+    contract_name, envelope_version = _OBSERVATION_VERSIONS[version]
+
+    findings = contract_findings(contracts, contract_name, document, observation.name)
     if findings:
         return _report(findings, heading="observation does not match its contract")
 
@@ -579,23 +602,36 @@ def _cmd_attribution_project(
     attributed = sum(1 for c in document["consumers"] if c["custody"] == "ATTRIBUTED")
     unattributed = sum(1 for c in document["consumers"] if c["custody"] == "UNATTRIBUTED")
 
+    observed: dict[str, object] = {
+        "target_id": document["target_id"],
+        "observation_digest": f"sha256:{canonical_digest(document)}",
+        "authorization_digest": authorization_digest,
+        "challenge_digest": challenge_digest,
+        "authority_ref": authority_ref,
+        "host_identity_digest": document["host_identity_digest"],
+        "observed_at": document["observed_at"],
+        "consumers_attributed": attributed,
+        "consumers_unattributed": unattributed,
+    }
+    if envelope_version == ATTRIBUTION_SCHEMA_VERSION_V2:
+        # Both digests are READ from the document, never recomputed. The
+        # artifacts that ran are not this checkout: a collector released last
+        # month produced the observation, and the `HostSource` implementation
+        # is built in another repository entirely. Recomputing either here
+        # would answer "what is installed now" while claiming to answer "what
+        # produced this", which is the shape of a binding that can never be
+        # wrong and therefore proves nothing.
+        observed["collector_artifact_digest"] = document["collector_artifact_digest"]
+        observed["source_artifact_digest"] = document["source_artifact_digest"]
+    else:
+        # v1 has no field for either artifact. The collector is identified by
+        # the running code because there is nothing else to identify it by, and
+        # the source cannot be identified at all -- which is exactly why a v1
+        # envelope does not discharge the rotation interlock.
+        observed["collector_artifact_digest"] = f"sha256:{_collector_digest()}"
+
     try:
-        envelope = project_envelope(
-            {
-                "target_id": document["target_id"],
-                "observation_digest": f"sha256:{canonical_digest(document)}",
-                "collector_artifact_digest": f"sha256:{_collector_digest()}",
-                "authorization_digest": authorization_digest,
-                "challenge_digest": challenge_digest,
-                "authority_ref": authority_ref,
-                "host_identity_digest": document["host_identity_digest"],
-                "observed_at": document["observed_at"],
-                "consumers_attributed": attributed,
-                "consumers_unattributed": unattributed,
-            },
-            scans,
-            vault=vault,
-        )
+        envelope = project_envelope(observed, scans, vault=vault, version=envelope_version)
     except LeakRefusal as error:
         # Named separately from every other failure because it means something
         # different: not "the input was wrong" but "the output would have
