@@ -1,20 +1,25 @@
-"""Adding v2 must not widen v1. That is the whole of ruling 2's second clause.
+"""One envelope version, two observation versions, and one binding between them.
 
-The mistake it forbids is small and almost invisible. One shared
-`CLASSIFIED_FIELDS` table, one new entry for `source_artifact_digest`, and from
-that moment `project_envelope` accepts the field for a v1 projection too. It
-does not raise; it does not appear in the output; the field is simply dropped.
-A v1 envelope then exists that a v1 reader believes was produced under v1
-rules, and nothing anywhere says otherwise.
+The envelope carries `observation_digest`. That digest binds the COMPLETE
+observation, including both artifact digests, so nothing beneath it needs
+copying up -- and copying anything up would create a second place the same
+truth lives, which is the copy that goes stale.
 
-So the allowlists are version-SPECIFIC and the isolation is asserted in both
-directions: v2's field must be refused by v1, and v1 must still accept
-everything it always did.
+An envelope v2 briefly existed here carrying `source_artifact_digest`, on the
+reasoning that a gate reads the envelope and should not have to fetch a private
+document. The correction is that such a reader must resolve the retained
+observation or answer UNKNOWN, which is the identical discipline
+`derive_verdict` already enforces one level down: "we could not look" is never
+spelled the same way as "there is nothing there". It was removed rather than
+superseded because no instance was ever produced, signed or accepted -- the
+tests below pin that removal so the copy cannot come back by convenience.
 
-v1 is retained, not deprecated. It stays readable historical evidence. What it
-cannot do is discharge the rotation interlock, because it has no field naming
-the `HostSource` implementation that decided which failures were `missing` --
-and that decision is what separates a clean host from an unreadable one.
+The observation is versioned and v1 is retained. v1 stays readable historical
+evidence. It cannot discharge the rotation interlock -- not because it is old,
+but because it has no field in which the `HostSource` implementation could be
+named, and that implementation decides which failures are reported as
+`missing`, which is the single code separating a clean host from an unreadable
+one.
 """
 
 from __future__ import annotations
@@ -25,26 +30,23 @@ import pytest
 
 from dotmac_observability.attribution import (
     ATTRIBUTION_SCHEMA_VERSION,
-    ATTRIBUTION_SCHEMA_VERSION_V2,
     CLASSIFIED_FIELDS,
-    CLASSIFIED_FIELDS_BY_VERSION,
     ENVELOPE_FIELDS,
-    ENVELOPE_FIELDS_BY_VERSION,
-    ENVELOPE_FIELDS_V2,
-    ENVELOPE_VERSIONS,
+    InterlockVerdict,
     RedactionVault,
     UnclassifiedField,
     discharges_rotation_interlock,
     project_envelope,
 )
+from dotmac_observability.validate import canonical_digest
 from tests.attribution_fixtures import clean_scans, observation
 from tests.conftest import CONTRACTS
 
 V1_ENVELOPE = CONTRACTS / "postgres-consumer-attribution-envelope.schema.json"
-V2_ENVELOPE = CONTRACTS / "postgres-consumer-attribution-envelope-v2.schema.json"
 V1_OBSERVATION = CONTRACTS / "postgres-consumer-attribution-observation.schema.json"
 V2_OBSERVATION = CONTRACTS / "postgres-consumer-attribution-observation-v2.schema.json"
 
+_COLLECTOR_DIGEST = "sha256:" + "cd" * 32
 _SOURCE_DIGEST = "sha256:" + "ef" * 32
 
 
@@ -52,31 +54,124 @@ def _load(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def test_all_four_contracts_exist():
-    """Sensitivity: every comparison below would pass over a missing file."""
-    for path in (V1_ENVELOPE, V2_ENVELOPE, V1_OBSERVATION, V2_OBSERVATION):
-        assert path.is_file(), path.name
+def _observation_document(**overrides: object) -> dict[str, object]:
+    """A minimal v2 observation. Only the fields the interlock reads matter here."""
+    document: dict[str, object] = {
+        "schema_version": "observability-consumer-attribution-observation.v2",
+        "target_id": "erp-production",
+        "observed_at": "2026-09-05T09:00:00Z",
+        "host_identity_digest": "sha256:" + "ab" * 32,
+        "collector_artifact_digest": _COLLECTOR_DIGEST,
+        "source_artifact_digest": _SOURCE_DIGEST,
+        "consumers": [],
+        "families": [],
+    }
+    document.update(overrides)
+    return document
 
 
-# ── v1 was not touched ──────────────────────────────────────────────────────
+def _envelope_for(document) -> dict[str, object]:
+    return project_envelope(
+        observation(observation_digest=f"sha256:{canonical_digest(document)}"),
+        clean_scans(),
+        vault=RedactionVault(),
+    )
 
 
-def test_v1_gained_no_field_and_no_new_requirement():
-    """A published closed contract's shape and digest meaning are frozen.
+def test_the_three_contracts_exist_and_the_fourth_does_not():
+    """Sensitivity in both directions.
 
-    An optional field would make one version name two shapes; a required one
-    would change what an already-stored document's digest means. Neither is
-    available, which is why v2 exists at all.
+    Without the positive half, every comparison below would pass over a missing
+    file. Without the negative half, the removal this change exists for could
+    be silently undone by re-adding the schema.
     """
-    envelope = _load(V1_ENVELOPE)
-    assert set(envelope["properties"]) == set(ENVELOPE_FIELDS)
-    assert "source_artifact_digest" not in envelope["properties"]
-    assert envelope["properties"]["schema_version"]["const"] == ATTRIBUTION_SCHEMA_VERSION
+    for path in (V1_ENVELOPE, V1_OBSERVATION, V2_OBSERVATION):
+        assert path.is_file(), path.name
+    assert not (CONTRACTS / "postgres-consumer-attribution-envelope-v2.schema.json").is_file(), (
+        "an envelope v2 is back. The envelope carries `observation_digest`, which binds the "
+        "complete observation; a copied artifact digest is a second place the truth lives"
+    )
 
-    observation_v1 = _load(V1_OBSERVATION)
-    assert "source_artifact_digest" not in observation_v1["properties"]
-    assert "collector_artifact_digest" not in observation_v1["properties"]
-    assert set(observation_v1["$defs"]["family_scan"]["properties"]["errors"]["items"]["enum"]) == {
+
+def test_there_is_exactly_one_envelope_version():
+    envelopes = sorted(CONTRACTS.glob("postgres-consumer-attribution-envelope*.schema.json"))
+    assert [path.name for path in envelopes] == [
+        "postgres-consumer-attribution-envelope.schema.json"
+    ]
+    assert _load(V1_ENVELOPE)["properties"]["schema_version"]["const"] == (
+        ATTRIBUTION_SCHEMA_VERSION
+    )
+
+
+def test_the_envelope_carries_no_artifact_digest_it_did_not_already_carry():
+    """`source_artifact_digest` is absent from the envelope, at every level.
+
+    Checked over every nested `properties` block rather than the top level
+    only, because a copied field would most naturally be added to a per-family
+    result rather than to the root.
+    """
+    names: set[str] = set()
+
+    def walk(node) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "properties" and isinstance(value, dict):
+                    names.update(value)
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(_load(V1_ENVELOPE))
+    assert "source_artifact_digest" not in names
+    assert "observation_digest" in names, "the one binding is gone; nothing binds the evidence"
+
+
+# ── The projection refuses the copy ─────────────────────────────────────────
+
+
+def test_the_projection_refuses_the_source_digest_rather_than_dropping_it():
+    """Raise, not drop. A dropped field produces an envelope that looks correct.
+
+    `source_artifact_digest` is simply not classified, so default-deny does the
+    work -- there is no special case naming it, which is why the next field
+    nobody has thought about behaves the same way.
+    """
+    with pytest.raises(UnclassifiedField, match="source_artifact_digest"):
+        project_envelope(
+            observation(source_artifact_digest=_SOURCE_DIGEST),
+            clean_scans(),
+            vault=RedactionVault(),
+        )
+    assert "source_artifact_digest" not in CLASSIFIED_FIELDS
+
+
+def test_a_normal_projection_still_succeeds():
+    """Positive control: refusing everything would satisfy the test above."""
+    envelope = project_envelope(observation(), clean_scans(), vault=RedactionVault())
+    assert set(envelope) == set(ENVELOPE_FIELDS)
+    assert envelope["schema_version"] == ATTRIBUTION_SCHEMA_VERSION
+
+
+def test_the_projection_takes_no_version_argument():
+    """The version machinery is gone, not merely unused.
+
+    A dormant `version=` parameter is an invitation to add the second envelope
+    back, and it would read as supported.
+    """
+    import inspect
+
+    assert "version" not in inspect.signature(project_envelope).parameters
+
+
+# ── v1 observation untouched, v2 requires both digests ──────────────────────
+
+
+def test_the_v1_observation_gained_nothing():
+    document = _load(V1_OBSERVATION)
+    assert "source_artifact_digest" not in document["properties"]
+    assert "collector_artifact_digest" not in document["properties"]
+    assert set(document["$defs"]["family_scan"]["properties"]["errors"]["items"]["enum"]) == {
         "denied",
         "parse",
         "syntax",
@@ -87,201 +182,94 @@ def test_v1_gained_no_field_and_no_new_requirement():
     }
 
 
-def test_v2_requires_both_artifact_digests():
-    """Both, and required. One of them alone identifies half of what ran."""
-    observation_v2 = _load(V2_OBSERVATION)
-    assert {"collector_artifact_digest", "source_artifact_digest"} <= set(
-        observation_v2["required"]
-    )
-    assert observation_v2["properties"]["schema_version"]["const"].endswith("observation.v2")
-
-    envelope_v2 = _load(V2_ENVELOPE)
-    assert "source_artifact_digest" in envelope_v2["required"]
-    assert "collector_artifact_digest" in envelope_v2["required"]
+def test_the_v2_observation_requires_both_artifact_digests():
+    document = _load(V2_OBSERVATION)
+    assert {"collector_artifact_digest", "source_artifact_digest"} <= set(document["required"])
+    assert document["additionalProperties"] is False
 
 
-@pytest.mark.parametrize("path", [V2_ENVELOPE, V2_OBSERVATION], ids=lambda p: p.name)
-def test_v2_closes_every_object_exactly_as_v1_does(path):
-    """The new version must not be the loosening the old one refused to be."""
-    open_objects: list[str] = []
-
-    def walk(node, where: str) -> None:
-        if isinstance(node, dict):
-            if (
-                node.get("type") == "object"
-                and "properties" in node
-                and node.get("additionalProperties") is not False
-            ):
-                open_objects.append(where)
-            for key, value in node.items():
-                walk(value, f"{where}/{key}")
-        elif isinstance(node, list):
-            for index, value in enumerate(node):
-                walk(value, f"{where}/{index}")
-
-    walk(_load(path), "")
-    assert open_objects == [], f"{path.name} has open objects at {open_objects}"
+# ── The interlock resolves the observation, or answers UNKNOWN ──────────────
 
 
-def test_the_v2_envelope_still_has_no_private_field():
-    forbidden = {
-        "db_host",
-        "db_port",
-        "db_user",
-        "db_name",
-        "launch_path",
-        "secret_pointers",
-        "env_var_names",
-        "dsn",
-        "password",
-    }
-    assert not (set(_load(V2_ENVELOPE)["properties"]) & forbidden)
+def test_an_envelope_alone_cannot_answer_and_says_so():
+    """The ruling, as the assertion it becomes.
 
-
-# ── The allowlists do not leak into one another ─────────────────────────────
-
-
-def test_the_v2_field_is_refused_by_a_v1_projection():
-    """The exact defect a shared table would introduce, planted.
-
-    Not "it is dropped" -- it must RAISE. A silently dropped field produces a
-    v1 envelope that looks correct and was built from an input v1 does not
-    know about.
+    Not `False`. A reader holding only the envelope has not established that
+    the binding fails -- it has established nothing, and `REFUSED` would be a
+    claim it is not entitled to make.
     """
-    with pytest.raises(UnclassifiedField, match="source_artifact_digest"):
-        project_envelope(
-            observation(source_artifact_digest=_SOURCE_DIGEST),
-            clean_scans(),
-            vault=RedactionVault(),
-            version=ATTRIBUTION_SCHEMA_VERSION,
-        )
+    document = _observation_document()
+    assert discharges_rotation_interlock(_envelope_for(document)) is InterlockVerdict.UNKNOWN
 
 
-def test_the_default_version_is_v1_so_an_unversioned_caller_cannot_widen():
-    """A caller that names no version gets the NARROWER allowlist.
+def test_resolving_the_named_observation_discharges_it():
+    """Positive control. A predicate that always answered UNKNOWN would pass above."""
+    document = _observation_document()
+    verdict = discharges_rotation_interlock(_envelope_for(document), document)
+    assert verdict is InterlockVerdict.DISCHARGED
 
-    Defaulting to the newest would mean every existing call site silently
-    started accepting v2's field the moment v2 landed, which is the same
-    widening by a different route.
+
+def test_a_resolved_v1_observation_is_refused_rather_than_unknown():
+    """Determinate: we looked at the right document and it names no source.
+
+    `REFUSED` and `UNKNOWN` both block rotation, so collapsing them would be
+    safe and still wrong -- they call for different repairs. One is fixed by
+    fetching the observation; the other by re-running the census with a source
+    that identifies itself.
     """
-    with pytest.raises(UnclassifiedField):
-        project_envelope(
-            observation(source_artifact_digest=_SOURCE_DIGEST),
-            clean_scans(),
-            vault=RedactionVault(),
-        )
-
-
-def test_a_v2_projection_accepts_and_emits_the_field():
-    """Positive control. Without it, refusing everything would pass the above."""
-    envelope = project_envelope(
-        observation(source_artifact_digest=_SOURCE_DIGEST),
-        clean_scans(),
-        vault=RedactionVault(),
-        version=ATTRIBUTION_SCHEMA_VERSION_V2,
+    legacy = _observation_document(
+        schema_version="observability-consumer-attribution-observation.v1"
     )
-    assert envelope["source_artifact_digest"] == _SOURCE_DIGEST
-    assert envelope["schema_version"] == ATTRIBUTION_SCHEMA_VERSION_V2
-    assert set(envelope) == set(ENVELOPE_FIELDS_V2)
-
-
-def test_a_v2_projection_without_the_field_is_refused():
-    """v2 requires it. An absent required field must not produce a short envelope."""
-    with pytest.raises(KeyError):
-        project_envelope(
-            observation(),
-            clean_scans(),
-            vault=RedactionVault(),
-            version=ATTRIBUTION_SCHEMA_VERSION_V2,
-        )
-
-
-def test_an_unknown_version_is_refused_rather_than_guessed():
-    with pytest.raises(ValueError, match="v3"):
-        project_envelope(
-            observation(),
-            clean_scans(),
-            vault=RedactionVault(),
-            version="observability-consumer-attribution-envelope.v3",
-        )
-
-
-def test_the_allowlists_differ_by_exactly_the_new_field():
-    """Asserted as a difference, not as two lists, so drift names itself."""
-    v1 = set(CLASSIFIED_FIELDS_BY_VERSION[ATTRIBUTION_SCHEMA_VERSION])
-    v2 = set(CLASSIFIED_FIELDS_BY_VERSION[ATTRIBUTION_SCHEMA_VERSION_V2])
-    assert v2 - v1 == {"source_artifact_digest"}
-    assert v1 - v2 == set()
-    assert v1 == set(CLASSIFIED_FIELDS), "the v1 table is no longer the merged one"
-
-
-def test_every_declared_version_has_both_a_field_list_and_an_allowlist():
-    for version in ENVELOPE_VERSIONS:
-        assert version in ENVELOPE_FIELDS_BY_VERSION
-        assert version in CLASSIFIED_FIELDS_BY_VERSION
-    assert set(ENVELOPE_FIELDS_BY_VERSION) == set(ENVELOPE_VERSIONS)
-    assert set(CLASSIFIED_FIELDS_BY_VERSION) == set(ENVELOPE_VERSIONS)
-
-
-@pytest.mark.parametrize(
-    ("version", "path"),
-    [
-        (ATTRIBUTION_SCHEMA_VERSION, V1_ENVELOPE),
-        (ATTRIBUTION_SCHEMA_VERSION_V2, V2_ENVELOPE),
-    ],
-)
-def test_each_contract_agrees_with_the_library_that_projects_into_it(version, path):
-    """Two spellings of one shape drift, and the published one is the stale one."""
-    schema = _load(path)
-    assert set(schema["properties"]) == set(ENVELOPE_FIELDS_BY_VERSION[version])
-    assert set(schema["required"]) == set(ENVELOPE_FIELDS_BY_VERSION[version])
-    assert schema["properties"]["schema_version"]["const"] == version
-
-
-# ── The interlock ───────────────────────────────────────────────────────────
-
-
-def test_a_v1_envelope_does_not_discharge_the_rotation_interlock():
-    """v1 is readable evidence and cannot release what rotation waits on.
-
-    Not because it is old, but because it names no `HostSource` artifact -- and
-    that artifact decides which failures are reported as `missing`, which is
-    the single code separating a clean host from an unreadable one.
-    """
-    envelope = project_envelope(observation(), clean_scans(), vault=RedactionVault())
-    assert discharges_rotation_interlock(envelope) is False
-
-
-def test_a_v2_envelope_with_both_bindings_does_discharge_it():
-    """Positive control: a predicate that always refused would pass the above."""
-    envelope = project_envelope(
-        observation(source_artifact_digest=_SOURCE_DIGEST),
-        clean_scans(),
-        vault=RedactionVault(),
-        version=ATTRIBUTION_SCHEMA_VERSION_V2,
-    )
-    assert discharges_rotation_interlock(envelope) is True
+    del legacy["collector_artifact_digest"]
+    del legacy["source_artifact_digest"]
+    verdict = discharges_rotation_interlock(_envelope_for(legacy), legacy)
+    assert verdict is InterlockVerdict.REFUSED
 
 
 @pytest.mark.parametrize("missing", ["collector_artifact_digest", "source_artifact_digest"])
-def test_a_v2_envelope_missing_either_binding_does_not_discharge_it(missing):
+def test_a_v2_observation_missing_either_digest_is_refused(missing):
     """One digest identifies half of what ran, which is not an identification."""
-    envelope = project_envelope(
-        observation(source_artifact_digest=_SOURCE_DIGEST),
-        clean_scans(),
-        vault=RedactionVault(),
-        version=ATTRIBUTION_SCHEMA_VERSION_V2,
+    document = _observation_document()
+    del document[missing]
+    assert discharges_rotation_interlock(_envelope_for(document), document) is (
+        InterlockVerdict.REFUSED
     )
-    del envelope[missing]
-    assert discharges_rotation_interlock(envelope) is False
 
 
-def test_the_interlock_predicate_reads_the_version_and_not_merely_the_fields():
-    """A v1 envelope carrying a stray v2-shaped key still does not discharge.
+def test_the_wrong_observation_is_unknown_and_never_discharges():
+    """Being handed the wrong document says nothing about the right one.
 
-    Checking only for the presence of two digests would let a hand-assembled
-    document claim a binding under a version whose contract has no such field.
+    The dangerous alternative is not `REFUSED` -- it is accepting any document
+    that happens to carry two digests, which would let an unrelated
+    observation discharge an envelope it has nothing to do with.
     """
-    forged = dict(project_envelope(observation(), clean_scans(), vault=RedactionVault()))
-    forged["source_artifact_digest"] = _SOURCE_DIGEST
-    assert discharges_rotation_interlock(forged) is False
+    named = _observation_document()
+    other = _observation_document(target_id="academy-production")
+    envelope = _envelope_for(named)
+    assert discharges_rotation_interlock(envelope, other) is InterlockVerdict.UNKNOWN
+
+
+def test_an_envelope_with_no_binding_is_unknown():
+    envelope = dict(project_envelope(observation(), clean_scans(), vault=RedactionVault()))
+    del envelope["observation_digest"]
+    assert discharges_rotation_interlock(envelope, _observation_document()) is (
+        InterlockVerdict.UNKNOWN
+    )
+
+
+def test_the_interlock_is_three_valued_and_all_three_are_reachable():
+    """A two-valued predicate cannot express "we could not look".
+
+    Asserted as reachability rather than as an enum listing, because an enum
+    with an unreachable member is the same defect as not having it.
+    """
+    named = _observation_document()
+    envelope = _envelope_for(named)
+    legacy = _observation_document()
+    del legacy["source_artifact_digest"]
+    reached = {
+        discharges_rotation_interlock(envelope),
+        discharges_rotation_interlock(envelope, named),
+        discharges_rotation_interlock(_envelope_for(legacy), legacy),
+    }
+    assert reached == set(InterlockVerdict)

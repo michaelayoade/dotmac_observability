@@ -19,15 +19,15 @@ import pytest
 
 from dotmac_observability.attribution import (
     ATTRIBUTION_SCHEMA_VERSION,
-    ATTRIBUTION_SCHEMA_VERSION_V2,
     DECLARED_FAMILIES,
     ENVELOPE_FIELDS,
-    ENVELOPE_FIELDS_V2,
+    InterlockVerdict,
     RedactionVault,
     discharges_rotation_interlock,
 )
 from dotmac_observability.attribution_enumerators import build_observation, enumerate_all
 from dotmac_observability.cli import main
+from dotmac_observability.validate import canonical_digest
 from tests.attribution_fixtures import DIGEST_C, DIGEST_D
 from tests.attribution_hosts import populated_host
 from tests.conftest import CONTRACTS
@@ -102,8 +102,8 @@ def test_a_valid_observation_projects_to_a_publishable_envelope(tmp_path, capsys
     code, captured = _run(path, capsys)
     assert code == 0
     envelope = json.loads(captured.out)
-    assert set(envelope) == set(ENVELOPE_FIELDS_V2)
-    assert envelope["schema_version"] == ATTRIBUTION_SCHEMA_VERSION_V2
+    assert set(envelope) == set(ENVELOPE_FIELDS)
+    assert envelope["schema_version"] == ATTRIBUTION_SCHEMA_VERSION
     assert envelope["target_id"] == "erp-production"
     assert len(envelope["coverage"]) == len(DECLARED_FAMILIES)
 
@@ -191,45 +191,57 @@ def test_a_missing_reference_is_refused_because_each_names_a_different_authority
         )
 
 
-def test_both_artifact_digests_are_read_from_the_document_never_recomputed(tmp_path, capsys):
-    """The artifacts that ran are not this checkout, and must not be assumed to be.
+def test_the_collector_digest_is_read_from_the_document_never_recomputed(tmp_path, capsys):
+    """The collector that ran is not this checkout, and must not be assumed to be.
 
-    A collector released last month produced the observation; the `HostSource`
-    implementation is built in another repository entirely. Recomputing either
-    here would answer "what is installed now" while claiming to answer "what
-    produced this" -- a binding that can never disagree with itself, and
-    therefore proves nothing. It would also be silently WRONG the first time an
-    operator ran a published collector against a newer checkout.
-
-    The previous version of this test asserted the local recomputation, and it
-    passed for exactly that reason.
+    It may be a release from last month. Recomputing here would answer "what is
+    installed now" while claiming to answer "what produced this" -- a binding
+    that can never disagree with itself and therefore proves nothing. An
+    earlier version of this test asserted the local recomputation and passed
+    for exactly that reason.
     """
     path, document = _observation(tmp_path)
     code, captured = _run(path, capsys)
     assert code == 0
     envelope = json.loads(captured.out)
     assert envelope["collector_artifact_digest"] == document["collector_artifact_digest"]
-    assert envelope["source_artifact_digest"] == document["source_artifact_digest"]
-    assert envelope["collector_artifact_digest"] != envelope["source_artifact_digest"], (
-        "the two artifacts are reported as one; reaching for the near-miss binding is how "
-        "a pair that could never be equal for any input ships reading as correct"
-    )
 
 
-def test_a_v2_envelope_discharges_the_interlock_and_a_v1_one_does_not(tmp_path, capsys):
-    """Both halves in one test, so neither can be satisfied by a constant."""
-    path, _ = _observation(tmp_path)
+def test_the_source_digest_is_not_copied_into_the_envelope(tmp_path, capsys):
+    """It stays in the observation, which the envelope binds by digest.
+
+    A copy would be a second place the same truth lives, and the copy is the
+    one that goes stale. The observation is still fully bound: recomputing its
+    digest here must reproduce exactly what the envelope names.
+    """
+    path, document = _observation(tmp_path)
     code, captured = _run(path, capsys)
     assert code == 0
-    assert discharges_rotation_interlock(json.loads(captured.out)) is True
+    envelope = json.loads(captured.out)
+    assert "source_artifact_digest" not in envelope
+    assert document["source_artifact_digest"], "the fixture carries no source digest to omit"
+    assert envelope["observation_digest"] == f"sha256:{canonical_digest(document)}"
+
+
+def test_an_envelope_alone_is_unknown_and_resolving_the_observation_answers(tmp_path, capsys):
+    """All three verdicts from the real command, so none can be a constant."""
+    path, document = _observation(tmp_path)
+    code, captured = _run(path, capsys)
+    assert code == 0
+    envelope = json.loads(captured.out)
+    assert discharges_rotation_interlock(envelope) is InterlockVerdict.UNKNOWN
+    assert discharges_rotation_interlock(envelope, document) is InterlockVerdict.DISCHARGED
 
     legacy = _v1_observation(tmp_path)
     code, captured = _run(legacy, capsys)
     assert code == 0
-    envelope = json.loads(captured.out)
-    assert envelope["schema_version"] == ATTRIBUTION_SCHEMA_VERSION
-    assert set(envelope) == set(ENVELOPE_FIELDS)
-    assert discharges_rotation_interlock(envelope) is False
+    legacy_envelope = json.loads(captured.out)
+    assert legacy_envelope["schema_version"] == ATTRIBUTION_SCHEMA_VERSION
+    assert set(legacy_envelope) == set(ENVELOPE_FIELDS)
+    legacy_document = json.loads(legacy.read_text(encoding="utf-8"))
+    assert discharges_rotation_interlock(legacy_envelope, legacy_document) is (
+        InterlockVerdict.REFUSED
+    )
 
 
 def test_a_v1_observation_is_still_readable_rather_than_refused(tmp_path, capsys):
@@ -243,7 +255,7 @@ def test_a_v1_observation_is_still_readable_rather_than_refused(tmp_path, capsys
     code, captured = _run(legacy, capsys)
     assert code == 0
     envelope = json.loads(captured.out)
-    assert "source_artifact_digest" not in envelope
+    assert set(envelope) == set(ENVELOPE_FIELDS)
     assert len(envelope["coverage"]) == len(DECLARED_FAMILIES)
 
 
