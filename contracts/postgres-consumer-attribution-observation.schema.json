@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dotmac.io/schemas/observability/postgres-consumer-attribution-observation.v1.json",
+  "title": "observability-postgres-consumer-attribution-observation.v1",
+  "description": "The PRIVATE half. Every INSTANCE of this document is private material under ADR-0004 and never enters Git: it holds the resolved database host, port, user and name, the launch path a consumer was found at and the credential custody pointer it reads. The SHAPE is public, and publishing the shape is what lets a reviewer disagree with the split -- the same arrangement `private-inventory.schema.json` already keeps.  An instance is held under an approved OpenBao deployment-inventory path or another explicitly owned private source, and its digest -- never its values -- is what the public envelope carries. Nothing in this repository writes an instance to disk in a checkout, and the leakage battery asserts that a value from one of these fields aborts the projection rather than being redacted out of it.  Note what is absent even here: there is no `password` property. A parsed password is poisoned into the `RedactionVault` and dropped at parse time, so the question of whether the private store is a safe place for it never arises. The credential is named by custody pointer, and the pointer is resolved by whoever holds the store.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "target_id",
+    "observed_at",
+    "host_identity_digest",
+    "consumers",
+    "families"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "observability-consumer-attribution-observation.v1"
+    },
+    "target_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$"
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "host_identity_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "consumers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/consumer"
+      }
+    },
+    "families": {
+      "type": "array",
+      "minItems": 11,
+      "maxItems": 11,
+      "items": {
+        "$ref": "#/$defs/family_scan"
+      }
+    }
+  },
+  "$defs": {
+    "consumer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "family",
+        "custody"
+      ],
+      "properties": {
+        "family": {
+          "enum": [
+            "systemd_service",
+            "systemd_timer",
+            "systemd_dropin",
+            "cron",
+            "anacron",
+            "at",
+            "docker",
+            "compose",
+            "ci_runner",
+            "script",
+            "agent"
+          ]
+        },
+        "custody": {
+          "enum": [
+            "ATTRIBUTED",
+            "UNATTRIBUTED"
+          ],
+          "description": "Derived by `derive_custody`, never assigned. `UNATTRIBUTED` is what a DSN with no owning unit, job, container or principal derives -- it is not `ATTRIBUTED` and it is not clean."
+        },
+        "owner_unit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "PRIVATE. The unit, job or container the consumer launches from."
+        },
+        "owner_principal": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "PRIVATE. The OS principal the consumer runs as."
+        },
+        "launch_path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "PRIVATE. Where the launch was found on disk."
+        },
+        "db_host": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "PRIVATE (rule 18): a resolved hostname or address."
+        },
+        "db_port": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "PRIVATE (rule 18): a resolved port."
+        },
+        "db_user": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "PRIVATE."
+        },
+        "db_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "PRIVATE."
+        },
+        "secret_pointer": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "PRIVATE. Where the credential is CUSTODIED, never the credential. There is no password property in this contract at all: the value is poisoned and dropped at parse time."
+        }
+      }
+    },
+    "family_scan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "family",
+        "attempted",
+        "completed",
+        "errors",
+        "found"
+      ],
+      "properties": {
+        "family": {
+          "enum": [
+            "systemd_service",
+            "systemd_timer",
+            "systemd_dropin",
+            "cron",
+            "anacron",
+            "at",
+            "docker",
+            "compose",
+            "ci_runner",
+            "script",
+            "agent"
+          ]
+        },
+        "attempted": {
+          "type": "boolean"
+        },
+        "completed": {
+          "type": "boolean",
+          "description": "Whether the bounded scan finished rather than hitting its bound. A bounded scan that stopped early has looked at some of the host and knows nothing about the rest."
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "denied",
+              "parse",
+              "syntax",
+              "ambiguous",
+              "dynamic",
+              "timeout",
+              "unsupported"
+            ]
+          },
+          "description": "CLASSIFICATIONS, never messages. A message on this path carries the DSN that failed to parse."
+        },
+        "found": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}
