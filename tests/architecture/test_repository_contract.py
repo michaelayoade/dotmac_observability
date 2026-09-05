@@ -73,7 +73,28 @@ def test_the_declared_contracts_are_all_present():
         # like the rest — it carries a vocabulary and a policy, never an
         # address, a store path or a credential basename.
         "telemetry-ingestion.schema.json",
+        # Postgres consumer attribution, as the SAME public/private split every
+        # other pair here keeps (ADR-0004). The envelope is committable: logical
+        # target id, derived coverage verdicts, counts, and three digests naming
+        # three different authorities -- and no property a resolved host, port,
+        # user, database, launch path or credential pointer could be typed into.
+        # The observation is the private half; its shape is published so a
+        # reviewer can disagree with the split, and its every INSTANCE stays out
+        # of Git.
+        "postgres-consumer-attribution-envelope.schema.json",
+        "postgres-consumer-attribution-observation.schema.json",
     }
+    # `consumer-attribution-authorization.schema.json` and
+    # `attribution-challenge.schema.json` are deliberately ABSENT, and for two
+    # DIFFERENT reasons that must not be collapsed into one. Permission to
+    # inspect a target is `ConsumerAttributionAuthorizationV1`, owned by
+    # `dotmac-deployment-control`. The nonce, freshness, target binding and
+    # output-signature semantics are `AttributionChallengeV1`, owned by the
+    # observation authority. A single request document here would let whoever
+    # granted access also define what counts as proof of the result; two
+    # issuers, two documents, neither able to close the loop alone. This
+    # repository consumes both by digest and defines neither (rule 20).
+    #
     # `deployment-authorization.schema.json` is deliberately ABSENT. Defining
     # one here would make an adopter into a second deployment control plane;
     # `dotmac-deployment-control` owns approval, and this repository consumes an
