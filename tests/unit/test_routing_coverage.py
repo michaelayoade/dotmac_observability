@@ -8,13 +8,17 @@ the first test here and fail every other one.
 
 from __future__ import annotations
 
+from typing import cast
+
+from dotmac_observability.render import _alertmanager, _route_config
 from dotmac_observability.validate import (
     load,
     load_private_inventory,
     resolution_findings,
     semantic_findings,
 )
-from tests.conftest import CONTRACTS, REFERENCE, edit, private_path
+from dotmac_observability.yaml_emit import YamlValue
+from tests.conftest import CONTRACTS, REFERENCE, REPO_ROOT, edit, private_path, resolved
 
 
 def _codes(root) -> set[str]:
@@ -114,3 +118,50 @@ def test_an_email_receiver_without_global_smtp_is_refused(reference_copy):
     text = path.read_text()
     path.write_text(text[: text.index("[smtp]")].rstrip() + "\n")
     assert "SMTP-UNCONFIGURED" in _codes(reference_copy)
+
+
+def test_warning_repeats_less_often_than_critical_and_the_dead_inhibition_is_gone():
+    """The 2026-09-13 emergency fix, codified: warning pages less often than
+    critical, and the inhibition rule that could never fire is gone.
+
+    Loads the ACTUAL repo root `routing/` config (not the synthetic reference
+    fixture under `tests/fixtures/reference/`) — the desired-state routing a
+    future promotion will render, not a claim about what the live host is
+    already running.
+    """
+    state = load(REPO_ROOT, contracts=CONTRACTS)
+
+    # The root fallback cadence is untouched.
+    assert state.defaults.repeat_interval == "1h"
+
+    rendered_root = _route_config(state)
+    assert rendered_root["repeat_interval"] == "1h"
+    rendered_children = cast("list[dict[str, YamlValue]]", rendered_root["routes"])
+
+    # Alertmanager is first-match-wins (absent `continue: true`), so checking
+    # only that SOME route matches each severity is not enough: an earlier,
+    # differently-configured shadowing route (a broader matcher, or an extra
+    # label pinned ahead of these two) would still let a "some route matches"
+    # check pass while live routing actually used the earlier route instead.
+    # Pinning the exact ordered two-route shape — and that neither carries
+    # `continue: true` — makes an inserted, reordered, or now-non-terminal
+    # route fail this test loudly instead of passing on a stale assumption.
+    assert len(rendered_children) == 2
+
+    critical_route, warning_route = rendered_children
+    assert critical_route["matchers"] == ['severity="critical"']
+    assert critical_route["repeat_interval"] == "1h"
+    assert "continue" not in critical_route
+
+    assert warning_route["matchers"] == ['severity="warning"']
+    assert warning_route["repeat_interval"] == "12h"
+    assert "continue" not in warning_route
+
+    # No desired-state inhibition rule remains.
+    assert state.inhibitions == ()
+
+    # The rendered Alertmanager config omits `inhibit_rules:` entirely rather
+    # than emitting an empty list — confirmed by reading `_alertmanager` in
+    # render.py, which only sets the key `if state.inhibitions:`.
+    rendered = _alertmanager(state, resolved(REFERENCE))
+    assert "inhibit_rules:" not in rendered

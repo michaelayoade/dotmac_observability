@@ -1,7 +1,11 @@
 # The root defaults and the ordered route tree.
 #
-# Measured against the live Alertmanager on 2026-08-30 and reproduced with one
-# DELIBERATE DELTA, marked below.
+# Measured against the live Alertmanager on 2026-08-30 and reproduced with two
+# DELIBERATE DELTAs, marked below: this is no longer a behaviour-preserving
+# transcription of that snapshot — the per-severity `repeat_interval` values
+# were changed directly on the live host on 2026-09-13 (an emergency fix, not
+# yet in git before this change) and are now codified here as the intended,
+# differentiated cadence rather than an incidental carry-over from the root.
 
 schema_version = "observability-routing.v2"
 kind = "policies"
@@ -14,17 +18,24 @@ group_wait = "10s"
 group_interval = "10s"
 repeat_interval = "1h"
 
-# DELIBERATE DELTA, and the only one in this document. The live configuration
-# has NO child routes at all: every alert falls through the root to `default`.
-# AGENTS.md rule 7 requires that each `warning` and `critical` class reach a
-# DECLARED receiver rather than a fall-through, because "the default catches
-# it" is indistinguishable from "nobody chose where this goes" — and the two
-# read identically right up until somebody changes the default.
+# DELTA 1: routing by severity rather than falling through. The live
+# configuration used to have NO child routes at all: every alert fell through
+# the root to `default`. AGENTS.md rule 7 requires that each `warning` and
+# `critical` class reach a DECLARED receiver rather than a fall-through,
+# because "the default catches it" is indistinguishable from "nobody chose
+# where this goes" — and the two read identically right up until somebody
+# changes the default.
 #
 # Both routes below deliver to the same receiver the fall-through already
-# reached, so this is BEHAVIOUR-PRESERVING: no alert changes destination. What
-# changes is that the destination is now written down per severity, which is
-# what a reviewer needs in order to disagree with it.
+# reached, so THIS PART is destination-preserving: no alert changes where it
+# is delivered.
+#
+# DELTA 2: differentiated `repeat_interval`. Critical stays at the root's
+# `1h` — a firing critical alert is expected to keep re-paging until it is
+# acknowledged or resolved. Warning is intentionally slower, at `12h`: a
+# firing warning restating itself hourly was paging noise rather than new
+# information, and the live cadence was changed to `12h` to fix that. This is
+# NOT behaviour-preserving — it is the deliberate point of this change.
 #
 # The two classes are the only ones the live rules emit: `alerts.yml` carries
 # 22 `severity: critical` and 30 `severity: warning`, and nothing else.
@@ -32,8 +43,10 @@ repeat_interval = "1h"
 id = "critical-to-oncall"
 matchers = ['severity="critical"']
 receiver = "default"
+repeat_interval = "1h"
 
 [[routes]]
 id = "warning-to-oncall"
 matchers = ['severity="warning"']
 receiver = "default"
+repeat_interval = "12h"
