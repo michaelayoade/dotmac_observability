@@ -1,21 +1,15 @@
 # Suppression rules.
 #
-# Measured against the live Alertmanager on 2026-08-30 and transcribed exactly,
-# including its `equal` list. No delta.
+# Measured against the live Alertmanager on 2026-08-30 and originally
+# transcribed exactly, including its `equal` list. That transcribed rule was
+# removed on 2026-09-13: it was structurally dead. Its `equal = ["alertname",
+# "instance"]` condition requires a matching critical/warning pair to share
+# the same `alertname`, and no pair of live rules ever does — that alone is
+# enough for the rule to never fire, so it suppressed nothing. There is
+# currently no live inhibition rule; this file keeps a schema-valid empty
+# collection rather than being deleted.
 
 schema_version = "observability-routing.v2"
 kind = "inhibition"
 
-[[rules]]
-id = "critical-suppresses-warning-for-the-same-alert-and-instance"
-source_matchers = ['severity="critical"']
-target_matchers = ['severity="warning"']
-equal = ["alertname", "instance"]
-rationale = """
-When the same alert on the same instance is already firing at critical, the \
-warning restating it is not independent information and doubles the page. \
-`equal` pins the suppression to that pair, so a warning about a DIFFERENT \
-alert or a different instance is never silenced by an unrelated critical — \
-which is the failure an inhibition without `equal` causes, and the reason the \
-contract refuses to let the field be omitted.
-"""
+rules = []

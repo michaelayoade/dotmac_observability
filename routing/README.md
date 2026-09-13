@@ -26,3 +26,18 @@ inhibition without it suppresses the target alert everywhere rather than only
 where the cause applies, which is the commonest way one outage silences an
 unrelated one. Pin it to the labels that make the two alerts the same
 incident.
+
+## Repeat intervals and the removed inhibition rule (2026-09-13)
+
+`policies.toml` gives `critical` and `warning` different `repeat_interval`
+values rather than sharing the root default: critical reminders repeat every
+hour (a firing critical alert should keep re-paging until it is acknowledged
+or resolved), and warning reminders repeat every 12 hours (hourly restatement
+of a still-firing warning was paging noise, not new information).
+
+`inhibition.toml` no longer declares any rule. The one it used to carry
+suppressed a warning alert only when a critical alert shared the same
+`alertname` — a condition no pair of live critical/warning rules ever
+satisfies, so the rule was structurally dead and never suppressed anything.
+It was removed rather than reworked; there is currently no live inhibition
+rule.
