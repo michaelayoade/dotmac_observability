@@ -39,6 +39,41 @@ repeat_interval = "1h"
 #
 # The two classes are the only ones the live rules emit: `alerts.yml` carries
 # 22 `severity: critical` and 30 `severity: warning`, and nothing else.
+#
+# DELTA 3 (2026-09-25): Sub billing/prepaid-collections alerts are delivered
+# as a digest. These alerts carry `domain` = `billing_health` or
+# `prepaid_enforcement` (federated from dotmac-sub). Several of them track
+# STANDING data backlogs — measured 2026-09-25: PrepaidCoverageQuarantinedEvidence
+# firing 710h of the last 720h, PrepaidRenewalTermsUnresolved 654h,
+# PrepaidFundingQuarantineActive 407h — so the severity routes below re-sent
+# each one to Telegram every 12h (warning) or 1h (critical) with no new
+# information. Critical billing alerts still page promptly (grouped per
+# alert, 4h repeat); every other billing alert is ONE grouped message per
+# domain, at most daily. Same receiver as before: this changes cadence and
+# grouping, never destination. These two routes MUST precede the severity
+# routes, because the first matching route wins.
+#
+# Applied to the live host by hand on 2026-09-25 (backup
+# ops/alertmanager.yml.pre-billing-digest-20260925T173922Z) before this
+# change; codified here so the host is not the only copy (AGENTS.md rule 2).
+[[routes]]
+id = "billing-critical-prompt"
+matchers = ['domain=~"billing_health|prepaid_enforcement"', 'severity="critical"']
+receiver = "default"
+group_by = ["domain", "alertname"]
+group_wait = "1m"
+group_interval = "15m"
+repeat_interval = "4h"
+
+[[routes]]
+id = "billing-digest-daily"
+matchers = ['domain=~"billing_health|prepaid_enforcement"']
+receiver = "default"
+group_by = ["domain"]
+group_wait = "5m"
+group_interval = "6h"
+repeat_interval = "24h"
+
 [[routes]]
 id = "critical-to-oncall"
 matchers = ['severity="critical"']
