@@ -143,12 +143,31 @@ def test_warning_repeats_less_often_than_critical_and_the_dead_inhibition_is_gon
     # differently-configured shadowing route (a broader matcher, or an extra
     # label pinned ahead of these two) would still let a "some route matches"
     # check pass while live routing actually used the earlier route instead.
-    # Pinning the exact ordered two-route shape — and that neither carries
+    # Pinning the exact ordered route shape — and that no route carries
     # `continue: true` — makes an inserted, reordered, or now-non-terminal
     # route fail this test loudly instead of passing on a stale assumption.
-    assert len(rendered_children) == 2
+    #
+    # Since 2026-09-25 (policies.toml DELTA 3) two Sub billing routes sit
+    # AHEAD of the severity routes. They must stay first: a billing alert also
+    # carries `severity`, so if they moved below the severity routes they
+    # would never match and billing would silently revert to the 12h/1h
+    # per-alert repeat.
+    assert len(rendered_children) == 4
 
-    critical_route, warning_route = rendered_children
+    billing_critical, billing_digest, critical_route, warning_route = rendered_children
+    billing_domains = 'domain=~"billing_health|prepaid_enforcement"'
+
+    assert billing_critical["matchers"] == [billing_domains, 'severity="critical"']
+    assert billing_critical["group_by"] == ["domain", "alertname"]
+    assert billing_critical["repeat_interval"] == "4h"
+    assert "continue" not in billing_critical
+
+    assert billing_digest["matchers"] == [billing_domains]
+    assert billing_digest["group_by"] == ["domain"]
+    assert billing_digest["group_interval"] == "6h"
+    assert billing_digest["repeat_interval"] == "24h"
+    assert "continue" not in billing_digest
+
     assert critical_route["matchers"] == ['severity="critical"']
     assert critical_route["repeat_interval"] == "1h"
     assert "continue" not in critical_route
